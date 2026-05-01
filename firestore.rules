@@ -1,0 +1,72 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: is the requester logged in?
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Helper: fetch the caller's role from Firestore
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isManager() {
+      return myRole() in ['shop_manager', 'production_manager'];
+    }
+
+    function canEditRO() {
+      return myRole() in ['shop_manager', 'production_manager', 'estimator'];
+    }
+
+    // ── Users collection ──────────────────────────────────────────────────────
+    match /users/{uid} {
+      // Anyone logged in can read user profiles (needed for name lookups)
+      allow read: if isAuth();
+      // Only managers can write user profiles
+      allow write: if isAuth() && isManager();
+      // Users can update their own profile (e.g. phone)
+      allow update: if isAuth() && request.auth.uid == uid;
+    }
+
+    // ── Repair Orders ─────────────────────────────────────────────────────────
+    match /ros/{roId} {
+      // All logged-in employees can read ROs
+      allow read: if isAuth();
+      // Only estimators / managers can create new ROs
+      allow create: if isAuth() && canEditRO();
+      // Managers & estimators can update; body/painter can update status only
+      allow update: if isAuth() && (
+        canEditRO() ||
+        // Body techs & painters can update status + notes only
+        (myRole() in ['body_man', 'painter', 'paint_helper', 'parts_manager'] &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'partsStatus', 'notes', 'updatedAt']))
+      );
+      allow delete: if isAuth() && isManager();
+    }
+
+    // ── Tasks ─────────────────────────────────────────────────────────────────
+    match /tasks/{taskId} {
+      allow read: if isAuth();
+      // Only managers can create tasks
+      allow create: if isAuth() && isManager();
+      // Managers can update anything; assignees can update status only
+      allow update: if isAuth() && (
+        isManager() ||
+        (request.auth.uid == resource.data.assignedTo &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'completedAt', 'updatedAt']))
+      );
+      allow delete: if isAuth() && isManager();
+    }
+
+    // ── Settings (AI key, mappings) ───────────────────────────────────────────
+    match /settings/{docId} {
+      // Only managers can read/write settings (API key storage etc.)
+      allow read, write: if isAuth() && isManager();
+    }
+  }
+}

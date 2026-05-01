@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "AutoBody Board – CCC Sync",
+  "version": "1.1.0",
+  "description": "Sync CCC Production Board & import DingTalk meeting notes to AutoBody Board",
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon":  "icons/icon48.png",
+    "default_title": "AutoBody Board"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://estimate.cccone.com/*"],
+      "js":      ["content.js"],
+      "run_at":  "document_idle"
+    },
+    {
+      "matches": ["https://shanji.dingtalk.com/*"],
+      "js":      ["dingtalk_content.js"],
+      "run_at":  "document_idle"
+    },
+    {
+      "matches": [
+        "http://localhost:*/*",
+        "https://*.web.app/*",
+        "https://*.firebaseapp.com/*"
+      ],
+      "js":      ["meeting_bridge.js"],
+      "run_at":  "document_idle"
+    }
+  ],
+  "permissions": ["activeTab", "scripting", "storage", "clipboardWrite", "tabs"],
+  "host_permissions": [
+    "https://estimate.cccone.com/*",
+    "https://shanji.dingtalk.com/*",
+    "https://*.dingtalk.com/*",
+    "https://*.dingtalkapps.com/*",
+    "https://*.alicdn.com/*",
+    "https://*.aliyuncs.com/*",
+    "http://localhost:*/*",
+    "https://*.web.app/*",
+    "https://*.firebaseapp.com/*",
+    "https://identitytoolkit.googleapis.com/*",
+    "https://firestore.googleapis.com/*"
+  ]
+}
