@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore'
+import { doc, getDoc } from 'firebase/firestore'
 import { auth, db } from '../firebase/config'
 
 const AuthContext = createContext(null)
@@ -14,22 +14,24 @@ export function AuthProvider({ children }) {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         setUser(firebaseUser)
-        // Fetch role + profile from Firestore
-        const ref  = doc(db, 'users', firebaseUser.uid)
-        const snap = await getDoc(ref)
-        if (snap.exists()) {
-          setUserProfile(snap.data())
-        } else {
-          // First login — auto-create a default profile so they appear in Team Management
-          const defaultProfile = {
-            name:      firebaseUser.displayName || firebaseUser.email.split('@')[0],
-            email:     firebaseUser.email.toLowerCase(),
-            role:      'body_man',   // manager can change this via Team page
-            active:    true,
-            createdAt: serverTimestamp(),
+        try {
+          const ref  = doc(db, 'users', firebaseUser.uid)
+          const snap = await getDoc(ref)
+          if (snap.exists()) {
+            setUserProfile(snap.data())
+          } else {
+            setUserProfile({
+              email: firebaseUser.email?.toLowerCase() ?? '',
+              active: false,
+              missingProfile: true,
+            })
           }
-          await setDoc(ref, defaultProfile)
-          setUserProfile(defaultProfile)
+        } catch (err) {
+          setUserProfile({
+            email: firebaseUser.email?.toLowerCase() ?? '',
+            active: false,
+            profileError: err.message,
+          })
         }
       } else {
         setUser(null)
@@ -50,6 +52,7 @@ export function AuthProvider({ children }) {
     userProfile,
     role: userProfile?.role ?? null,
     displayName: userProfile?.name ?? user?.email ?? '',
+    isActive: Boolean(user && userProfile && userProfile.active !== false && !userProfile.missingProfile),
     loading,
     login,
     logout,

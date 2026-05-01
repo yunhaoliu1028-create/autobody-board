@@ -92,7 +92,11 @@ function NewChatModal({ myUid, allUsers, onClose, onOpenConvo }) {
       if (!groupMode && selected.length === 1) {
         // DM — find or create
         const key = dmKey(myUid, selected[0].uid)
-        const q   = query(collection(db, 'conversations'), where('dmKey', '==', key))
+        const q   = query(
+          collection(db, 'conversations'),
+          where('members', 'array-contains', myUid),
+          where('dmKey', '==', key),
+        )
         const snap = await getDocs(q)
         if (!snap.empty) {
           onOpenConvo({ id: snap.docs[0].id, ...snap.docs[0].data() })

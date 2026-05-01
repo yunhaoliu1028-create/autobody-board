@@ -1,9 +1,24 @@
 rules_version = '2';
+
 service firebase.storage {
   match /b/{bucket}/o {
-    // Allow authenticated users to read/write RO attachments
+    function isActive() {
+      return request.auth != null
+        && firestore.exists(/databases/(default)/documents/users/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.active != false;
+    }
+
+    function roExists(roId) {
+      return firestore.exists(/databases/(default)/documents/ros/$(roId));
+    }
+
     match /ros/{roId}/attachments/{filename} {
-      allow read, write: if request.auth != null;
+      allow read: if isActive() && roExists(roId);
+      allow create, update: if isActive()
+        && roExists(roId)
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+      allow delete: if isActive() && roExists(roId);
     }
   }
 }
