@@ -84,7 +84,6 @@ export default function Admin() {
   }
 
   const sendReset = async (email) => {
-    if (!email) return
     await sendPasswordResetEmail(auth, email)
     setSuccess(`Password reset email sent to ${email}`)
   }
@@ -186,7 +185,7 @@ export default function Admin() {
             <tr className="bg-gray-50 border-b border-gray-200 text-xs text-gray-500 uppercase tracking-wider">
               <th className="px-4 py-3 text-left">Name</th>
               <th className="px-4 py-3 text-left">Role</th>
-              <th className="px-4 py-3 text-left">Contact</th>
+              <th className="px-4 py-3 text-left">Email</th>
               <th className="px-4 py-3 text-left">Status</th>
               <th className="px-4 py-3 text-right">Actions</th>
             </tr>
@@ -211,7 +210,7 @@ export default function Admin() {
                     ))}
                   </select>
                 </td>
-                <td className="px-4 py-3 text-gray-500 text-xs">{emp.email || emp.phone || '—'}</td>
+                <td className="px-4 py-3 text-gray-500 text-xs">{emp.email}</td>
                 <td className="px-4 py-3">
                   <span className={`text-xs px-2 py-0.5 rounded-full font-medium
                     ${emp.active !== false ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
@@ -219,14 +218,12 @@ export default function Admin() {
                   </span>
                 </td>
                 <td className="px-4 py-3 text-right flex justify-end gap-2">
-                  {emp.email && (
-                    <button
-                      onClick={() => sendReset(emp.email)}
-                      className="text-xs text-blue-600 hover:text-blue-800"
-                    >
-                      Reset Password
-                    </button>
-                  )}
+                  <button
+                    onClick={() => sendReset(emp.email)}
+                    className="text-xs text-blue-600 hover:text-blue-800"
+                  >
+                    Reset Password
+                  </button>
                   <button
                     onClick={() => toggleActive(emp.uid, emp.active !== false)}
                     className="text-xs text-gray-500 hover:text-gray-800"

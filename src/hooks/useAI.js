@@ -77,15 +77,6 @@ export async function deleteAssistantMemory(fact) {
 
 export function clearMemoryCache() { _cachedMemory = null }
 
-export async function getAIMappings() {
-  const snap = await getDoc(doc(db, 'settings', 'ai'))
-  const data = snap.data() ?? {}
-  return {
-    nameMap: data.nameMap ?? '',
-    vendorMap: data.vendorMap ?? '',
-  }
-}
-
 // ── Whisper transcription ─────────────────────────────────────────────────────
 // audioBlob: Blob from MediaRecorder (audio/webm or audio/mp4)
 // Returns the transcript string
@@ -313,10 +304,7 @@ Always return valid JSON:
 
 ─── ACTIONS (when asked to act on ROs) ──────────────────────────
 {"type":"add_note","roNumber":"9448","note":"English text","confidence":"high"}
-{"type":"assign_body_man","roNumber":"9448","assigneeName":"Israel","confidence":"high"}
 {"type":"assign_task","roNumber":"9448","assigneeName":"David","title":"English title","description":"","priority":"high","confidence":"high"}
-Use assign_body_man (not assign_task) when the user wants to set who the body technician is on an RO — this updates the RO record directly.
-Use assign_task for all other work tasks/to-dos.
 All note/title text MUST be English.
 
 ─── MEMORY ──────────────────────────────────────────────────────
@@ -383,18 +371,10 @@ ${roContext || '(none)'}`
 }
 
 // ── General Input Box parser ──────────────────────────────────────────────────
-export async function parseShopInput({ text, ros, employees, images = [], nameMap = '', vendorMap = '' }) {
+export async function parseShopInput({ text, ros, employees, images = [] }) {
   const today   = new Date().toISOString().split('T')[0]
   const roList  = ros.map(r => `RO${r.roNumber}: ${r.vehicle} (${r.customerName}), status: ${r.status}`).join('\n')
   const empList = employees.map(e => `${e.name} (${e.role})`).join(', ')
-  const nameMappings = parseMappingText(nameMap)
-  const nameMappingStr = Object.entries(nameMappings)
-    .map(([k, v]) => `  "${k}" -> ${v}`)
-    .join('\n')
-  const vendorMappings = parseMappingText(vendorMap)
-  const vendorMappingStr = Object.entries(vendorMappings)
-    .map(([k, v]) => `  "${k}" -> ${v}`)
-    .join('\n')
   const memory  = await loadAssistantMemory()
   const memBlock = memory.length
     ? `\nSHOP MEMORY (learned facts — apply these when parsing):\n${memory.map(f => `- ${f}`).join('\n')}\n`
@@ -409,24 +389,14 @@ Today's date: ${today}
 Active ROs in system:
 ${roList || '(none yet)'}
 
-Employees (role reference only; do not use this list for assign_task name matching):
-${empList || '(none listed)'}
-
-Employee name mapping from Settings:
-${nameMappingStr || '(none configured)'}
-
-Sublet vendor mapping from Settings:
-${vendorMappingStr || '(none configured)'}
+Employees: ${empList || '(none listed)'}
 ${SHOP_GLOSSARY}
 ${memBlock}
 
 RULES:
 - ALL output (notes, task titles, descriptions) MUST be written in English, regardless of the input language. The user may speak/type in Chinese, Spanish, or mixed — always produce English output.
 - Match RO numbers flexibly: "9448", "RO9448", "#9448" all work
-- For assign_task assignees, ONLY resolve names through Employee name mapping from Settings. Do not match RO customer names, insurance names, vehicle owners, or arbitrary partial names.
-- If a requested task assignee is not found in Employee name mapping, set needsClarification and do not guess a customer or another person.
-- If the user assigns a sublet/sublet vendor task, assign the task to the Production Manager by default. Put the sublet vendor name from Sublet vendor mapping in the title or description when one is mentioned.
-- For sublet vendors, ONLY resolve vendor names through Sublet vendor mapping from Settings. If no vendor mapping matches, keep the vendor wording in the task title/description but still assign the task to the Production Manager.
+- For assignees, match partial names (e.g. "David" → the employee named David)
 - When a user updates ETA / completion date AND mentions calling the customer, create BOTH update_due_date AND an add_note saying who called and what was communicated
 - Write notes in professional, concise third-person shop format (not casual)
 - Dates without year: assume current year (${today.split('-')[0]}). Format as YYYY-MM-DD.

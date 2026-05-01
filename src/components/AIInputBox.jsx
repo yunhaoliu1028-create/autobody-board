@@ -1,30 +1,12 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { doc, updateDoc, addDoc, collection, serverTimestamp, arrayUnion } from 'firebase/firestore'
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
-import { parseShopInput, getApiKey, getAIMappings, transcribeWithWhisper } from '../hooks/useAI'
-import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP, ROLES } from '../constants/roles'
-import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
-
-function dueDateToPriority(ro) {
-  const dateStr = ro.cccDateOut || ro.promisedDate
-  if (!dateStr) return 'low'
-  try {
-    const due = parseISO(dateStr)
-    if (!isValid(due)) return 'low'
-    const days = differenceInCalendarDays(due, new Date())
-    if (days <= 2) return 'high'
-    if (days <= 7) return 'medium'
-    return 'low'
-  } catch { return 'low' }
-}
-
-function appendNoteToFields(entry, roDoc, line) {
-  const prev = entry.fields.notes ?? roDoc.notes ?? ''
-  entry.fields.notes = `${line}\n${prev}`
-}
+import { parseShopInput, getApiKey, transcribeWithWhisper } from '../hooks/useAI'
+import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
+import { format } from 'date-fns'
 
 // ── Photo-type keyword detection (no AI needed) ───────────────────────────────
 const PHOTO_TYPES = [
@@ -54,180 +36,6 @@ function extractRoNumber(text, ros) {
     if (ros.find(r => r.roNumber === m[1])) return m[1]
   }
   return null
-}
-
-function normalizeName(value = '') {
-  return value.trim().replace(/^@+/, '').toLowerCase().replace(/\s+/g, ' ')
-}
-
-const GIB_HISTORY_KEY = 'autobody_gib_input_history'
-const GIB_HISTORY_LIMIT = 20
-
-function parseMappingText(raw = '') {
-  return raw.split('\n').reduce((map, line) => {
-    const idx = line.indexOf('=')
-    if (idx < 0) return map
-    const key = normalizeName(line.slice(0, idx))
-    const val = line.slice(idx + 1).trim()
-    if (key && val) map[key] = val
-    return map
-  }, {})
-}
-
-function findProductionManager(employees) {
-  return employees.find(e => e.role === ROLES.PRODUCTION_MANAGER)
-    || employees.find(e => normalizeName(e.role).includes('production') && normalizeName(e.role).includes('manager'))
-}
-
-function isSubletTask(action, originalText = '', actionCount = 1) {
-  const haystack = [
-    actionCount === 1 ? originalText : '',
-    action.assigneeName,
-    action.title,
-    action.description,
-  ].filter(Boolean).join(' ').toLowerCase()
-
-  return /\b(sublet|subl|vendor|glass|frame|alignment|calibration|upholstery)\b/.test(haystack)
-}
-
-function resolveMappedEmployeeName(inputName, nameMap) {
-  const mappings = parseMappingText(nameMap)
-  const wanted = normalizeName(inputName)
-  if (!wanted) return null
-
-  if (mappings[wanted]) return mappings[wanted]
-
-  const matched = Object.values(mappings).find(fullName => normalizeName(fullName) === wanted)
-  return matched ?? null
-}
-
-function resolveEmployeeByName(inputName, employees) {
-  const wanted = normalizeName(inputName)
-  if (!wanted) return null
-
-  const activeEmployees = employees.filter(e => e?.name && e.active !== false && e.status !== 'inactive')
-  return activeEmployees.find(e => normalizeName(e.name) === wanted)
-    || activeEmployees.find(e => normalizeName(e.name).includes(wanted))
-    || activeEmployees.find(e => wanted.includes(normalizeName(e.name)))
-    || null
-}
-
-function sanitizeParsedResult(parsed, { text, employees, nameMap, vendorMap }) {
-  if (!parsed?.actions?.length) return parsed
-
-  const productionManager = findProductionManager(employees)
-  const vendorMappings = parseMappingText(vendorMap)
-  const notes = []
-
-  const actionCount = parsed.actions.length
-  const actions = parsed.actions.flatMap(action => {
-    if (action.type !== 'assign_task') return [action]
-
-    if (isSubletTask(action, text, actionCount)) {
-      if (!productionManager) {
-        notes.push('Sublet task found, but no Production Manager user exists. Please assign it manually.')
-        return []
-      }
-
-      const vendor = Object.entries(vendorMappings).find(([alias, fullName]) => {
-        const lower = text.toLowerCase()
-        return lower.includes(alias) || lower.includes(fullName.toLowerCase())
-      })?.[1]
-
-      return [{
-        ...action,
-        assigneeName: productionManager.name,
-        title: action.title?.toLowerCase().includes('sublet') ? action.title : `Sublet: ${action.title}`,
-        description: vendor
-          ? [action.description, `Vendor: ${vendor}`].filter(Boolean).join('\n')
-          : action.description,
-      }]
-    }
-
-    const mappedName = resolveMappedEmployeeName(action.assigneeName, nameMap)
-    if (!mappedName) {
-      notes.push(`No employee mapping found for "${action.assigneeName}". Add it in Settings > Employee Name Mappings, then try again.`)
-      return []
-    }
-
-    return [{ ...action, assigneeName: mappedName }]
-  })
-
-  return {
-    ...parsed,
-    actions,
-    needsClarification: [parsed.needsClarification, ...notes].filter(Boolean).join(' ' ) || null,
-  }
-}
-
-function loadInputHistory() {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = window.localStorage.getItem(GIB_HISTORY_KEY)
-    const parsed = JSON.parse(raw || '[]')
-    return Array.isArray(parsed) ? parsed.filter(item => item?.text).slice(0, GIB_HISTORY_LIMIT) : []
-  } catch {
-    return []
-  }
-}
-
-function saveInputHistoryEntry(entry) {
-  if (typeof window === 'undefined') return []
-  const value = entry.text?.trim()
-  if (!value) return loadInputHistory()
-
-  const next = [
-    { text: value, at: new Date().toISOString() },
-    ...loadInputHistory().filter(item => item.text.trim() !== value),
-  ].slice(0, GIB_HISTORY_LIMIT)
-
-  try {
-    window.localStorage.setItem(GIB_HISTORY_KEY, JSON.stringify(next))
-  } catch { /* ignore localStorage quota/privacy errors */ }
-  return next
-}
-
-function clearInputHistory() {
-  if (typeof window === 'undefined') return []
-  try { window.localStorage.removeItem(GIB_HISTORY_KEY) } catch { /* ignore */ }
-  return []
-}
-
-function formatHistoryTime(dateStr) {
-  const date = new Date(dateStr)
-  if (Number.isNaN(date.getTime())) return ''
-  return format(date, 'MM/dd HH:mm')
-}
-
-function getMentionQuery(value, cursorPos) {
-  const beforeCursor = value.slice(0, cursorPos)
-  const match = beforeCursor.match(/(^|\s)@([a-zA-Z]*)$/)
-  if (!match) return null
-
-  return {
-    query: match[2].toLowerCase(),
-    start: beforeCursor.length - match[2].length - 1,
-    end: cursorPos,
-  }
-}
-
-function employeeMentionMatches(employees, query) {
-  const q = query.toLowerCase()
-  return employees
-    .filter(emp => emp?.name?.trim())
-    .filter(emp => emp.active !== false && emp.status !== 'inactive')
-    .filter(emp => {
-      const name = emp.name.trim()
-      const parts = name.toLowerCase().split(/\s+/).filter(Boolean)
-      const full = parts.join(' ')
-      const initials = parts.map(part => part[0]).join('')
-
-      return !q
-        || full.includes(q)
-        || initials.startsWith(q)
-        || parts.some(part => part.startsWith(q))
-    })
-    .slice(0, 6)
 }
 
 const ACTION_LABELS = {
@@ -562,14 +370,6 @@ function IconImage({ cls = 'w-4 h-4' }) {
     </svg>
   )
 }
-function IconHistory({ cls = 'w-4 h-4' }) {
-  return (
-    <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3 12a9 9 0 1 0 3-6.7" />
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3 4v5h5M12 7v5l3 2" />
-    </svg>
-  )
-}
 function IconX2() {
   return <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path strokeLinecap="round" d="M6 18L18 6M6 6l12 12"/></svg>
 }
@@ -587,7 +387,6 @@ export default function AIInputBox({ ros = [], employees = [] }) {
   const [error,       setError]       = useState('')
   const [applying,    setApplying]    = useState(false)
   const [applied,     setApplied]     = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
   const [noKey,       setNoKey]       = useState(false)
   const [listening,   setListening]   = useState(false)
   const [images,          setImages]          = useState([])
@@ -597,15 +396,9 @@ export default function AIInputBox({ ros = [], employees = [] }) {
   const [isTranscribing,  setIsTranscribing]  = useState(false)  // Whisper processing
   const [recordSecs,      setRecordSecs]      = useState(0)      // elapsed recording seconds
   const [audioLevel,      setAudioLevel]      = useState(0)      // 0-1 for bar heights
-  const [aiMappings,      setAIMappings]      = useState({ nameMap: '', vendorMap: '' })
-  const [historyOpen,     setHistoryOpen]     = useState(false)
-  const [inputHistory,    setInputHistory]    = useState(() => loadInputHistory())
-  const [mention,         setMention]         = useState(null)
-  const [mentionIndex,    setMentionIndex]    = useState(0)
 
   const fileInputRef      = useRef(null)   // gallery picker
   const cameraRef         = useRef(null)   // camera capture
-  const textareaRef       = useRef(null)
   const submittedText     = useRef('')     // text that produced the current AI result
   const reparseTimer      = useRef(null)
   // Whisper voice refs
@@ -621,47 +414,6 @@ export default function AIInputBox({ ros = [], employees = [] }) {
     if (result?.actions) setActions(result.actions)
   }, [result])
 
-  useEffect(() => {
-    getAIMappings()
-      .then(setAIMappings)
-      .catch(() => setAIMappings({ nameMap: '', vendorMap: '' }))
-  }, [])
-
-  const rememberInput = (value) => {
-    const saved = saveInputHistoryEntry({ text: value })
-    setInputHistory(saved)
-  }
-
-  const restoreHistoryInput = (value) => {
-    setText(value)
-    setHistoryOpen(false)
-    setError('')
-  }
-
-  const mentionOptions = useMemo(() => {
-    if (!mention) return []
-    return employeeMentionMatches(employees, mention.query)
-  }, [employees, mention])
-
-  const refreshMention = (value, cursorPos) => {
-    const next = getMentionQuery(value, cursorPos)
-    setMention(next)
-    setMentionIndex(0)
-  }
-
-  const insertMention = (employee) => {
-    if (!employee || !mention) return
-    const nextText = `${text.slice(0, mention.start)}@${employee.name} ${text.slice(mention.end)}`
-    const cursor = mention.start + employee.name.length + 2
-    setText(nextText)
-    setMention(null)
-    setMentionIndex(0)
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus()
-      textareaRef.current?.setSelectionRange(cursor, cursor)
-    })
-  }
-
   // ── Auto re-parse when textarea changes after AI result is shown ─────────
   // Debounce 1.2s — silently refresh action cards without full spinner
   useEffect(() => {
@@ -675,11 +427,9 @@ export default function AIInputBox({ ros = [], employees = [] }) {
         setReparse(true)
         const key = await getApiKey()
         if (!key) return
-        const mappings = await getAIMappings().catch(() => aiMappings)
-        setAIMappings(mappings)
-        const parsed = await parseShopInput({ text, ros, employees, images: [], ...mappings })
+        const parsed = await parseShopInput({ text, ros, employees, images: [] })
         if (!parsed.raw) {
-          setResult(sanitizeParsedResult(parsed, { text, employees, ...mappings }))
+          setResult(parsed)
           submittedText.current = text
         }
       } catch { /* silent — user can re-submit manually */ }
@@ -902,7 +652,6 @@ export default function AIInputBox({ ros = [], employees = [] }) {
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!text.trim() && images.length === 0) return
-    if (text.trim()) rememberInput(text)
 
     // Images present → bypass AI entirely: regex RO# + auto-label + upload
     if (images.length > 0) {
@@ -915,11 +664,9 @@ export default function AIInputBox({ ros = [], employees = [] }) {
     try {
       const key = await getApiKey()
       if (!key) { setNoKey(true); setLoading(false); return }
-      const mappings = await getAIMappings().catch(() => aiMappings)
-      setAIMappings(mappings)
-      const parsed = await parseShopInput({ text, ros, employees, images: [], ...mappings })
+      const parsed = await parseShopInput({ text, ros, employees, images: [] })
       if (parsed.raw) throw new Error('AI returned unexpected format. Please rephrase.')
-      setResult(sanitizeParsedResult(parsed, { text, employees, ...mappings }))
+      setResult(parsed)
       submittedText.current = text
     } catch (err) {
       if (err.message === 'NO_API_KEY')  { setNoKey(true); return }
@@ -957,8 +704,12 @@ export default function AIInputBox({ ros = [], employees = [] }) {
 
       switch (action.type) {
         case 'add_note': {
+          const prev = roDoc.notes ?? ''
           const line = `[${stamp} - ${author}] ${action.note}`
-          appendNoteToFields(entry, roDoc, line)
+          // Merge multiple notes if >1 action on same RO
+          entry.fields.notes = entry.fields.notes
+            ? `${line}\n${entry.fields.notes}`
+            : `${line}\n${prev}`
           break
         }
         case 'update_status':
@@ -985,36 +736,17 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           entry.fields.hasRental = action.hasRental
           entry.changeLogEntries.push({ type: 'update_rental', value: String(action.hasRental), by: author, at: now, source: 'gib' })
           break
-        case 'assign_body_man': {
-          const assignee = resolveEmployeeByName(action.assigneeName, employees)
-          if (assignee) entry.fields.assignedBodyMan = assignee.uid
-          break
-        }
         case 'assign_task': {
-          const assignee = resolveEmployeeByName(action.assigneeName, employees)
-          if (!assignee) {
-            throw new Error(`Could not match task assignee "${action.assigneeName}" to an active employee.`)
-          }
-          const assigneeLabel = assignee?.name ?? action.assigneeName ?? 'Unassigned'
-          // If title mentions body man, also set assignedBodyMan on the RO
-          const titleLower = (action.title ?? '').toLowerCase()
-          if (assignee && (titleLower.includes('body man') || titleLower.includes('body tech'))) {
-            entry.fields.assignedBodyMan = assignee.uid
-          }
-          const roDueDate = roDoc.cccDateOut || roDoc.promisedDate || null
+          const assignee = employees.find(e =>
+            e.name.toLowerCase().includes(action.assigneeName?.toLowerCase() ?? '')
+          )
           entry.taskPromises.push(addDoc(collection(db, 'tasks'), {
             roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
-            assignedTo: assignee.uid,
-            assignedToName: assignee.name,
-            assignedBy: user.uid,
-            assignedByName: author,
+            assignedTo: assignee?.uid ?? '', assignedBy: user.uid,
             title: action.title, description: action.description ?? '',
-            priority: dueDateToPriority(roDoc),  // auto from due date
-            dueDate: roDueDate,
-            status: 'pending',
+            priority: action.priority ?? 'medium', status: 'pending',
             createdAt: serverTimestamp(),
           }))
-          appendNoteToFields(entry, roDoc, `[${stamp} - ${author}] Assigned task to ${assigneeLabel}: ${action.title}`)
           break
         }
       }
@@ -1042,10 +774,9 @@ export default function AIInputBox({ ros = [], employees = [] }) {
       }
 
       setApplied(true)
-      setActions([])    // clear immediately so panel can't re-appear or be re-submitted
       setText('')
       setImages([])
-      setTimeout(() => { setResult(null); setApplied(false) }, 2000)
+      setTimeout(() => { setResult(null); setApplied(false) }, 2500)
     } catch (err) {
       console.error('[handleApply]', err)
       setError('Apply failed: ' + err.message)
@@ -1074,62 +805,13 @@ export default function AIInputBox({ ros = [], employees = [] }) {
     <div className="bg-white dark:bg-zinc-900 rounded-2xl border-2 border-blue-200 dark:border-blue-800 shadow-sm p-5 mb-5">
 
       {/* Header */}
-      <div className="relative flex items-center gap-3 mb-4">
-        <div className="min-w-0">
+      <div className="flex items-center gap-3 mb-4">
+        <span className="text-2xl sm:text-xl leading-none">🤖</span>
+        <div>
           <h2 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight">Quick Update</h2>
           <p className="text-xs text-gray-400 dark:text-zinc-500">
             {images.length > 0 ? '📷 Photos ready — tap Submit to upload' : 'type or speak — AI will parse & apply'}
           </p>
-        </div>
-        <div className="ml-auto relative">
-          <button
-            type="button"
-            onClick={() => setHistoryOpen(v => !v)}
-            className={`flex items-center justify-center w-9 h-9 rounded-lg border transition-colors ${
-              historyOpen
-                ? 'border-blue-300 bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:border-blue-800 dark:text-blue-300'
-                : 'border-gray-200 bg-white text-gray-500 hover:border-blue-300 hover:text-blue-600 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-blue-300'
-            }`}
-            title="Input history"
-            aria-label="Input history"
-          >
-            <IconHistory />
-          </button>
-
-          {historyOpen && (
-            <div className="absolute right-0 top-11 z-20 w-[min(88vw,24rem)] max-h-80 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl dark:bg-zinc-900 dark:border-zinc-700">
-              <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-zinc-800">
-                <span className="text-xs font-semibold text-gray-600 dark:text-zinc-300 uppercase tracking-wide">Input History</span>
-                {inputHistory.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setInputHistory(clearInputHistory())}
-                    className="text-xs text-gray-400 hover:text-red-500"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-
-              {inputHistory.length === 0 ? (
-                <div className="px-3 py-6 text-sm text-gray-400 text-center dark:text-zinc-500">No saved inputs yet</div>
-              ) : (
-                <div className="max-h-64 overflow-y-auto">
-                  {inputHistory.map((item, idx) => (
-                    <button
-                      key={`${item.at}-${idx}`}
-                      type="button"
-                      onClick={() => restoreHistoryInput(item.text)}
-                      className="block w-full text-left px-3 py-2.5 border-b border-gray-50 hover:bg-blue-50/70 dark:border-zinc-800 dark:hover:bg-zinc-800"
-                    >
-                      <div className="text-[11px] text-gray-400 dark:text-zinc-500 mb-1">{formatHistoryTime(item.at)}</div>
-                      <div className="text-sm text-gray-700 dark:text-zinc-200 line-clamp-3 whitespace-pre-wrap break-words">{item.text}</div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
 
@@ -1153,92 +835,22 @@ export default function AIInputBox({ ros = [], employees = [] }) {
 
       <form onSubmit={handleSubmit}>
         {/* ── Textarea ─────────────────────────────────────────────────── */}
-        <div className="relative mb-3">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={e => {
-              setText(e.target.value)
-              refreshMention(e.target.value, e.target.selectionStart)
-            }}
-            onClick={e => refreshMention(e.currentTarget.value, e.currentTarget.selectionStart)}
-            onKeyUp={e => {
-              if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
-                refreshMention(e.currentTarget.value, e.currentTarget.selectionStart)
-              }
-            }}
-            onBlur={() => setTimeout(() => setMention(null), 120)}
-            onKeyDown={e => {
-              if (mention && mentionOptions.length > 0) {
-                if (e.key === 'ArrowDown') {
-                  e.preventDefault()
-                  setMentionIndex(idx => (idx + 1) % mentionOptions.length)
-                  return
-                }
-                if (e.key === 'ArrowUp') {
-                  e.preventDefault()
-                  setMentionIndex(idx => (idx - 1 + mentionOptions.length) % mentionOptions.length)
-                  return
-                }
-                if (e.key === 'Enter' || e.key === 'Tab') {
-                  e.preventDefault()
-                  insertMention(mentionOptions[mentionIndex])
-                  return
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault()
-                  setMention(null)
-                  return
-                }
-              }
-
-              if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
-                e.preventDefault()
-                if (canSubmit) handleSubmit(e)
-              }
-            }}
-            placeholder={images.length > 0
-              ? 'RO number + photo type, e.g. "9556 check-in" or "9556 in progress photos"'
-              : 'e.g. "RO9448 @Israel Ramirez repair quarter panel"'}
-            rows={4}
-            className="w-full px-4 py-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-[15px] sm:text-sm leading-relaxed bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800 resize-none transition-colors"
-            disabled={loading || applying}
-          />
-
-          {mention && (
-            <div className="absolute left-3 top-12 z-30 w-[min(92vw,22rem)] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
-              {mentionOptions.length === 0 ? (
-                <div className="px-3 py-3 text-sm text-gray-400 dark:text-zinc-500">
-                  No employee matches @{mention.query}
-                </div>
-              ) : (
-                mentionOptions.map((emp, idx) => (
-                  <button
-                    key={emp.uid || emp.name}
-                    type="button"
-                    onMouseDown={e => {
-                      e.preventDefault()
-                      insertMention(emp)
-                    }}
-                    onMouseEnter={() => setMentionIndex(idx)}
-                    className={`flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors ${
-                      idx === mentionIndex
-                        ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-200'
-                        : 'text-gray-700 hover:bg-gray-50 dark:text-zinc-200 dark:hover:bg-zinc-800'
-                    }`}
-                  >
-                    <span className="min-w-0 truncate text-sm font-semibold">@{emp.name}</span>
-                    {idx === mentionIndex && (
-                      <span className="shrink-0 rounded-md bg-white px-1.5 py-0.5 text-[10px] font-semibold text-gray-400 shadow-sm dark:bg-zinc-800">
-                        Enter
-                      </span>
-                    )}
-                  </button>
-                ))
-              )}
-            </div>
-          )}
-        </div>
+        <textarea
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
+              e.preventDefault()
+              if (canSubmit) handleSubmit(e)
+            }
+          }}
+          placeholder={images.length > 0
+            ? 'RO number + photo type, e.g. "9556 check-in" or "9556 in progress photos"'
+            : 'e.g. "RO9448 dropped off 4-25, w/o rental, ordered parts thru PT eta 4-29"'}
+          rows={4}
+          className="w-full px-4 py-3 mb-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-[15px] sm:text-sm leading-relaxed bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800 resize-none transition-colors"
+          disabled={loading || applying}
+        />
 
         {/* ── Mobile button layout ──────────────────────────────────────── */}
         <div className="sm:hidden space-y-2.5">

@@ -2,13 +2,12 @@ import { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
   doc, onSnapshot, collection, addDoc, updateDoc, serverTimestamp,
-  query, where, arrayUnion,
+  query, where, orderBy, arrayUnion,
 } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { StatusBadge, PartsStatusBadge, CCCFieldLabel } from '../components/StatusBadge'
-import HighlightedNote from '../components/HighlightedNote'
 import {
   RO_STATUSES, PARTS_STATUSES, MANAGER_ROLES, EDIT_RO_ROLES,
 } from '../constants/roles'
@@ -55,13 +54,6 @@ function dueDateClass(dateStr) {
   } catch { return '' }
 }
 
-function taskCreatedMillis(task) {
-  const value = task.createdAt
-  if (value?.toMillis) return value.toMillis()
-  if (value?.seconds) return value.seconds * 1000
-  return 0
-}
-
 // ── Tiny field display ────────────────────────────────────────────────────────
 function Field({ label, value, mono = false, className = '' }) {
   return (
@@ -89,7 +81,7 @@ function Section({ title, children, className = '' }) {
 }
 
 // ── Task list ─────────────────────────────────────────────────────────────────
-function TaskList({ ro, employees }) {
+function TaskList({ roId, employees }) {
   const { role, user } = useAuth()
   const isManager = MANAGER_ROLES.includes(role)
   const [tasks,    setTasks]    = useState([])
@@ -101,44 +93,29 @@ function TaskList({ ro, employees }) {
   const [saving,   setSaving]   = useState(false)
 
   useEffect(() => {
-    const roId = ro?.id
-    if (!roId) return
     const q = query(
       collection(db, 'tasks'),
       where('roId', '==', roId),
+      orderBy('createdAt', 'desc'),
     )
     return onSnapshot(q, snap => {
-      setTasks(snap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => taskCreatedMillis(b) - taskCreatedMillis(a))
-      )
+      setTasks(snap.docs.map(d => ({ id: d.id, ...d.data() })))
     })
-  }, [ro?.id])
+  }, [roId])
 
   const handleAddTask = async (e) => {
     e.preventDefault()
     setSaving(true)
     try {
       await addDoc(collection(db, 'tasks'), {
-        roId:        ro.id,
-        roNumber:    ro.roNumber,
-        vehicleInfo: ro.vehicle,
+        roId,
         assignedTo:  assignTo,
-        assignedToName: employees[assignTo] ?? '',
         assignedBy:  user.uid,
-        assignedByName: employees[user.uid] ?? user.email ?? '',
         title,
         description: desc,
         priority,
         status:      'pending',
         createdAt:   serverTimestamp(),
-      })
-      const stamp = format(new Date(), 'MM/dd HH:mm')
-      const author = employees[user.uid] ?? user.email
-      const assignee = employees[assignTo] ?? 'Unassigned'
-      await updateDoc(doc(db, 'ros', ro.id), {
-        notes: `[${stamp} - ${author}] Assigned task to ${assignee}: ${title.trim()}\n${ro.notes ?? ''}`,
-        updatedAt: serverTimestamp(),
       })
       setTitle(''); setDesc(''); setAssignTo(''); setPriority('medium')
       setShowForm(false)
@@ -293,7 +270,7 @@ function NotesList({ deduped, dupCount }) {
     <div className="space-y-1.5">
       {visible.map(({ line }, i) => (
         <div key={i} className="px-3 py-2.5 bg-gray-50 dark:bg-zinc-800/50 rounded-xl border border-gray-100 dark:border-zinc-700/50">
-          <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap"><HighlightedNote text={line} /></p>
+          <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">{line}</p>
         </div>
       ))}
       {dupCount > 0 && (
@@ -659,7 +636,7 @@ export default function RODetail() {
 
       {/* ── Tasks ─────────────────────────────────────────────────────────── */}
       <Section title="Tasks">
-        <TaskList ro={ro} employees={employees} />
+        <TaskList roId={id} employees={employees} />
       </Section>
 
       {/* ── Attachments ───────────────────────────────────────────────────── */}

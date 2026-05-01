@@ -4,39 +4,7 @@ import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { askShopAssistant, transcribeWithWhisper, loadAssistantMemory, appendAssistantMemory, deleteAssistantMemory } from '../hooks/useAI'
-import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
-
-function normalizeName(value = '') {
-  return value.trim().replace(/^@+/, '').toLowerCase().replace(/\s+/g, ' ')
-}
-
-function resolveEmployeeByName(inputName, employees) {
-  const wanted = normalizeName(inputName)
-  if (!wanted) return null
-
-  const activeEmployees = employees.filter(e => e?.name && e.active !== false && e.status !== 'inactive')
-  return activeEmployees.find(e => normalizeName(e.name) === wanted)
-    || activeEmployees.find(e => normalizeName(e.name).includes(wanted))
-    || activeEmployees.find(e => wanted.includes(normalizeName(e.name)))
-    || null
-}
-
-// Compute task priority from an RO's due date
-// ≤2 days → high, ≤7 days → medium, >7 days / no date → low
-function dueDateToPriority(ro) {
-  const dateStr = ro.cccDateOut || ro.promisedDate
-  if (!dateStr) return 'low'
-  try {
-    const due = parseISO(dateStr)
-    if (!isValid(due)) return 'low'
-    const days = differenceInCalendarDays(due, new Date())
-    if (days <= 2)  return 'high'
-    if (days <= 7)  return 'medium'
-    return 'low'
-  } catch {
-    return 'low'
-  }
-}
+import { format } from 'date-fns'
 
 // ── Quick prompt chips ────────────────────────────────────────────────────────
 const QUICK_PROMPTS = [
@@ -77,7 +45,6 @@ export default function FloatingAssistant() {
   const toast     = useToast()
 
   const [open,           setOpen]           = useState(false)
-  const [fullscreen,     setFullscreen]     = useState(false)
   const [messages,       setMessages]       = useState([])     // { role, content }
   const [input,          setInput]          = useState('')
   const [loading,        setLoading]        = useState(false)
@@ -190,38 +157,18 @@ export default function FloatingAssistant() {
             notes: `${line}\n${roDoc.notes ?? ''}`,
             updatedAt: serverTimestamp(),
           })
-        } else if (action.type === 'assign_body_man') {
-          // Directly update the RO's assigned body tech field
-          const assignee = resolveEmployeeByName(action.assigneeName, employees)
-          if (assignee) {
-            await updateDoc(doc(db, 'ros', roDoc.id), {
-              assignedBodyMan: assignee.uid,
-              updatedAt: serverTimestamp(),
-            })
-          }
         } else if (action.type === 'assign_task') {
-          const assignee = resolveEmployeeByName(action.assigneeName, employees)
-          if (!assignee) throw new Error(`Could not match task assignee "${action.assigneeName}" to an active employee.`)
-          // If this task is about assigning a body man, ALSO update ro.assignedBodyMan
-          const titleLower = (action.title ?? '').toLowerCase()
-          if (assignee && (titleLower.includes('body man') || titleLower.includes('body tech'))) {
-            await updateDoc(doc(db, 'ros', roDoc.id), {
-              assignedBodyMan: assignee.uid,
-              updatedAt: serverTimestamp(),
-            })
-          }
-          const roDueDate = roDoc.cccDateOut || roDoc.promisedDate || null
+          const assignee = employees.find(e =>
+            e.name.toLowerCase().includes((action.assigneeName ?? '').toLowerCase())
+          )
           await addDoc(collection(db, 'tasks'), {
             roId: roDoc.id, roNumber: roDoc.roNumber,
             vehicleInfo: roDoc.vehicle,
-            assignedTo: assignee.uid,
-            assignedToName: assignee.name,
+            assignedTo: assignee?.uid ?? '',
             assignedBy: user?.uid ?? '',
-            assignedByName: author,
             title: action.title,
             description: action.description ?? '',
-            priority: dueDateToPriority(roDoc),   // auto from due date
-            dueDate: roDueDate,                   // stored so priority can recompute later
+            priority: action.priority ?? 'medium',
             status: 'pending',
             createdAt: serverTimestamp(),
           })
@@ -307,22 +254,18 @@ export default function FloatingAssistant() {
     <>
       {/* ── Floating button ─────────────────────────────────────────────── */}
       <button
-        onClick={() => setOpen(v => !v)}
-        className="fixed bottom-5 right-4 z-[60] w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-2xl
+        onClick={() => setOpen(true)}
+        className="fixed bottom-24 right-4 z-40 w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-2xl
           bg-gradient-to-br from-blue-600 to-violet-600 hover:from-blue-500 hover:to-violet-500
           active:scale-95 transition-all border-2 border-white/20"
-        title={open ? 'Hide Shop Assistant' : 'Shop Assistant'}
+        title="Shop Assistant"
       >
         🤖
       </button>
 
       {/* ── Chat panel ──────────────────────────────────────────────────── */}
       {open && (
-        <div className={`fixed z-50 flex flex-col overflow-hidden bg-gray-50 dark:bg-zinc-950 shadow-2xl border border-gray-200 dark:border-zinc-800 ${
-          fullscreen
-            ? 'inset-0'
-            : 'right-4 bottom-24 w-[min(94vw,440px)] h-[min(72vh,680px)] rounded-2xl max-sm:left-3 max-sm:right-3 max-sm:w-auto max-sm:h-[72vh]'
-        }`}>
+        <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-zinc-950">
 
           {/* Header */}
           <div className="flex items-center gap-2 px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 shrink-0">
@@ -349,21 +292,6 @@ export default function FloatingAssistant() {
               onClick={() => { setMessages([]); setPendingActions([]); setSmsDraft(null); setSavedFacts([]) }}
               className="text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800"
             >New</button>
-            <button
-              onClick={() => setFullscreen(v => !v)}
-              className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
-              title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-            >
-              {fullscreen ? (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 9H5V5m10 4h4V5M9 15H5v4m10-4h4v4"/>
-                </svg>
-              ) : (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 9V4h5m11 5V4h-5M4 15v5h5m11-5v5h-5"/>
-                </svg>
-              )}
-            </button>
             <button
               onClick={() => setOpen(false)}
               className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
@@ -492,9 +420,8 @@ export default function FloatingAssistant() {
                   <div key={i} className="text-xs text-green-800 dark:text-green-300 bg-white/60 dark:bg-green-900/30 rounded-lg px-2.5 py-1.5">
                     <span className="font-mono font-semibold">RO#{a.roNumber}</span>
                     {' · '}
-                    {a.type === 'add_note'      && `Add note: "${a.note?.slice(0, 60)}${a.note?.length > 60 ? '…' : ''}"`}
-                    {a.type === 'assign_body_man' && `Set body tech → ${a.assigneeName}`}
-                    {a.type === 'assign_task'  && `Assign "${a.title}" → ${a.assigneeName}`}
+                    {a.type === 'add_note'    && `Add note: "${a.note?.slice(0, 60)}${a.note?.length > 60 ? '…' : ''}"`}
+                    {a.type === 'assign_task' && `Assign "${a.title}" → ${a.assigneeName}`}
                   </div>
                 ))}
                 <div className="flex gap-2 pt-1">

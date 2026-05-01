@@ -6,21 +6,13 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import {
   doc, updateDoc, addDoc, collection, onSnapshot,
-  query, where, serverTimestamp,
+  query, where, orderBy, serverTimestamp,
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { StatusBadge, PartsStatusBadge } from './StatusBadge'
-import HighlightedNote from './HighlightedNote'
 import { MANAGER_ROLES, PARTS_STATUSES } from '../constants/roles'
 import { format } from 'date-fns'
-
-function taskCreatedMillis(task) {
-  const value = task.createdAt
-  if (value?.toMillis) return value.toMillis()
-  if (value?.seconds) return value.seconds * 1000
-  return 0
-}
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 function IconX()    { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" d="M6 18L18 6M6 6l12 12"/></svg> }
@@ -73,12 +65,10 @@ export default function RODrawer({ ro, employees, onClose }) {
     const q = query(
       collection(db, 'tasks'),
       where('roId', '==', ro.id),
+      orderBy('createdAt', 'desc'),
     )
     return onSnapshot(q, snap =>
-      setTasks(snap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => taskCreatedMillis(b) - taskCreatedMillis(a))
-      )
+      setTasks(snap.docs.map(d => ({ id: d.id, ...d.data() })))
     )
   }, [ro?.id])
 
@@ -114,20 +104,11 @@ export default function RODrawer({ ro, employees, onClose }) {
         roNumber:    ro.roNumber,
         vehicleInfo: ro.vehicle,
         assignedTo:  taskTo,
-        assignedToName: employees[taskTo] ?? '',
         assignedBy:  user.uid,
-        assignedByName: employees[user.uid] ?? user.email ?? '',
         title:       taskTitle.trim(),
         priority:    taskPriority,
         status:      'pending',
         createdAt:   serverTimestamp(),
-      })
-      const stamp = format(new Date(), 'MM/dd HH:mm')
-      const author = employees[user.uid] ?? user.email
-      const assignee = employees[taskTo] ?? 'Unassigned'
-      await updateDoc(doc(db, 'ros', ro.id), {
-        notes: `[${stamp} - ${author}] Assigned task to ${assignee}: ${taskTitle.trim()}\n${ro.notes ?? ''}`,
-        updatedAt: serverTimestamp(),
       })
       setTaskTitle(''); setTaskTo(''); setTaskPriority('medium')
       setShowTaskForm(false)
@@ -264,7 +245,7 @@ export default function RODrawer({ ro, employees, onClose }) {
                         className="px-3 py-2.5 bg-gray-50 dark:bg-zinc-800/50 rounded-xl border border-gray-100 dark:border-zinc-700/50"
                       >
                         <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                          <HighlightedNote text={line} />
+                          {line}
                         </p>
                       </div>
                     ))}

@@ -404,10 +404,9 @@ async function handleSync() {
   const results   = []
   const timestamp = new Date().toISOString()
 
-  // ── Step 1: sync selected CCC ROs ────────────────────────────────────────
   for (const ro of selected) {
     try {
-      const existing        = existingROs.get(ro.roNumber) || null
+      const existing       = existingROs.get(ro.roNumber) || null
       const existingDocName = existing?.docName || null
       await writeRO(ro, timestamp, existingDocName, existing)
       results.push({ roNumber: ro.roNumber, ok: true, updated: !!existingDocName })
@@ -417,13 +416,8 @@ async function handleSync() {
     }
   }
 
-  // ── Step 2: auto-mark missing ROs as delivered ────────────────────────────
-  setBtn('sync-btn', '<span class="spinner"></span> Auto-delivering missing…', true)
-  const delivered = await autoMarkDelivered(timestamp)
-
-  // Re-render list to show updated badges & hide delivered section
+  // Re-render list to show updated "In system" badges
   renderROList()
-  renderPossiblyDelivered()
 
   // Show results
   const ok   = results.filter(r => r.ok).length
@@ -432,9 +426,8 @@ async function handleSync() {
   div.style.display = 'block'
   div.innerHTML = `
     <div class="alert ${fail === 0 ? 'alert-success' : fail === results.length ? 'alert-error' : 'alert-warn'}" style="margin-bottom:8px">
-      ${fail === 0 ? `✅ ${ok} RO${ok>1?'s':''} synced!` : `⚠ ${ok} synced, ${fail} failed`}
-      ${delivered.count > 0 ? `<br>🚗 ${delivered.count} auto-delivered: ${delivered.roNums.map(n=>'#'+n).join(', ')}` : ''}
-      ${delivered.failed > 0 ? `<br>⚠ ${delivered.failed} auto-deliver failed` : ''}
+      ${fail === 0 ? `✅ ${ok} RO${ok>1?'s':''} synced!`
+                   : `⚠ ${ok} synced, ${fail} failed`}
     </div>
     ${results.map(r => `
       <div class="result-item">
@@ -445,56 +438,6 @@ async function handleSync() {
 
   setBtn('sync-btn', `⬆ Sync Selected to Board`, false)
   updateSyncBtn()
-}
-
-// ── Auto-mark all ROs not on CCC board as delivered ────────────────────────────
-async function autoMarkDelivered(timestamp) {
-  const scannedSet = new Set(scannedROs.map(r => r.roNumber))
-  const toDeliver  = []
-  for (const [roNum, info] of existingROs) {
-    if (!scannedSet.has(roNum) && info.status !== 'delivered') {
-      toDeliver.push({ roNum, ...info })
-    }
-  }
-  if (!toDeliver.length) return { count: 0, failed: 0, roNums: [] }
-
-  let count = 0, failed = 0
-  const roNums = []
-
-  for (const info of toDeliver) {
-    try {
-      const write = {
-        update: {
-          name:   info.docName,
-          fields: {
-            status:      strVal('delivered'),
-            deliveredAt: strVal(timestamp),
-            updatedAt:   strVal(timestamp),
-          }
-        },
-        updateMask: { fieldPaths: ['status', 'deliveredAt', 'updatedAt'] },
-        updateTransforms: [{
-          fieldPath: 'changeLog',
-          appendMissingElements: {
-            values: [changeLogEntry('status', 'Delivered (auto – not on CCC board)', timestamp)]
-          }
-        }]
-      }
-      const res = await authFetch(COMMIT_URL, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ writes: [write] }),
-      })
-      if (!res.ok) throw new Error()
-      if (existingROs.has(info.roNum)) existingROs.get(info.roNum).status = 'delivered'
-      roNums.push(info.roNum)
-      count++
-    } catch {
-      failed++
-    }
-  }
-
-  return { count, failed, roNums }
 }
 
 // ── Detect changed fields between stored Firestore snapshot and new CCC data ───

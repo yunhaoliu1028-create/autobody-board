@@ -8,21 +8,6 @@ import { parseMeetingNotes, getApiKey } from '../hooks/useAI'
 import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
 import { format } from 'date-fns'
 
-function normalizeName(value = '') {
-  return value.trim().replace(/^@+/, '').toLowerCase().replace(/\s+/g, ' ')
-}
-
-function resolveEmployeeByName(inputName, employees) {
-  const wanted = normalizeName(inputName)
-  if (!wanted) return null
-
-  const activeEmployees = employees.filter(e => e?.name && e.active !== false && e.status !== 'inactive')
-  return activeEmployees.find(e => normalizeName(e.name) === wanted)
-    || activeEmployees.find(e => normalizeName(e.name).includes(wanted))
-    || activeEmployees.find(e => wanted.includes(normalizeName(e.name)))
-    || null
-}
-
 // ── Editable ChangeRow ────────────────────────────────────────────────────────
 function ChangeRow({ change, checked, onToggle, onChange }) {
   const [editing, setEditing] = useState(false)
@@ -388,16 +373,15 @@ export default function MeetingImport() {
         }
 
         for (const task of (action.tasks ?? [])) {
-          const assignee = resolveEmployeeByName(task.assigneeName, employees)
-          if (!assignee) throw new Error(`Could not match task assignee "${task.assigneeName}" to an active employee.`)
+          const assignee = employees.find(e =>
+            e.name.toLowerCase().includes((task.assigneeName ?? '').toLowerCase())
+          )
           await addDoc(collection(db, 'tasks'), {
             roId:        roDoc.id,
             roNumber:    roDoc.roNumber,
             vehicleInfo: roDoc.vehicle,
-            assignedTo:  assignee.uid,
-            assignedToName: assignee.name,
+            assignedTo:  assignee?.uid ?? '',
             assignedBy:  user.uid,
-            assignedByName: author,
             title:       task.title,
             description: task.description ?? '',
             priority:    task.priority ?? 'medium',

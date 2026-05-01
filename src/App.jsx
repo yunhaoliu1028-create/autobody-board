@@ -13,7 +13,6 @@ import MeetingImport from './pages/MeetingImport'
 import Settings      from './pages/Settings'
 import Chat          from './pages/Chat'
 import { ToastProvider } from './components/Toast'
-import AppErrorBoundary from './components/AppErrorBoundary'
 import { MANAGER_ROLES } from './constants/roles'
 
 function AppRoutes() {
@@ -44,7 +43,7 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
       <Route path="/settings" element={
-        <ProtectedRoute>
+        <ProtectedRoute allowedRoles={MANAGER_ROLES}>
           <Layout><Settings /></Layout>
         </ProtectedRoute>
       } />
@@ -63,16 +62,14 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <AppErrorBoundary>
+    <ThemeProvider>
       <AuthProvider>
-        <ThemeProvider>
-          <ToastProvider>
-            <BrowserRouter>
-              <AppRoutes />
-            </BrowserRouter>
-          </ToastProvider>
-        </ThemeProvider>
+        <ToastProvider>
+          <BrowserRouter>
+            <AppRoutes />
+          </BrowserRouter>
+        </ToastProvider>
       </AuthProvider>
-    </AppErrorBoundary>
+    </ThemeProvider>
   )
 }
