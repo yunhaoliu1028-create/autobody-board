@@ -14,6 +14,7 @@ firebase-debug.*.log*
 .agents/
 .claude/
 .gitdata/
+.github_deploy_key*
 
 # Build output
 dist/
