@@ -17,6 +17,7 @@ firebase-debug.*.log*
 .github_deploy_key*
 .deploykeys/
 .github_known_hosts
+.git_ssh.cmd
 
 # Build output
 dist/
