@@ -15,6 +15,8 @@ firebase-debug.*.log*
 .claude/
 .gitdata/
 .github_deploy_key*
+.deploykeys/
+.github_known_hosts
 
 # Build output
 dist/
