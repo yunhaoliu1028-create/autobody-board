@@ -268,7 +268,7 @@ export async function askShopAssistant({ messages, ros, employees }) {
   const activeRos = ros.filter(r => r.status !== 'delivered')
   const roContext  = activeRos.map(r => {
     const lines = [
-      `RO${r.roNumber}|${r.vehicle||'?'}|${r.customerName||''}|ins:${r.insurance||'?'}`,
+      `RO${r.roNumber}|${r.vehicle||'?'}|${r.customerName||''}|ins:${r.insuranceCompany||'?'}`,
       `status:${r.status||'?'} parts:${r.partsStatus||'?'} car:${r.carStatus||'?'}`,
     ]
     if (r.dropOffDate)  lines.push(`drop-off:${r.dropOffDate}`)
