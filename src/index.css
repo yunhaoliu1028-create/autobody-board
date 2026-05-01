@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Hide scrollbar but keep scroll */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Voice input waveform bars */
+@keyframes voiceBar {
+  from { transform: scaleY(0.3); opacity: 0.7; }
+  to   { transform: scaleY(1);   opacity: 1;   }
+}
+
+/* Drawer slide-in from right */
+@keyframes slide-in-right {
+  from { transform: translateX(100%); opacity: 0.6; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+.animate-slide-in {
+  animation: slide-in-right 0.22s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Smooth theme transitions */
+  *, *::before, *::after {
+    transition-property: background-color, border-color, color;
+    transition-duration: 150ms;
+    transition-timing-function: ease;
+  }
+
+  /* Override for interactive elements — don't slow down hover/focus */
+  button, a, input, select, textarea {
+    transition-property: background-color, border-color, color, opacity, box-shadow, transform;
+    transition-duration: 120ms;
+  }
+}
