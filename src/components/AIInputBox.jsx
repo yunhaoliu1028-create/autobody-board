@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { doc, updateDoc, addDoc, collection, serverTimestamp, arrayUnion } from 'firebase/firestore'
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { parseShopInput, getApiKey, transcribeWithWhisper } from '../hooks/useAI'
 import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
+import MentionTextarea, { buildMentionCandidates } from './MentionTextarea'
 import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
 
 function dueDateToPriority(ro) {
@@ -837,6 +838,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
   }
 
   const canSubmit = (text.trim() || images.length > 0) && !loading && !applying && !isTranscribing
+  const mentionCandidates = useMemo(() => buildMentionCandidates(employees), [employees])
 
   return (
     <>
@@ -885,9 +887,10 @@ export default function AIInputBox({ ros = [], employees = [] }) {
 
       <form onSubmit={handleSubmit}>
         {/* ── Textarea ─────────────────────────────────────────────────── */}
-        <textarea
+        <MentionTextarea
           value={text}
           onChange={e => setText(e.target.value)}
+          candidates={mentionCandidates}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
               e.preventDefault()

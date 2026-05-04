@@ -68,6 +68,27 @@ service cloud.firestore {
       allow delete: if isAuth() && isManager();
     }
 
+    // ── Chat conversations ────────────────────────────────────────────────────
+    match /conversations/{convoId} {
+      allow read: if isAuth() && request.auth.uid in resource.data.members;
+      allow create: if isAuth()
+        && request.resource.data.members is list
+        && request.auth.uid in request.resource.data.members;
+      allow update: if isAuth() && request.auth.uid in resource.data.members
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['lastMessage', 'lastAt', 'lastSenderId', 'lastSenderName', 'readBy']);
+      allow delete: if isAuth() && isManager();
+
+      match /messages/{messageId} {
+        allow read: if isAuth()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(convoId)).data.members;
+        allow create: if isAuth()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(convoId)).data.members
+          && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
     // ── Settings (AI key, mappings) ───────────────────────────────────────────
     match /settings/{docId} {
       // Only managers can read/write settings (API key storage etc.)

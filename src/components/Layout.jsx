@@ -43,8 +43,8 @@ function IncomingMessagePopup({ notification, onClose, onClickPopup }) {
   useEffect(() => {
     // Slide in after a tick
     const t = setTimeout(() => setVisible(true), 15)
-    // Progress bar countdown (5 s)
-    const duration = 5000
+    // Progress bar countdown
+    const duration = 9000
     const start    = Date.now()
     let raf
     const tick = () => {
@@ -193,7 +193,7 @@ export default function Layout({ children }) {
   }, [user?.uid])
 
   const dismissNotif = (id) => setNotifications(ns => ns.filter(n => n.id !== id))
-  const clickNotif   = (notif) => { dismissNotif(notif.id); navigate('/chat') }
+  const clickNotif   = (notif) => { dismissNotif(notif.id); navigate('/chat', { state: { convoId: notif.convoId } }) }
 
   const handleLogout = async () => { await logout(); navigate('/login') }
   const visibleNav   = NAV_ITEMS.filter(item => !item.roles || item.roles.includes(role))

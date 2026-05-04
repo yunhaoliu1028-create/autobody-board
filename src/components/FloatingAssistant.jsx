@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { collection, getDocs, doc, updateDoc, addDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { askShopAssistant, transcribeWithWhisper, loadAssistantMemory, appendAssistantMemory, deleteAssistantMemory } from '../hooks/useAI'
+import MentionTextarea, { buildMentionCandidates } from './MentionTextarea'
 import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
 
 // ── Priority based on due date ────────────────────────────────────────────────
@@ -325,6 +326,8 @@ export default function FloatingAssistant() {
     window.open(`sms:?body=${encoded}`, '_self')
   }
 
+  const mentionCandidates = useMemo(() => buildMentionCandidates(employees), [employees])
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <>
@@ -345,7 +348,7 @@ export default function FloatingAssistant() {
           className={`fixed z-50 flex flex-col bg-gray-50 dark:bg-zinc-950 shadow-2xl border border-gray-200 dark:border-zinc-800
             ${isFullscreen
               ? 'inset-0'
-              : 'right-4 bottom-24 w-[min(420px,calc(100vw-2rem))] h-[min(640px,calc(100vh-8rem))] rounded-2xl overflow-hidden'}`}
+              : 'right-4 bottom-20 w-[min(500px,calc(100vw-2rem))] h-[min(760px,calc(100vh-6rem))] rounded-2xl overflow-hidden'}`}
         >
 
           {/* Header */}
@@ -563,7 +566,7 @@ export default function FloatingAssistant() {
           </div>
 
           {/* ── Input area ─────────────────────────────────────────────── */}
-          <div className="shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-800 px-3 py-3 pb-[env(safe-area-inset-bottom,12px)]">
+          <div className="shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-800 px-4 py-4 pb-[env(safe-area-inset-bottom,16px)]">
             <div className="flex items-end gap-2">
 
               {/* Voice button */}
@@ -604,10 +607,12 @@ export default function FloatingAssistant() {
               </button>
 
               {/* Text input */}
-              <textarea
-                ref={inputRef}
+              <MentionTextarea
+                inputRef={inputRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
+                candidates={mentionCandidates}
+                dropdownPlacement="top"
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
                     e.preventDefault()
@@ -615,13 +620,13 @@ export default function FloatingAssistant() {
                   }
                 }}
                 placeholder="问我关于车辆的任何问题…"
-                rows={1}
-                className="flex-1 resize-none px-3 py-2.5 border border-gray-200 dark:border-zinc-700 rounded-xl text-sm
+                rows={2}
+                className="flex-1 resize-y min-h-[72px] px-3.5 py-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-sm
                   bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100
                   placeholder-gray-400 dark:placeholder-zinc-600
                   focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800
                   leading-relaxed transition-colors"
-                style={{ maxHeight: 120, overflowY: 'auto' }}
+                style={{ maxHeight: 180, overflowY: 'auto' }}
                 disabled={loading}
               />
 

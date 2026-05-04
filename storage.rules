@@ -5,5 +5,9 @@ service firebase.storage {
     match /ros/{roId}/attachments/{filename} {
       allow read, write: if request.auth != null;
     }
+
+    match /chat/{convoId}/{filename} {
+      allow read, write: if request.auth != null;
+    }
   }
 }
