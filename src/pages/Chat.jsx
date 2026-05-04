@@ -626,10 +626,12 @@ export default function Chat() {
     const q = query(
       collection(db, 'conversations'),
       where('members', 'array-contains', user.uid),
-      orderBy('lastAt', 'desc'),
     )
     return onSnapshot(q, snap => {
-      setConversations(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+      const rows = snap.docs
+        .map(d => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => (b.lastAt?.toMillis?.() ?? 0) - (a.lastAt?.toMillis?.() ?? 0))
+      setConversations(rows)
     })
   }, [user?.uid])
 
@@ -691,6 +693,8 @@ export default function Chat() {
     u.uid !== user.uid &&
     (!contactSearch.trim() || userDisplayName(u).toLowerCase().includes(contactSearch.toLowerCase()))
   )
+
+  const messageConversations = conversations.filter(c => c.lastSenderId || c.lastMessage)
 
   return (
     <div className="flex h-[calc(100vh-56px)] -my-6 -mx-4 overflow-hidden">
@@ -759,31 +763,30 @@ export default function Chat() {
 
         {/* Conversation list */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-          {sidebarTab === 'chats' && conversations.length === 0 && (
-            <div className="text-center py-16 text-gray-300 dark:text-zinc-700">
-              <svg className="w-8 h-8 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" strokeWidth={1} viewBox="0 0 24 24">
-                <path strokeLinecap="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-              </svg>
-              <p className="text-sm font-medium">No conversations yet</p>
-              <button
-                onClick={() => setShowNewChat(true)}
-                className="mt-2 text-xs text-blue-600 dark:text-blue-400 hover:underline"
-              >
-                Start a new chat
-              </button>
+          {sidebarTab === 'chats' && (
+            <div className="space-y-1">
+              {messageConversations.map(convo => (
+                <ConvoItem
+                  key={convo.id}
+                  convo={convo}
+                  myUid={user.uid}
+                  allUsers={allUsers}
+                  isActive={activeConvo?.id === convo.id}
+                  unread={isUnreadConvo(convo, user.uid)}
+                  onClick={() => openConvo(convo)}
+                />
+              ))}
+              {messageConversations.length === 0 && (
+                <div className="text-center py-16 text-gray-300 dark:text-zinc-700">
+                  <svg className="w-8 h-8 mx-auto mb-2 opacity-50" fill="none" stroke="currentColor" strokeWidth={1} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                  </svg>
+                  <p className="text-sm font-medium">No messages yet</p>
+                  <p className="mt-1 text-xs opacity-70">Start from Contacts</p>
+                </div>
+              )}
             </div>
           )}
-          {sidebarTab === 'chats' && conversations.map(convo => (
-            <ConvoItem
-              key={convo.id}
-              convo={convo}
-              myUid={user.uid}
-              allUsers={allUsers}
-              isActive={activeConvo?.id === convo.id}
-              unread={isUnreadConvo(convo, user.uid)}
-              onClick={() => openConvo(convo)}
-            />
-          ))}
           {sidebarTab === 'contacts' && (
             <div className="space-y-1">
               <input

@@ -74,9 +74,14 @@ service cloud.firestore {
       allow create: if isAuth()
         && request.resource.data.members is list
         && request.auth.uid in request.resource.data.members;
-      allow update: if isAuth() && request.auth.uid in resource.data.members
-        && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['lastMessage', 'lastAt', 'lastSenderId', 'lastSenderName', 'readBy']);
+      allow update: if isAuth() && request.auth.uid in resource.data.members && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['lastMessage', 'lastAt', 'lastSenderId', 'lastSenderName'])
+          && request.resource.data.lastSenderId == request.auth.uid
+        )
+      );
       allow delete: if isAuth() && isManager();
 
       match /messages/{messageId} {

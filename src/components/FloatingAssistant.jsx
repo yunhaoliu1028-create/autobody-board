@@ -36,8 +36,14 @@ function findEmployeeByName(employees, rawName = '') {
   return employees.find(emp => {
     const name = normalizeName(emp.name)
     if (!name) return false
-    if (name === target || name.includes(target) || target.includes(name)) return true
-    return targetParts.some(part => part.length > 1 && name.split(' ').includes(part))
+    const nameParts = name.split(' ').filter(Boolean)
+    if (name === target) return true
+    if (targetParts.length === 1) {
+      return nameParts.some(part => part === target || part.startsWith(target))
+    }
+    return targetParts.every(part =>
+      nameParts.some(namePart => namePart === part || namePart.startsWith(part))
+    )
   }) ?? null
 }
 
@@ -76,21 +82,18 @@ function MiniMarkdown({ text }) {
 
 function AssistantMark({ className = 'w-6 h-6' }) {
   return (
-    <svg className={className} viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      <path d="M32 4l8.8 18.9L60 32l-19.2 9.1L32 60l-8.8-18.9L4 32l19.2-9.1L32 4z" fill="url(#assistantMarkGradient)" />
-      <path d="M32 14l5.8 12.2L50 32l-12.2 5.8L32 50l-5.8-12.2L14 32l12.2-5.8L32 14z" fill="url(#assistantMarkInner)" />
-      <path d="M32 21l3.3 7.7L43 32l-7.7 3.3L32 43l-3.3-7.7L21 32l7.7-3.3L32 21z" fill="white" fillOpacity=".92" />
-      <defs>
-        <linearGradient id="assistantMarkGradient" x1="12" y1="8" x2="52" y2="56" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#050505" />
-          <stop offset=".54" stopColor="#3f3f46" />
-          <stop offset="1" stopColor="#111827" />
-        </linearGradient>
-        <linearGradient id="assistantMarkInner" x1="20" y1="18" x2="46" y2="48" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#a1a1aa" />
-          <stop offset="1" stopColor="#27272a" />
-        </linearGradient>
-      </defs>
+    <svg className={className} viewBox="0 0 64 64" fill="none" shapeRendering="crispEdges" aria-hidden="true">
+      <rect x="20" y="6" width="24" height="6" rx="2" fill="#111827" />
+      <rect x="29" y="12" width="6" height="6" fill="#4b5563" />
+      <rect x="12" y="18" width="40" height="34" rx="8" fill="#111827" />
+      <rect x="16" y="22" width="32" height="26" rx="5" fill="#f8fafc" />
+      <rect x="22" y="30" width="8" height="8" rx="2" fill="#111827" />
+      <rect x="34" y="30" width="8" height="8" rx="2" fill="#111827" />
+      <rect x="27" y="42" width="10" height="3" rx="1" fill="#9ca3af" />
+      <rect x="6" y="28" width="6" height="14" rx="2" fill="#374151" />
+      <rect x="52" y="28" width="6" height="14" rx="2" fill="#374151" />
+      <rect x="23" y="31" width="2" height="2" fill="#f8fafc" />
+      <rect x="35" y="31" width="2" height="2" fill="#f8fafc" />
     </svg>
   )
 }
@@ -348,7 +351,7 @@ export default function FloatingAssistant() {
           className={`fixed z-50 flex flex-col bg-gray-50 dark:bg-zinc-950 shadow-2xl border border-gray-200 dark:border-zinc-800
             ${isFullscreen
               ? 'inset-0'
-              : 'right-4 bottom-20 w-[min(500px,calc(100vw-2rem))] h-[min(760px,calc(100vh-6rem))] rounded-2xl overflow-hidden'}`}
+              : 'right-4 bottom-20 w-[min(520px,calc(100vw-2rem))] h-[min(660px,calc(100vh-7rem))] rounded-2xl overflow-hidden'}`}
         >
 
           {/* Header */}
@@ -429,13 +432,13 @@ export default function FloatingAssistant() {
           )}
 
           {/* Messages area */}
-          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0">
 
             {/* Empty state with quick prompts */}
             {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full gap-6 pb-8">
-                <div className="w-16 h-16 rounded-2xl bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center shadow-lg">
-                  <AssistantMark className="w-10 h-10" />
+              <div className="flex flex-col items-center justify-center min-h-full gap-5 py-8">
+                <div className="w-14 h-14 rounded-2xl bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center shadow-lg">
+                  <AssistantMark className="w-9 h-9" />
                 </div>
                 <div className="text-center">
                   <p className="font-semibold text-gray-800 dark:text-gray-200">你好！我是店铺助手</p>
@@ -566,15 +569,15 @@ export default function FloatingAssistant() {
           </div>
 
           {/* ── Input area ─────────────────────────────────────────────── */}
-          <div className="shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-800 px-4 py-4 pb-[env(safe-area-inset-bottom,16px)]">
-            <div className="flex items-end gap-2">
+          <div className="shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-800 px-4 py-3 pb-[env(safe-area-inset-bottom,14px)]">
+            <div className="flex items-end gap-2.5">
 
               {/* Voice button */}
               <button
                 type="button"
                 onClick={toggleVoice}
                 disabled={isTranscribing}
-                className={`shrink-0 w-10 h-10 rounded-xl flex flex-col items-center justify-center gap-0.5 border-2 transition-all active:scale-95
+                className={`shrink-0 w-11 h-11 rounded-xl flex flex-col items-center justify-center gap-0.5 border-2 transition-all active:scale-95
                   ${listening
                     ? 'bg-red-500 border-red-400 text-white'
                     : isTranscribing
@@ -612,7 +615,7 @@ export default function FloatingAssistant() {
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 candidates={mentionCandidates}
-                dropdownPlacement="top"
+                dropdownPlacement="inside"
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
                     e.preventDefault()
@@ -620,8 +623,8 @@ export default function FloatingAssistant() {
                   }
                 }}
                 placeholder="问我关于车辆的任何问题…"
-                rows={2}
-                className="flex-1 resize-y min-h-[72px] px-3.5 py-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-sm
+                rows={3}
+                className="flex-1 resize-y min-h-[92px] px-3.5 py-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-sm
                   bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100
                   placeholder-gray-400 dark:placeholder-zinc-600
                   focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800
@@ -634,7 +637,7 @@ export default function FloatingAssistant() {
               <button
                 onClick={() => sendMessage()}
                 disabled={!input.trim() || loading || !dataLoaded}
-                className="shrink-0 w-10 h-10 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40
+                className="shrink-0 w-11 h-11 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40
                   text-white flex items-center justify-center transition-all active:scale-95"
               >
                 {loading ? (
@@ -650,22 +653,6 @@ export default function FloatingAssistant() {
               </button>
             </div>
 
-            {/* Quick prompts row — only shown when chat is empty */}
-            {messages.length === 0 && (
-              <div className="flex gap-2 mt-2 overflow-x-auto pb-1 no-scrollbar">
-                {QUICK_PROMPTS.map(q => (
-                  <button
-                    key={q.label}
-                    onClick={() => sendMessage(q.text)}
-                    disabled={!dataLoaded || loading}
-                    className="shrink-0 px-3 py-1.5 text-xs font-medium rounded-full border border-gray-200 dark:border-zinc-700
-                      bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-400
-                      hover:border-blue-400 hover:text-blue-600 dark:hover:border-blue-700 dark:hover:text-blue-400
-                      disabled:opacity-40 transition-all active:scale-95 whitespace-nowrap"
-                  >{q.label}</button>
-                ))}
-              </div>
-            )}
           </div>
 
         </div>

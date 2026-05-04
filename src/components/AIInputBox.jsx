@@ -37,8 +37,14 @@ function findEmployeeByName(employees, rawName = '') {
   return employees.find(emp => {
     const name = normalizeName(emp.name)
     if (!name) return false
-    if (name === target || name.includes(target) || target.includes(name)) return true
-    return targetParts.some(part => part.length > 1 && name.split(' ').includes(part))
+    const nameParts = name.split(' ').filter(Boolean)
+    if (name === target) return true
+    if (targetParts.length === 1) {
+      return nameParts.some(part => part === target || part.startsWith(target))
+    }
+    return targetParts.every(part =>
+      nameParts.some(namePart => namePart === part || namePart.startsWith(part))
+    )
   }) ?? null
 }
 
@@ -73,16 +79,19 @@ function extractRoNumber(text, ros) {
 }
 
 const ACTION_LABELS = {
-  add_note:            { label: 'Add Note',        color: 'bg-blue-50   border-blue-200   dark:bg-blue-950/40   dark:border-blue-900' },
-  update_status:       { label: 'Update Status',   color: 'bg-purple-50 border-purple-200 dark:bg-purple-950/40 dark:border-purple-900' },
-  update_parts_status: { label: 'Parts Status',    color: 'bg-amber-50  border-amber-200  dark:bg-amber-950/40  dark:border-amber-900' },
-  assign_task:         { label: 'Assign Task',     color: 'bg-green-50  border-green-200  dark:bg-green-950/40  dark:border-green-900' },
-  assign_body_man:     { label: 'Set Body Tech',  color: 'bg-blue-50   border-blue-200   dark:bg-blue-950/40   dark:border-blue-900' },
-  update_car_status:   { label: 'Car Status',      color: 'bg-orange-50 border-orange-200 dark:bg-orange-950/40 dark:border-orange-900' },
-  update_dropoff_date: { label: 'Drop-Off Date',   color: 'bg-cyan-50   border-cyan-200   dark:bg-cyan-950/40   dark:border-cyan-900' },
-  update_due_date:     { label: 'Target Date',     color: 'bg-rose-50   border-rose-200   dark:bg-rose-950/40   dark:border-rose-900' },
-  update_rental:       { label: 'Rental Status',   color: 'bg-gray-50   border-gray-200   dark:bg-zinc-800      dark:border-zinc-700' },
+  add_note:            { label: 'Add Note',        color: 'bg-blue-50   border-blue-200   dark:bg-blue-950/35   dark:border-blue-800/80' },
+  update_status:       { label: 'Update Status',   color: 'bg-purple-50 border-purple-200 dark:bg-purple-950/35 dark:border-purple-800/80' },
+  update_parts_status: { label: 'Parts Status',    color: 'bg-amber-50  border-amber-200  dark:bg-amber-950/35  dark:border-amber-800/80' },
+  assign_task:         { label: 'Assign Task',     color: 'bg-green-50  border-green-200  dark:bg-green-950/35  dark:border-green-800/80' },
+  assign_body_man:     { label: 'Set Body Tech',  color: 'bg-blue-50   border-blue-200   dark:bg-blue-950/35   dark:border-blue-800/80' },
+  update_car_status:   { label: 'Car Status',      color: 'bg-orange-50 border-orange-200 dark:bg-orange-950/35 dark:border-orange-800/80' },
+  update_dropoff_date: { label: 'Drop-Off Date',   color: 'bg-cyan-50   border-cyan-200   dark:bg-cyan-950/35   dark:border-cyan-800/80' },
+  update_due_date:     { label: 'Target Date',     color: 'bg-rose-50   border-rose-200   dark:bg-rose-950/35   dark:border-rose-800/80' },
+  update_rental:       { label: 'Rental Status',   color: 'bg-gray-50   border-gray-200   dark:bg-zinc-800/95   dark:border-zinc-600' },
 }
+
+const ACTION_FIELD = 'border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-950 text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-600'
+const GIB_HISTORY_KEY = 'autobody.gib.history.v1'
 
 // ── Inline-editable action card ───────────────────────────────────────────────
 function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
@@ -100,17 +109,17 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
   // ── Edit form ──────────────────────────────────────────────────────────────
   if (editing) {
     return (
-      <div className="border-2 border-blue-400 rounded-xl p-3 bg-white space-y-2 text-sm">
+      <div className="border-2 border-blue-400 rounded-xl p-3 bg-white dark:bg-zinc-900 space-y-2 text-sm">
         <div className="flex items-center gap-2 mb-1">
           <span>{meta.icon}</span>
-          <span className="font-semibold text-blue-700">RO#{draft.roNumber}</span>
-          <span className="text-xs text-gray-400 uppercase tracking-wide">{meta.label}</span>
+          <span className="font-semibold text-blue-700 dark:text-blue-300">RO#{draft.roNumber}</span>
+          <span className="text-xs text-gray-400 dark:text-zinc-500 uppercase tracking-wide">{meta.label}</span>
         </div>
 
         {/* RO number */}
-        <label className="block text-xs text-gray-500">RO #
+        <label className="block text-xs text-gray-500 dark:text-zinc-400">RO #
           <input
-            className="ml-2 border border-gray-300 rounded px-2 py-0.5 text-xs w-24 font-mono"
+            className={`ml-2 px-2 py-0.5 text-xs w-24 font-mono ${ACTION_FIELD}`}
             value={draft.roNumber ?? ''}
             onChange={e => set({ roNumber: e.target.value })}
           />
@@ -119,7 +128,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
         {/* Per-type fields */}
         {draft.type === 'add_note' && (
           <textarea
-            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm resize-y"
+            className={`w-full px-2 py-1.5 text-sm resize-y ${ACTION_FIELD}`}
             rows={3}
             value={draft.note ?? ''}
             onChange={e => set({ note: e.target.value })}
@@ -128,7 +137,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
 
         {draft.type === 'update_status' && (
           <select
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-full"
+            className={`px-2 py-1.5 text-sm w-full ${ACTION_FIELD}`}
             value={draft.status ?? ''}
             onChange={e => set({ status: e.target.value })}
           >
@@ -138,7 +147,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
 
         {draft.type === 'update_parts_status' && (
           <select
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-full"
+            className={`px-2 py-1.5 text-sm w-full ${ACTION_FIELD}`}
             value={draft.partsStatus ?? ''}
             onChange={e => set({ partsStatus: e.target.value })}
           >
@@ -148,7 +157,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
 
         {draft.type === 'update_car_status' && (
           <select
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-full"
+            className={`px-2 py-1.5 text-sm w-full ${ACTION_FIELD}`}
             value={draft.carStatus ?? ''}
             onChange={e => set({ carStatus: e.target.value })}
           >
@@ -159,7 +168,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
         {draft.type === 'update_dropoff_date' && (
           <input
             type="date"
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`}
             value={draft.dropOffDate ?? ''}
             onChange={e => set({ dropOffDate: e.target.value })}
           />
@@ -168,7 +177,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
         {draft.type === 'update_due_date' && (
           <input
             type="date"
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`}
             value={draft.dueDate ?? ''}
             onChange={e => set({ dueDate: e.target.value })}
           />
@@ -176,7 +185,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
 
         {draft.type === 'update_rental' && (
           <select
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`}
             value={draft.hasRental === true ? 'yes' : draft.hasRental === false ? 'no' : ''}
             onChange={e => set({ hasRental: e.target.value === 'yes' ? true : false })}
           >
@@ -188,26 +197,26 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
         {draft.type === 'assign_task' && (
           <div className="space-y-1.5">
             <input
-              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+              className={`w-full px-2 py-1.5 text-sm ${ACTION_FIELD}`}
               placeholder="Assignee name"
               value={draft.assigneeName ?? ''}
               onChange={e => set({ assigneeName: e.target.value })}
             />
             <input
-              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+              className={`w-full px-2 py-1.5 text-sm ${ACTION_FIELD}`}
               placeholder="Task title"
               value={draft.title ?? ''}
               onChange={e => set({ title: e.target.value })}
             />
             <textarea
-              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm resize-y"
+              className={`w-full px-2 py-1.5 text-sm resize-y ${ACTION_FIELD}`}
               rows={2}
               placeholder="Description (optional)"
               value={draft.description ?? ''}
               onChange={e => set({ description: e.target.value })}
             />
             <select
-              className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+              className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`}
               value={draft.priority ?? 'medium'}
               onChange={e => set({ priority: e.target.value })}
             >
@@ -225,7 +234,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
           >Done</button>
           <button
             onClick={() => { setDraft(action); setEditing(false) }}
-            className="px-3 py-1 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-50"
+            className="px-3 py-1 border border-gray-300 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 text-xs rounded-lg hover:bg-gray-50 dark:hover:bg-zinc-800"
           >Cancel</button>
         </div>
       </div>
@@ -235,21 +244,21 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
   // ── Preview (read mode) ────────────────────────────────────────────────────
   const detail = () => {
     switch (draft.type) {
-      case 'add_note':            return <span className="text-gray-600">"{draft.note}"</span>
-      case 'update_status':       return <span className="text-purple-700 font-medium">{STATUS_MAP[draft.status]?.label ?? draft.status}</span>
-      case 'update_parts_status': return <span className="text-yellow-700 font-medium">{PARTS_STATUSES.find(p => p.key === draft.partsStatus)?.label ?? draft.partsStatus}</span>
-      case 'update_car_status':   return <span><strong>{CAR_STATUS_MAP[draft.carStatus]?.label ?? draft.carStatus}</strong></span>
-      case 'update_dropoff_date': return <span>Drop Off: <strong>{draft.dropOffDate}</strong></span>
-      case 'update_due_date':     return <span>Target Completion: <strong>{draft.dueDate}</strong></span>
-      case 'update_rental':       return <span>{draft.hasRental ? 'Customer has rental' : 'No rental'}</span>
+      case 'add_note':            return <span className="text-gray-700 dark:text-zinc-200">"{draft.note}"</span>
+      case 'update_status':       return <span className="text-purple-700 dark:text-purple-300 font-medium">{STATUS_MAP[draft.status]?.label ?? draft.status}</span>
+      case 'update_parts_status': return <span className="text-yellow-700 dark:text-amber-300 font-medium">{PARTS_STATUSES.find(p => p.key === draft.partsStatus)?.label ?? draft.partsStatus}</span>
+      case 'update_car_status':   return <span className="text-gray-800 dark:text-zinc-100"><strong>{CAR_STATUS_MAP[draft.carStatus]?.label ?? draft.carStatus}</strong></span>
+      case 'update_dropoff_date': return <span className="text-gray-700 dark:text-zinc-200">Drop Off: <strong className="text-gray-900 dark:text-white">{draft.dropOffDate}</strong></span>
+      case 'update_due_date':     return <span className="text-gray-700 dark:text-zinc-200">Target Completion: <strong className="text-gray-900 dark:text-white">{draft.dueDate}</strong></span>
+      case 'update_rental':       return <span className="text-gray-800 dark:text-zinc-100">{draft.hasRental ? 'Customer has rental' : 'No rental'}</span>
       case 'assign_task':
         return (
           <span>
-            → <strong>{draft.assigneeName}</strong>: "{draft.title}"
+            <span className="text-gray-700 dark:text-zinc-200">→ <strong className="text-gray-900 dark:text-white">{draft.assigneeName}</strong>: "{draft.title}"</span>
             <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded font-medium ${
-              draft.priority === 'high' ? 'bg-red-100 text-red-700'
-              : draft.priority === 'low' ? 'bg-gray-100 text-gray-600'
-              : 'bg-yellow-100 text-yellow-700'}`}>{draft.priority}</span>
+              draft.priority === 'high' ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300'
+              : draft.priority === 'low' ? 'bg-gray-100 text-gray-600 dark:bg-zinc-700 dark:text-zinc-300'
+              : 'bg-yellow-100 text-yellow-700 dark:bg-amber-950/50 dark:text-amber-300'}`}>{draft.priority}</span>
           </span>
         )
       default: return null
@@ -257,12 +266,12 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
   }
 
   return (
-    <div className={`flex items-start gap-2 px-3 py-2 rounded-lg border text-sm ${meta.color}`}>
+    <div className={`flex items-start gap-2 px-3 py-2 rounded-lg border text-sm shadow-sm dark:shadow-none ${meta.color}`}>
       <span className="shrink-0 mt-0.5">{meta.icon}</span>
       <div className="flex-1 min-w-0">
-        <span className="font-semibold text-gray-700">RO#{draft.roNumber}</span>
-        <span className="text-gray-400 mx-1.5">·</span>
-        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">{meta.label}</span>
+        <span className="font-semibold text-gray-800 dark:text-zinc-100">RO#{draft.roNumber}</span>
+        <span className="text-gray-400 dark:text-zinc-500 mx-1.5">·</span>
+        <span className="text-xs font-semibold text-gray-600 dark:text-zinc-300 uppercase tracking-wide">{meta.label}</span>
         <div className="text-sm mt-0.5">{detail()}</div>
       </div>
       {draft.confidence === 'low' && (
@@ -272,12 +281,12 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
       <div className="flex items-center gap-1 shrink-0 ml-1">
         <button
           onClick={() => setEditing(true)}
-          className="text-gray-400 hover:text-blue-600 text-xs px-1.5 py-0.5 rounded hover:bg-white/70 transition-colors"
+          className="text-gray-500 dark:text-zinc-300 hover:text-blue-600 dark:hover:text-blue-300 text-xs px-1.5 py-0.5 rounded hover:bg-white/70 dark:hover:bg-zinc-700 transition-colors"
           title="Edit"
         >✏️</button>
         <button
           onClick={onDelete}
-          className="text-gray-400 hover:text-red-500 text-xs px-1.5 py-0.5 rounded hover:bg-white/70 transition-colors"
+          className="text-gray-500 dark:text-zinc-300 hover:text-red-500 dark:hover:text-red-300 text-xs px-1.5 py-0.5 rounded hover:bg-white/70 dark:hover:bg-zinc-700 transition-colors"
           title="Remove"
         >×</button>
       </div>
@@ -408,6 +417,9 @@ function IconImage({ cls = 'w-4 h-4' }) {
 function IconX2() {
   return <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path strokeLinecap="round" d="M6 18L18 6M6 6l12 12"/></svg>
 }
+function IconHistory() {
+  return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.9} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8"/><path strokeLinecap="round" strokeLinejoin="round" d="M3 3v5h5M12 7v5l3 2"/></svg>
+}
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function AIInputBox({ ros = [], employees = [] }) {
@@ -431,6 +443,8 @@ export default function AIInputBox({ ros = [], employees = [] }) {
   const [isTranscribing,  setIsTranscribing]  = useState(false)  // Whisper processing
   const [recordSecs,      setRecordSecs]      = useState(0)      // elapsed recording seconds
   const [audioLevel,      setAudioLevel]      = useState(0)      // 0-1 for bar heights
+  const [showHistory,     setShowHistory]     = useState(false)
+  const [history,         setHistory]         = useState([])
 
   const fileInputRef      = useRef(null)   // gallery picker
   const cameraRef         = useRef(null)   // camera capture
@@ -448,6 +462,33 @@ export default function AIInputBox({ ros = [], employees = [] }) {
   useEffect(() => {
     if (result?.actions) setActions(result.actions)
   }, [result])
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(GIB_HISTORY_KEY) || '[]')
+      setHistory(Array.isArray(saved) ? saved : [])
+    } catch {
+      setHistory([])
+    }
+  }, [])
+
+  const rememberHistory = (value) => {
+    const entry = value.trim()
+    if (!entry) return
+    setHistory(prev => {
+      const next = [entry, ...prev.filter(item => item !== entry)].slice(0, 12)
+      localStorage.setItem(GIB_HISTORY_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+
+  const useHistoryItem = (value) => {
+    setText(value)
+    setResult(null)
+    setActions([])
+    setApplied(false)
+    setShowHistory(false)
+  }
 
   // ── Auto re-parse when textarea changes after AI result is shown ─────────
   // Debounce 1.2s — silently refresh action cards without full spinner
@@ -673,6 +714,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
       })
 
       toast.success(`${n} ${typeLabel} photo${n !== 1 ? 's' : ''} → RO #${roNumber}`)
+      rememberHistory(text)
       setText(''); setImages([])
     } catch (err) {
       console.error('[AIInputBox] Direct upload failed:', err)
@@ -702,6 +744,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
       const parsed = await parseShopInput({ text, ros, employees, images: [] })
       if (parsed.raw) throw new Error('AI returned unexpected format. Please rephrase.')
       setResult(parsed)
+      rememberHistory(text)
       submittedText.current = text
     } catch (err) {
       if (err.message === 'NO_API_KEY')  { setNoKey(true); return }
@@ -867,6 +910,40 @@ export default function AIInputBox({ ros = [], employees = [] }) {
         </div>
       </div>
 
+      {showHistory && (
+        <div className="mb-3 rounded-xl border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 dark:border-zinc-800">
+            <p className="text-xs font-semibold text-gray-700 dark:text-zinc-200">Recent GIB inputs</p>
+            <button
+              type="button"
+              onClick={() => {
+                localStorage.removeItem(GIB_HISTORY_KEY)
+                setHistory([])
+              }}
+              className="text-xs text-gray-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400"
+            >
+              Clear
+            </button>
+          </div>
+          {history.length === 0 ? (
+            <p className="px-3 py-3 text-xs text-gray-400 dark:text-zinc-500">No history yet.</p>
+          ) : (
+            <div className="max-h-40 overflow-y-auto p-1">
+              {history.map((item, idx) => (
+                <button
+                  key={`${idx}-${item}`}
+                  type="button"
+                  onClick={() => useHistoryItem(item)}
+                  className="w-full rounded-lg px-2.5 py-2 text-left text-xs text-gray-700 dark:text-zinc-200 hover:bg-gray-50 dark:hover:bg-zinc-800"
+                >
+                  <span className="line-clamp-2">{item}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Image preview strip */}
       {images.length > 0 && (
         <div className="flex flex-wrap gap-2.5 mb-4">
@@ -891,6 +968,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           value={text}
           onChange={e => setText(e.target.value)}
           candidates={mentionCandidates}
+          dropdownPlacement="inside"
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
               e.preventDefault()
@@ -908,7 +986,19 @@ export default function AIInputBox({ ros = [], employees = [] }) {
         {/* ── Mobile button layout ──────────────────────────────────────── */}
         <div className="sm:hidden space-y-2.5">
           {/* Voice + Photos — 2-col */}
-          <div className="grid grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-3 gap-2.5">
+            <button
+              type="button"
+              onClick={() => setShowHistory(v => !v)}
+              className={`flex flex-col items-center justify-center gap-1 h-14 rounded-xl border-2 text-sm font-semibold transition-all active:scale-95 ${
+                showHistory
+                  ? 'bg-blue-50 border-blue-300 text-blue-600 dark:bg-blue-950/40 dark:border-blue-700 dark:text-blue-300'
+                  : 'bg-gray-50 border-gray-200 dark:bg-zinc-800 dark:border-zinc-700 text-gray-600 dark:text-zinc-300'
+              }`}
+            >
+              <IconHistory />
+              <span className="text-xs">History</span>
+            </button>
             {/* Voice button — Whisper powered */}
             <button
               type="button"
@@ -998,6 +1088,19 @@ export default function AIInputBox({ ros = [], employees = [] }) {
               ? <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
               : <IconMic active={listening} />
             }
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowHistory(v => !v)}
+            className={`flex items-center justify-center px-2.5 py-2 rounded-lg border transition-colors shrink-0 ${
+              showHistory
+                ? 'border-blue-400 text-blue-600 bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:bg-blue-950/40'
+                : 'border-gray-300 dark:border-zinc-700 text-gray-500 dark:text-zinc-400 hover:border-blue-400 hover:text-blue-600 bg-white dark:bg-zinc-800'
+            }`}
+            title="GIB history"
+          >
+            <IconHistory />
           </button>
 
           <button

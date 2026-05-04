@@ -67,7 +67,6 @@ export default function MentionTextarea({
         const name = normalize(item.name)
         return !q || name.startsWith(q) || name.split(' ').some(part => part.startsWith(q))
       })
-      .slice(0, 5)
   }, [candidates, mention])
 
   const updateMention = (nextValue, caret) => {
@@ -138,8 +137,10 @@ export default function MentionTextarea({
       />
       {mention && matches.length > 0 && (
         <div
-          className={`absolute left-0 w-56 max-w-[min(14rem,calc(100vw-2rem))] max-h-28 overflow-y-auto rounded-lg border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-lg z-50 p-0.5 ${
-            dropdownPlacement === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
+          className={`absolute w-36 max-w-[min(9rem,calc(100vw-2rem))] max-h-28 overflow-y-auto rounded-md border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-lg z-50 p-0.5 ${
+            dropdownPlacement === 'inside'
+              ? 'left-3 top-10'
+              : dropdownPlacement === 'top' ? 'left-0 bottom-full mb-1.5' : 'left-0 top-full mt-1.5'
           }`}
         >
           {matches.map((item, idx) => (
@@ -147,18 +148,18 @@ export default function MentionTextarea({
               key={item.id}
               type="button"
               onMouseDown={e => { e.preventDefault(); selectMention(item) }}
-              className={`w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-left transition-colors ${
+              className={`w-full flex items-center gap-1 px-1.5 py-0.5 rounded text-left transition-colors ${
                 idx === activeIndex ? 'bg-gray-100 dark:bg-zinc-800' : 'hover:bg-gray-50 dark:hover:bg-zinc-800/70'
               }`}
             >
-              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold ${
+              <span className={`w-3.5 h-3.5 rounded-full flex items-center justify-center text-[7px] font-bold ${
                 item.type === 'employee' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-white'
               }`}>
                 {item.name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()}
               </span>
               <span className="min-w-0">
-                <span className="block text-[11px] font-semibold text-gray-900 dark:text-gray-100 truncate">@{item.name}</span>
-                <span className="block text-[10px] text-gray-400 dark:text-zinc-500 truncate">{item.meta}</span>
+                <span className="block text-[9px] font-semibold text-gray-900 dark:text-gray-100 truncate">@{item.name}</span>
+                <span className="block text-[8px] leading-tight text-gray-400 dark:text-zinc-500 truncate">{item.meta}</span>
               </span>
             </button>
           ))}

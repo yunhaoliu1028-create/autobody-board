@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { collection, onSnapshot, query, where, orderBy } from 'firebase/firestore'
+import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -138,10 +138,11 @@ export default function Layout({ children }) {
   // Global subscription: conversations → unread count + popup notifications
   useEffect(() => {
     if (!user?.uid) return
+    initializedRef.current = false
+    prevConvosRef.current = {}
     const q = query(
       collection(db, 'conversations'),
       where('members', 'array-contains', user.uid),
-      orderBy('lastAt', 'desc'),
     )
     return onSnapshot(q, snap => {
       const newPrev = {}
@@ -153,20 +154,17 @@ export default function Layout({ children }) {
         const lastAt  = data.lastAt?.toMillis?.() ?? 0
         const readAt  = data.readBy?.[user.uid]?.toMillis?.() ?? 0
         const prevAt  = prevConvosRef.current[convoId] ?? 0
+        const unreadForMe = data.lastSenderId && data.lastSenderId !== user.uid && lastAt > readAt
 
         // Count unread conversations (last message not from me, not read yet)
-        if (data.lastSenderId && data.lastSenderId !== user.uid && lastAt > readAt) {
+        if (unreadForMe) {
           unread++
         }
 
-        // Show popup for new messages (only after initial load)
-        if (
-          initializedRef.current &&
-          lastAt > prevAt &&
-          data.lastSenderId &&
-          data.lastSenderId !== user.uid &&
-          activeChatConvoIdRef.current !== convoId
-        ) {
+        // Show popup for incoming messages. Keep initial-load notices recent enough for cross-tab checks.
+        const isRecentInitialUnread = !initializedRef.current && unreadForMe && Date.now() - lastAt < 600000
+        const isNewSnapshotMessage = initializedRef.current && lastAt > prevAt && unreadForMe
+        if (isRecentInitialUnread || isNewSnapshotMessage) {
           const notifId = `${convoId}-${lastAt}`
           setNotifications(ns => {
             if (ns.find(n => n.id === notifId)) return ns
@@ -189,6 +187,8 @@ export default function Layout({ children }) {
       prevConvosRef.current = newPrev
       initializedRef.current = true
       setChatUnread(unread)
+    }, err => {
+      console.error('[Layout] conversation notification listener failed:', err)
     })
   }, [user?.uid])
 

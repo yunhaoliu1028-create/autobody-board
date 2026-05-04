@@ -13,7 +13,7 @@ import { format } from 'date-fns'
 
 const ROLE_OPTIONS = Object.entries(ROLE_LABELS).map(([k, v]) => ({ key: k, label: v }))
 
-const INPUT = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
+const INPUT = 'w-full border border-gray-300 dark:border-zinc-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-950 text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500'
 
 export default function Admin() {
   const { role } = useAuth()
@@ -89,13 +89,13 @@ export default function Admin() {
   }
 
   const roleColor = {
-    shop_manager:       'bg-blue-100 text-blue-800',
-    production_manager: 'bg-indigo-100 text-indigo-800',
-    estimator:          'bg-purple-100 text-purple-800',
-    body_man:           'bg-orange-100 text-orange-800',
-    painter:            'bg-yellow-100 text-yellow-800',
-    paint_helper:       'bg-amber-100 text-amber-800',
-    parts_manager:      'bg-green-100 text-green-800',
+    shop_manager:       'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300',
+    production_manager: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300',
+    estimator:          'bg-purple-100 text-purple-800 dark:bg-purple-950/50 dark:text-purple-300',
+    body_man:           'bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300',
+    painter:            'bg-yellow-100 text-yellow-800 dark:bg-amber-950/50 dark:text-amber-300',
+    paint_helper:       'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+    parts_manager:      'bg-green-100 text-green-800 dark:bg-emerald-950/50 dark:text-emerald-300',
   }
 
   const active   = employees.filter(e => e.active !== false)
@@ -105,7 +105,7 @@ export default function Admin() {
     <div className="max-w-4xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Team Management</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-zinc-100">Team Management</h1>
           <p className="text-sm text-gray-500">{active.length} active · {inactive.length} inactive</p>
         </div>
         <button
@@ -120,44 +120,44 @@ export default function Admin() {
       </div>
 
       {success && (
-        <div className="bg-green-50 border border-green-200 text-green-700 text-sm px-4 py-3 rounded-lg">
+        <div className="bg-green-50 dark:bg-emerald-950/25 border border-green-200 dark:border-emerald-900/60 text-green-700 dark:text-emerald-300 text-sm px-4 py-3 rounded-lg">
           {success}
         </div>
       )}
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-lg">
+        <div className="bg-red-50 dark:bg-red-950/25 border border-red-200 dark:border-red-900/60 text-red-700 dark:text-red-300 text-sm px-4 py-3 rounded-lg">
           {error}
         </div>
       )}
 
       {/* Add employee form */}
       {showAdd && (
-        <div className="bg-blue-50 border border-blue-200 rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-blue-900 mb-4">New Employee Account</h3>
+        <div className="bg-blue-50 dark:bg-blue-950/25 border border-blue-200 dark:border-blue-900/60 rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-blue-900 dark:text-blue-200 mb-4">New Employee Account</h3>
           <form onSubmit={handleAddEmployee}>
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Full Name *</label>
+                <label className="block text-xs font-medium text-gray-600 dark:text-zinc-400 mb-1">Full Name *</label>
                 <input className={INPUT} value={form.name} onChange={set('name')} placeholder="John Smith" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Email *</label>
+                <label className="block text-xs font-medium text-gray-600 dark:text-zinc-400 mb-1">Email *</label>
                 <input type="email" className={INPUT} value={form.email} onChange={set('email')} placeholder="john@shop.com" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Role *</label>
-                <select className={INPUT + ' bg-white'} value={form.role} onChange={set('role')}>
+                <label className="block text-xs font-medium text-gray-600 dark:text-zinc-400 mb-1">Role *</label>
+                <select className={INPUT} value={form.role} onChange={set('role')}>
                   {ROLE_OPTIONS.map(r => (
                     <option key={r.key} value={r.key}>{r.label}</option>
                   ))}
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Phone</label>
+                <label className="block text-xs font-medium text-gray-600 dark:text-zinc-400 mb-1">Phone</label>
                 <input className={INPUT} value={form.phone} onChange={set('phone')} placeholder="(555) 000-0000" />
               </div>
             </div>
-            <p className="text-xs text-blue-600 mb-4">
+            <p className="text-xs text-blue-600 dark:text-blue-300 mb-4">
               ℹ A password-setup email will be sent to the employee automatically.
             </p>
             <div className="flex gap-2">
@@ -169,7 +169,7 @@ export default function Admin() {
               </button>
               <button
                 type="button" onClick={() => { setShowAdd(false); setError('') }}
-                className="text-sm text-gray-600 hover:text-gray-800 px-4 py-2 border border-gray-300 rounded-lg"
+                className="text-sm text-gray-600 dark:text-zinc-300 hover:text-gray-800 dark:hover:text-zinc-100 px-4 py-2 border border-gray-300 dark:border-zinc-700 rounded-lg hover:bg-white/60 dark:hover:bg-zinc-800"
               >
                 Cancel
               </button>
@@ -179,10 +179,10 @@ export default function Admin() {
       )}
 
       {/* Employee table */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-800 shadow-sm overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-gray-50 border-b border-gray-200 text-xs text-gray-500 uppercase tracking-wider">
+            <tr className="bg-gray-50 dark:bg-zinc-800/70 border-b border-gray-200 dark:border-zinc-800 text-xs text-gray-500 dark:text-zinc-400 uppercase tracking-wider">
               <th className="px-4 py-3 text-left">Name</th>
               <th className="px-4 py-3 text-left">Role</th>
               <th className="px-4 py-3 text-left">Email</th>
@@ -190,43 +190,43 @@ export default function Admin() {
               <th className="px-4 py-3 text-right">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
+          <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
             {employees.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-gray-400">No employees yet.</td>
+                <td colSpan={5} className="px-4 py-8 text-center text-gray-400 dark:text-zinc-500">No employees yet.</td>
               </tr>
             )}
             {employees.map(emp => (
-              <tr key={emp.uid} className={emp.active === false ? 'opacity-50' : ''}>
-                <td className="px-4 py-3 font-medium text-gray-900">{emp.name}</td>
+              <tr key={emp.uid} className={`${emp.active === false ? 'opacity-50' : ''} hover:bg-gray-50 dark:hover:bg-zinc-800/50`}>
+                <td className="px-4 py-3 font-medium text-gray-900 dark:text-zinc-100">{emp.name}</td>
                 <td className="px-4 py-3">
                   <select
                     value={emp.role}
                     onChange={e => changeRole(emp.uid, e.target.value)}
-                    className={`text-xs font-medium px-2 py-0.5 rounded-full border-0 focus:ring-2 focus:ring-blue-500 ${roleColor[emp.role] ?? 'bg-gray-100 text-gray-700'}`}
+                    className={`text-xs font-medium px-2 py-0.5 rounded-full border-0 focus:ring-2 focus:ring-blue-500 ${roleColor[emp.role] ?? 'bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-300'}`}
                   >
                     {ROLE_OPTIONS.map(r => (
                       <option key={r.key} value={r.key}>{r.label}</option>
                     ))}
                   </select>
                 </td>
-                <td className="px-4 py-3 text-gray-500 text-xs">{emp.email}</td>
+                <td className="px-4 py-3 text-gray-500 dark:text-zinc-400 text-xs">{emp.email}</td>
                 <td className="px-4 py-3">
                   <span className={`text-xs px-2 py-0.5 rounded-full font-medium
-                    ${emp.active !== false ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                    ${emp.active !== false ? 'bg-green-100 text-green-700 dark:bg-emerald-950/50 dark:text-emerald-300' : 'bg-gray-100 text-gray-500 dark:bg-zinc-800 dark:text-zinc-400'}`}>
                     {emp.active !== false ? 'Active' : 'Inactive'}
                   </span>
                 </td>
                 <td className="px-4 py-3 text-right flex justify-end gap-2">
                   <button
                     onClick={() => sendReset(emp.email)}
-                    className="text-xs text-blue-600 hover:text-blue-800"
+                    className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
                   >
                     Reset Password
                   </button>
                   <button
                     onClick={() => toggleActive(emp.uid, emp.active !== false)}
-                    className="text-xs text-gray-500 hover:text-gray-800"
+                    className="text-xs text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200"
                   >
                     {emp.active !== false ? 'Deactivate' : 'Activate'}
                   </button>

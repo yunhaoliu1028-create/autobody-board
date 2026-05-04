@@ -35,7 +35,7 @@ function dueDateClass(dateStr) {
     const days = differenceInDays(parseISO(dateStr), new Date())
     if (days < 0)  return 'text-red-500 dark:text-red-400 font-semibold'
     if (days <= 2) return 'text-amber-500 dark:text-amber-400 font-medium'
-    return 'text-gray-500 dark:text-zinc-400'
+  return 'text-gray-500 dark:text-zinc-300'
   } catch { return '' }
 }
 
@@ -62,7 +62,7 @@ function needsDropOffWarning(ro) {
 
 function DropOffInfo({ ro, compact = false }) {
   if (ro.dropOffDate) {
-    return <span className={compact ? 'text-xs text-gray-400 dark:text-zinc-400' : ''}>{compact ? `In: ${fmtDate(ro.dropOffDate)}` : fmtDate(ro.dropOffDate)}</span>
+    return <span className={compact ? 'text-xs text-gray-500 dark:text-zinc-300' : ''}>{compact ? `In: ${fmtDate(ro.dropOffDate)}` : fmtDate(ro.dropOffDate)}</span>
   }
 
   return (
@@ -103,12 +103,12 @@ function RORow({ ro, employees, onSelect }) {
       {/* Insurance + Vehicle + Owner */}
       <td className="px-4 py-3 min-w-[180px]">
         {ro.insuranceCompany && (
-          <div className="text-xs text-gray-400 dark:text-zinc-500 mb-0.5 truncate">{ro.insuranceCompany}</div>
+          <div className="text-xs text-gray-400 dark:text-zinc-400 mb-0.5 truncate">{ro.insuranceCompany}</div>
         )}
         <div className="font-semibold text-sm text-gray-900 dark:text-gray-100 truncate">
           {ro.vehicle}{ro.vehicleColor ? ` · ${ro.vehicleColor}` : ''}
         </div>
-        <div className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 truncate">{ro.customerName}</div>
+        <div className="text-xs text-gray-500 dark:text-zinc-300 mt-0.5 truncate">{ro.customerName}</div>
         {/* Rental highlight */}
         {ro.hasRental === true && (
           <span className="inline-block mt-1 text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400 font-medium">
@@ -123,10 +123,10 @@ function RORow({ ro, employees, onSelect }) {
       </td>
 
       {/* Estimator (CCC) */}
-      <td className="px-4 py-3 text-xs text-gray-500 dark:text-zinc-400 whitespace-nowrap">{estimator}</td>
+      <td className="px-4 py-3 text-xs text-gray-500 dark:text-zinc-300 whitespace-nowrap">{estimator}</td>
 
       {/* Body Tech */}
-      <td className="px-4 py-3 text-xs text-gray-500 dark:text-zinc-400 whitespace-nowrap">{bodyTech}</td>
+      <td className="px-4 py-3 text-xs text-gray-500 dark:text-zinc-300 whitespace-nowrap">{bodyTech}</td>
 
       {/* Parts */}
       <td className="px-4 py-3 whitespace-nowrap">
@@ -195,17 +195,17 @@ function KanbanCard({ ro, onSelect, draggable, onDragStart, onDragEnd }) {
         {/* Vehicle */}
         <p className="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate leading-snug">{ro.vehicle}</p>
         {ro.vehicleColor && (
-          <p className="text-xs text-gray-400 dark:text-zinc-500">{ro.vehicleColor}</p>
+        <p className="text-xs text-gray-400 dark:text-zinc-300">{ro.vehicleColor}</p>
         )}
 
         {/* Owner */}
-        <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5 truncate">{ro.customerName}</p>
+        <p className="text-xs text-gray-500 dark:text-zinc-300 mt-0.5 truncate">{ro.customerName}</p>
 
         {/* Insurance + Claim — brand only, strip "INSURANCE SERVICES" etc. */}
         {(ro.insuranceCompany || ro.claimNumber) && (
-          <div className="mt-2 text-xs text-gray-400 dark:text-zinc-600 truncate">
+          <div className="mt-2 text-xs text-gray-400 dark:text-zinc-400 truncate">
             {ro.insuranceCompany && <span>{shortInsurance(ro.insuranceCompany)}</span>}
-            {ro.claimNumber && <span className="ml-1 opacity-70">#{ro.claimNumber}</span>}
+            {ro.claimNumber && <span className="ml-1 text-gray-400 dark:text-zinc-500">#{ro.claimNumber}</span>}
           </div>
         )}
 

@@ -8,6 +8,9 @@ import { parseMeetingNotes, getApiKey } from '../hooks/useAI'
 import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
 import { format } from 'date-fns'
 
+const FIELD = 'border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-950 text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500'
+const CARD = 'bg-white dark:bg-zinc-900 rounded-xl border border-gray-200 dark:border-zinc-800 shadow-sm'
+
 function normalizeName(value = '') {
   return value
     .toString()
@@ -70,17 +73,17 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
   // ── EDIT MODE ──────────────────────────────────────────────────────────────
   if (editing) {
     return (
-      <div className="border-2 border-blue-400 rounded-xl p-4 bg-white space-y-3 text-sm">
+      <div className="border-2 border-blue-400 rounded-xl p-4 bg-white dark:bg-zinc-900 space-y-3 text-sm">
         <div className="flex items-center justify-between">
-          <span className="font-bold text-blue-700">RO#{roNumber} — Edit</span>
-          {vehicleHint && <span className="text-xs text-gray-400">{vehicleHint}</span>}
+          <span className="font-bold text-blue-700 dark:text-blue-300">RO#{roNumber} — Edit</span>
+          {vehicleHint && <span className="text-xs text-gray-400 dark:text-zinc-400">{vehicleHint}</span>}
         </div>
 
         {/* Status */}
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Repair Status</label>
           <select
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-full"
+            className={`px-2 py-1.5 text-sm w-full ${FIELD}`}
             value={draft.changes?.status ?? ''}
             onChange={e => setChanges({ status: e.target.value || undefined })}
           >
@@ -93,7 +96,7 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Parts Status</label>
           <select
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-full"
+            className={`px-2 py-1.5 text-sm w-full ${FIELD}`}
             value={draft.changes?.partsStatus ?? ''}
             onChange={e => setChanges({ partsStatus: e.target.value || undefined })}
           >
@@ -106,7 +109,7 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Car Status</label>
           <select
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm w-full"
+            className={`px-2 py-1.5 text-sm w-full ${FIELD}`}
             value={draft.changes?.carStatus ?? ''}
             onChange={e => setChanges({ carStatus: e.target.value || undefined })}
           >
@@ -120,7 +123,7 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
           <label className="block text-xs font-medium text-gray-500 mb-1">Target Completion Date</label>
           <input
             type="date"
-            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            className={`px-2 py-1.5 text-sm ${FIELD}`}
             value={draft.changes?.dueDate ?? ''}
             onChange={e => setChanges({ dueDate: e.target.value || undefined })}
           />
@@ -130,7 +133,7 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Note to append</label>
           <textarea
-            className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm resize-y"
+            className={`w-full px-2 py-1.5 text-sm resize-y ${FIELD}`}
             rows={3}
             value={draft.changes?.notes ?? ''}
             onChange={e => setChanges({ notes: e.target.value })}
@@ -148,16 +151,16 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
           </div>
           <div className="space-y-2">
             {(draft.tasks ?? []).map((task, ti) => (
-              <div key={ti} className="bg-green-50 rounded-lg p-2 space-y-1.5 border border-green-200">
+              <div key={ti} className="bg-green-50 dark:bg-emerald-950/25 rounded-lg p-2 space-y-1.5 border border-green-200 dark:border-emerald-900/60">
                 <div className="flex gap-1.5">
                   <input
-                    className="flex-1 border border-gray-300 rounded px-2 py-1 text-xs"
+                    className={`flex-1 px-2 py-1 text-xs ${FIELD}`}
                     placeholder="Assignee"
                     value={task.assigneeName ?? ''}
                     onChange={e => handleTaskChange(ti, { assigneeName: e.target.value })}
                   />
                   <select
-                    className="border border-gray-300 rounded px-1 py-1 text-xs"
+                    className={`px-1 py-1 text-xs ${FIELD}`}
                     value={task.priority ?? 'medium'}
                     onChange={e => handleTaskChange(ti, { priority: e.target.value })}
                   >
@@ -172,13 +175,13 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
                   >×</button>
                 </div>
                 <input
-                  className="w-full border border-gray-300 rounded px-2 py-1 text-xs"
+                  className={`w-full px-2 py-1 text-xs ${FIELD}`}
                   placeholder="Task title"
                   value={task.title ?? ''}
                   onChange={e => handleTaskChange(ti, { title: e.target.value })}
                 />
                 <input
-                  className="w-full border border-gray-300 rounded px-2 py-1 text-xs"
+                  className={`w-full px-2 py-1 text-xs ${FIELD}`}
                   placeholder="Description (optional)"
                   value={task.description ?? ''}
                   onChange={e => handleTaskChange(ti, { description: e.target.value })}
@@ -195,7 +198,7 @@ function ChangeRow({ change, checked, onToggle, onChange }) {
           >Done</button>
           <button
             onClick={handleCancel}
-            className="px-3 py-1.5 border border-gray-300 text-gray-600 text-xs rounded-lg hover:bg-gray-50"
+            className="px-3 py-1.5 border border-gray-300 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 text-xs rounded-lg hover:bg-gray-50 dark:hover:bg-zinc-800"
           >Cancel</button>
         </div>
       </div>
@@ -424,7 +427,7 @@ export default function MeetingImport() {
   return (
     <div className="max-w-3xl mx-auto space-y-5">
       <div>
-        <h1 className="text-xl font-bold text-gray-900">Morning Meeting Import</h1>
+        <h1 className="text-xl font-bold text-gray-900 dark:text-zinc-100">Morning Meeting Import</h1>
         <p className="text-sm text-gray-500 mt-0.5">Paste your DingTalk AI meeting summary — AI will extract updates for review</p>
       </div>
 
@@ -435,8 +438,8 @@ export default function MeetingImport() {
       )}
 
       {/* Input area */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-        <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
+      <div className={`${CARD} p-5`}>
+        <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 mb-2">
           Paste DingTalk AI Summary or Meeting Notes
         </label>
         <textarea
@@ -444,7 +447,7 @@ export default function MeetingImport() {
           onChange={e => setText(e.target.value)}
           rows={10}
           placeholder={"Paste the DingTalk AI meeting summary here…\n\nThe AI will find:\n• RO numbers mentioned\n• Status updates\n• Task assignments\n• Parts updates"}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className={`w-full px-3 py-2 text-sm font-mono resize-y ${FIELD}`}
         />
 
         {/* Image preview strip */}
@@ -473,7 +476,7 @@ export default function MeetingImport() {
         )}
 
         <div className="flex items-center justify-between mt-3">
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-gray-400 dark:text-zinc-500">
             {text.length} characters{images.length > 0 ? ` · ${images.length} image(s)` : ''}
           </span>
           <button
@@ -490,26 +493,26 @@ export default function MeetingImport() {
             {loading ? 'Parsing with AI…' : 'Parse Meeting Notes'}
           </button>
         </div>
-        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+        {error && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{error}</p>}
       </div>
 
       {/* Results */}
       {result && !applied && (
         <div className="space-y-4">
           {result.summary && (
-            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-              <p className="text-xs font-semibold text-blue-500 uppercase tracking-wide mb-1">AI Summary</p>
-              <p className="text-sm text-blue-900">{result.summary}</p>
+            <div className="bg-blue-50 dark:bg-blue-950/25 border border-blue-200 dark:border-blue-900/60 rounded-xl p-4">
+              <p className="text-xs font-semibold text-blue-500 dark:text-blue-300 uppercase tracking-wide mb-1">AI Summary</p>
+              <p className="text-sm text-blue-900 dark:text-blue-100">{result.summary}</p>
             </div>
           )}
 
           {roActions.length > 0 && (
             <div>
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-gray-700">
+                <h3 className="text-sm font-semibold text-gray-700 dark:text-zinc-200">
                   {roActions.length} RO{roActions.length > 1 ? 's' : ''} with updates — edit if needed, then select to apply:
                 </h3>
-                <div className="flex gap-3 text-xs text-blue-600">
+                <div className="flex gap-3 text-xs text-blue-600 dark:text-blue-400">
                   <button onClick={() => {
                     const all = {}; roActions.forEach((_, i) => all[i] = true); setChecked(all)
                   }}>Select all</button>
@@ -531,16 +534,16 @@ export default function MeetingImport() {
           )}
 
           {result.generalNotes && (
-            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">General Notes</p>
-              <p className="text-sm text-gray-700">{result.generalNotes}</p>
+            <div className="bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-4">
+              <p className="text-xs font-semibold text-gray-500 dark:text-zinc-400 uppercase tracking-wide mb-1">General Notes</p>
+              <p className="text-sm text-gray-700 dark:text-zinc-200">{result.generalNotes}</p>
             </div>
           )}
 
           {result.unrecognized?.length > 0 && (
-            <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
+            <div className="bg-yellow-50 dark:bg-yellow-950/25 border border-yellow-200 dark:border-yellow-900/60 rounded-xl p-4">
               <p className="text-xs font-semibold text-yellow-700 uppercase tracking-wide mb-1">⚠ Couldn't Match These</p>
-              <ul className="text-sm text-yellow-800 space-y-0.5 list-disc ml-4">
+              <ul className="text-sm text-yellow-800 dark:text-yellow-100 space-y-0.5 list-disc ml-4">
                 {result.unrecognized.map((u, i) => <li key={i}>{u}</li>)}
               </ul>
             </div>
@@ -556,7 +559,7 @@ export default function MeetingImport() {
             </button>
             <button
               onClick={() => { setResult(null); setText('') }}
-              className="px-4 py-2.5 border border-gray-300 text-gray-600 text-sm rounded-lg hover:bg-gray-50"
+              className="px-4 py-2.5 border border-gray-300 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 text-sm rounded-lg hover:bg-gray-50 dark:hover:bg-zinc-800"
             >
               Start Over
             </button>
@@ -565,13 +568,13 @@ export default function MeetingImport() {
       )}
 
       {applied && (
-        <div className="bg-green-50 border border-green-300 rounded-xl p-5 text-center">
+        <div className="bg-green-50 dark:bg-emerald-950/25 border border-green-300 dark:border-emerald-900/60 rounded-xl p-5 text-center">
           <p className="text-2xl mb-2">✅</p>
-          <p className="font-semibold text-green-800">Updates applied successfully!</p>
-          <p className="text-sm text-green-600 mt-1">All selected changes have been saved to the board.</p>
+          <p className="font-semibold text-green-800 dark:text-emerald-200">Updates applied successfully!</p>
+          <p className="text-sm text-green-600 dark:text-emerald-300 mt-1">All selected changes have been saved to the board.</p>
           <button
             onClick={() => { setResult(null); setText(''); setApplied(false) }}
-            className="mt-3 text-sm text-green-700 underline"
+            className="mt-3 text-sm text-green-700 dark:text-emerald-300 underline"
           >
             Import another meeting
           </button>
