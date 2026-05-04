@@ -43,7 +43,7 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
       <Route path="/settings" element={
-        <ProtectedRoute allowedRoles={MANAGER_ROLES}>
+        <ProtectedRoute>
           <Layout><Settings /></Layout>
         </ProtectedRoute>
       } />

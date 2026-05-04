@@ -6,7 +6,40 @@ import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { parseShopInput, getApiKey, transcribeWithWhisper } from '../hooks/useAI'
 import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
-import { format } from 'date-fns'
+import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
+
+function dueDateToPriority(ro) {
+  const dateStr = ro?.cccDateOut || ro?.promisedDate
+  if (!dateStr) return 'medium'
+  try {
+    const due  = parseISO(dateStr)
+    if (!isValid(due)) return 'medium'
+    const days = differenceInCalendarDays(due, new Date())
+    if (days <= 2)  return 'high'
+    if (days <= 7)  return 'medium'
+    return 'low'
+  } catch { return 'medium' }
+}
+
+function normalizeName(value = '') {
+  return value
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function findEmployeeByName(employees, rawName = '') {
+  const target = normalizeName(rawName)
+  if (!target) return null
+  const targetParts = target.split(' ').filter(Boolean)
+  return employees.find(emp => {
+    const name = normalizeName(emp.name)
+    if (!name) return false
+    if (name === target || name.includes(target) || target.includes(name)) return true
+    return targetParts.some(part => part.length > 1 && name.split(' ').includes(part))
+  }) ?? null
+}
 
 // ── Photo-type keyword detection (no AI needed) ───────────────────────────────
 const PHOTO_TYPES = [
@@ -43,6 +76,7 @@ const ACTION_LABELS = {
   update_status:       { label: 'Update Status',   color: 'bg-purple-50 border-purple-200 dark:bg-purple-950/40 dark:border-purple-900' },
   update_parts_status: { label: 'Parts Status',    color: 'bg-amber-50  border-amber-200  dark:bg-amber-950/40  dark:border-amber-900' },
   assign_task:         { label: 'Assign Task',     color: 'bg-green-50  border-green-200  dark:bg-green-950/40  dark:border-green-900' },
+  assign_body_man:     { label: 'Set Body Tech',  color: 'bg-blue-50   border-blue-200   dark:bg-blue-950/40   dark:border-blue-900' },
   update_car_status:   { label: 'Car Status',      color: 'bg-orange-50 border-orange-200 dark:bg-orange-950/40 dark:border-orange-900' },
   update_dropoff_date: { label: 'Drop-Off Date',   color: 'bg-cyan-50   border-cyan-200   dark:bg-cyan-950/40   dark:border-cyan-900' },
   update_due_date:     { label: 'Target Date',     color: 'bg-rose-50   border-rose-200   dark:bg-rose-950/40   dark:border-rose-900' },
@@ -736,15 +770,30 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           entry.fields.hasRental = action.hasRental
           entry.changeLogEntries.push({ type: 'update_rental', value: String(action.hasRental), by: author, at: now, source: 'gib' })
           break
+        case 'assign_body_man': {
+          const assignee = findEmployeeByName(employees, action.assigneeName)
+          if (assignee) {
+            entry.fields.assignedBodyMan = assignee.uid
+            entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
+          }
+          break
+        }
         case 'assign_task': {
-          const assignee = employees.find(e =>
-            e.name.toLowerCase().includes(action.assigneeName?.toLowerCase() ?? '')
-          )
+          const assignee = findEmployeeByName(employees, action.assigneeName)
+          if (!assignee) {
+            throw new Error(`Could not match task assignee "${action.assigneeName}". Edit the suggested action and choose a valid employee name.`)
+          }
+          const roDueDate  = roDoc.cccDateOut || roDoc.promisedDate || null
+          const isBodyTask = /body\s*(man|tech|work)/i.test(action.title ?? '')
+          if (isBodyTask) entry.fields.assignedBodyMan = assignee.uid
           entry.taskPromises.push(addDoc(collection(db, 'tasks'), {
             roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
-            assignedTo: assignee?.uid ?? '', assignedBy: user.uid,
+            assignedTo: assignee.uid, assignedBy: user.uid,
+            assignedToName: assignee.name ?? '',
             title: action.title, description: action.description ?? '',
-            priority: action.priority ?? 'medium', status: 'pending',
+            priority: dueDateToPriority(roDoc),
+            dueDate: roDueDate,
+            status: 'pending',
             createdAt: serverTimestamp(),
           }))
           break
@@ -774,9 +823,11 @@ export default function AIInputBox({ ros = [], employees = [] }) {
       }
 
       setApplied(true)
+      setResult(null)
+      setActions([])
       setText('')
       setImages([])
-      setTimeout(() => { setResult(null); setApplied(false) }, 2500)
+      setTimeout(() => setApplied(false), 2500)
     } catch (err) {
       console.error('[handleApply]', err)
       setError('Apply failed: ' + err.message)
@@ -805,8 +856,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
     <div className="bg-white dark:bg-zinc-900 rounded-2xl border-2 border-blue-200 dark:border-blue-800 shadow-sm p-5 mb-5">
 
       {/* Header */}
-      <div className="flex items-center gap-3 mb-4">
-        <span className="text-2xl sm:text-xl leading-none">🤖</span>
+      <div className="mb-4">
         <div>
           <h2 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight">Quick Update</h2>
           <p className="text-xs text-gray-400 dark:text-zinc-500">

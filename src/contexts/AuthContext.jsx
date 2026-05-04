@@ -1,5 +1,11 @@
 import { createContext, useContext, useEffect, useState } from 'react'
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
+import {
+  RecaptchaVerifier,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPhoneNumber,
+  signOut,
+} from 'firebase/auth'
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore'
 import { auth, db } from '../firebase/config'
 
@@ -21,9 +27,14 @@ export function AuthProvider({ children }) {
           setUserProfile(snap.data())
         } else {
           // First login — auto-create a default profile so they appear in Team Management
+          const fallbackName = firebaseUser.displayName
+            || firebaseUser.email?.split('@')[0]
+            || firebaseUser.phoneNumber
+            || 'New User'
           const defaultProfile = {
-            name:      firebaseUser.displayName || firebaseUser.email.split('@')[0],
-            email:     firebaseUser.email.toLowerCase(),
+            name:      fallbackName,
+            email:     firebaseUser.email?.toLowerCase() ?? '',
+            phone:     firebaseUser.phoneNumber ?? '',
             role:      'body_man',   // manager can change this via Team page
             active:    true,
             createdAt: serverTimestamp(),
@@ -43,6 +54,20 @@ export function AuthProvider({ children }) {
   const login = (email, password) =>
     signInWithEmailAndPassword(auth, email, password)
 
+  const sendPhoneCode = async (phoneNumber, containerId) => {
+    if (window.recaptchaVerifier) {
+      window.recaptchaVerifier.clear()
+      window.recaptchaVerifier = null
+    }
+
+    const verifier = new RecaptchaVerifier(auth, containerId, {
+      size: 'invisible',
+      callback: () => {},
+    })
+    window.recaptchaVerifier = verifier
+    return signInWithPhoneNumber(auth, phoneNumber, verifier)
+  }
+
   const logout = () => signOut(auth)
 
   const value = {
@@ -52,6 +77,7 @@ export function AuthProvider({ children }) {
     displayName: userProfile?.name ?? user?.email ?? '',
     loading,
     login,
+    sendPhoneCode,
     logout,
     refreshProfile: async () => {
       if (!user) return

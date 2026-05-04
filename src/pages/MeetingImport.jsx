@@ -8,6 +8,26 @@ import { parseMeetingNotes, getApiKey } from '../hooks/useAI'
 import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
 import { format } from 'date-fns'
 
+function normalizeName(value = '') {
+  return value
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function findEmployeeByName(employees, rawName = '') {
+  const target = normalizeName(rawName)
+  if (!target) return null
+  const targetParts = target.split(' ').filter(Boolean)
+  return employees.find(emp => {
+    const name = normalizeName(emp.name)
+    if (!name) return false
+    if (name === target || name.includes(target) || target.includes(name)) return true
+    return targetParts.some(part => part.length > 1 && name.split(' ').includes(part))
+  }) ?? null
+}
+
 // ── Editable ChangeRow ────────────────────────────────────────────────────────
 function ChangeRow({ change, checked, onToggle, onChange }) {
   const [editing, setEditing] = useState(false)
@@ -373,14 +393,14 @@ export default function MeetingImport() {
         }
 
         for (const task of (action.tasks ?? [])) {
-          const assignee = employees.find(e =>
-            e.name.toLowerCase().includes((task.assigneeName ?? '').toLowerCase())
-          )
+          const assignee = findEmployeeByName(employees, task.assigneeName)
+          if (!assignee) throw new Error(`Could not match task assignee "${task.assigneeName}".`)
           await addDoc(collection(db, 'tasks'), {
             roId:        roDoc.id,
             roNumber:    roDoc.roNumber,
             vehicleInfo: roDoc.vehicle,
-            assignedTo:  assignee?.uid ?? '',
+            assignedTo:  assignee.uid,
+            assignedToName: assignee.name ?? '',
             assignedBy:  user.uid,
             title:       task.title,
             description: task.description ?? '',
@@ -467,7 +487,7 @@ export default function MeetingImport() {
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
               </svg>
             )}
-            {loading ? 'Parsing with AI…' : '🤖 Parse Meeting Notes'}
+            {loading ? 'Parsing with AI…' : 'Parse Meeting Notes'}
           </button>
         </div>
         {error && <p className="mt-2 text-sm text-red-600">{error}</p>}

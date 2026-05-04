@@ -305,6 +305,8 @@ Always return valid JSON:
 ─── ACTIONS (when asked to act on ROs) ──────────────────────────
 {"type":"add_note","roNumber":"9448","note":"English text","confidence":"high"}
 {"type":"assign_task","roNumber":"9448","assigneeName":"David","title":"English title","description":"","priority":"high","confidence":"high"}
+{"type":"assign_body_man","roNumber":"9448","assigneeName":"David","confidence":"high"}
+Use assign_body_man (NOT assign_task) when the user asks to set/assign the body technician or body man on an RO. Use assign_task for all other task assignments.
 All note/title text MUST be English.
 
 ─── MEMORY ──────────────────────────────────────────────────────

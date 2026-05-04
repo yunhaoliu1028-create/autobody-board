@@ -322,8 +322,11 @@ function ConversationPanel({ convo, myUid, allUsers, onBack }) {
         createdAt:  serverTimestamp(),
       })
       await updateDoc(doc(db, 'conversations', convo.id), {
-        lastMessage: msgText,
-        lastAt:      serverTimestamp(),
+        lastMessage:    msgText,
+        lastAt:         serverTimestamp(),
+        lastSenderId:   myUid,
+        lastSenderName: myName,
+        [`readBy.${myUid}`]: serverTimestamp(),
       })
     } finally {
       setSending(false)
@@ -489,9 +492,17 @@ export default function Chat() {
     }
   }, [conversations])
 
-  const openConvo = (convo) => {
+  const openConvo = async (convo) => {
     setActiveConvo(convo)
-    setShowSidebar(false)  // on mobile, show messages panel
+    setShowSidebar(false)
+    // Tell Layout which convo is open (suppress popup for this convo)
+    window.dispatchEvent(new CustomEvent('chatConvoChanged', { detail: { convoId: convo.id } }))
+    // Mark as read
+    try {
+      await updateDoc(doc(db, 'conversations', convo.id), {
+        [`readBy.${user.uid}`]: serverTimestamp(),
+      })
+    } catch (_) {}
   }
 
   return (

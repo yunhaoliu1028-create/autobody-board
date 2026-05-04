@@ -1,6 +1,6 @@
-import { useEffect, useState, useMemo, useRef } from 'react'
+import { useEffect, useState, useMemo, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { collection, onSnapshot, query, orderBy, where } from 'firebase/firestore'
+import { collection, onSnapshot, query, orderBy, doc, updateDoc, serverTimestamp, arrayUnion } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
@@ -9,7 +9,7 @@ import AIInputBox from '../components/AIInputBox'
 import RODrawer   from '../components/RODrawer'
 import {
   RO_STATUSES, STATUS_MAP, PARTS_STATUSES,
-  ROLE_STATUS_FILTER, MANAGER_ROLES, EDIT_RO_ROLES,
+  MANAGER_ROLES, EDIT_RO_ROLES,
   STATUS_GROUPS,
 } from '../constants/roles'
 import { parseISO, differenceInDays, isValid, format } from 'date-fns'
@@ -56,9 +56,27 @@ function shortInsurance(name) {
   return trimmed || name
 }
 
+function needsDropOffWarning(ro) {
+  return !ro.dropOffDate && ro.status !== 'checked_in' && ro.carStatus !== 'pending_dropoff'
+}
+
+function DropOffInfo({ ro, compact = false }) {
+  if (ro.dropOffDate) {
+    return <span className={compact ? 'text-xs text-gray-400 dark:text-zinc-400' : ''}>{compact ? `In: ${fmtDate(ro.dropOffDate)}` : fmtDate(ro.dropOffDate)}</span>
+  }
+
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-900/60 dark:text-amber-200 ${compact ? '' : 'whitespace-nowrap'}`}>
+      Pending
+      {needsDropOffWarning(ro) && (
+        <span title="Drop-off date needs update" className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-red-100 text-[10px] font-bold text-red-700 dark:bg-red-900/60 dark:text-red-200">!</span>
+      )}
+    </span>
+  )
+}
+
 // ── SVG icons ─────────────────────────────────────────────────────────────────
 function IconSearch() { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path strokeLinecap="round" d="m21 21-4.35-4.35"/></svg> }
-function IconPlus()   { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" d="M12 5v14M5 12h14"/></svg> }
 function IconList()   { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><path strokeLinecap="round" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg> }
 function IconGrid()   { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> }
 function IconPencil() { return <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg> }
@@ -117,7 +135,7 @@ function RORow({ ro, employees, onSelect }) {
 
       {/* Drop-off Date (manual, not CCC) */}
       <td className="px-4 py-3 text-xs text-gray-500 dark:text-zinc-400 whitespace-nowrap">
-        {fmtDate(ro.dropOffDate)}
+        <DropOffInfo ro={ro} />
       </td>
 
       {/* Due Date */}
@@ -138,13 +156,16 @@ function RORow({ ro, employees, onSelect }) {
 }
 
 // ── Kanban card ───────────────────────────────────────────────────────────────
-function KanbanCard({ ro, onSelect }) {
+function KanbanCard({ ro, onSelect, draggable, onDragStart, onDragEnd }) {
   const dueDate = ro.cccDateOut || ro.promisedDate
 
   return (
     <div
       onClick={() => onSelect(ro)}
-      className="relative bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl p-3.5 shadow-sm hover:shadow-md hover:border-gray-300 dark:hover:border-zinc-700 transition-all cursor-pointer group"
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      className="relative bg-white dark:bg-zinc-800/90 border border-gray-200 dark:border-zinc-700 rounded-xl p-3.5 shadow-sm hover:shadow-md hover:border-gray-300 dark:hover:border-zinc-600 transition-all cursor-grab active:cursor-grabbing group"
     >
       {/* Edit icon — navigates to RODetail without opening drawer */}
       <Link
@@ -191,15 +212,7 @@ function KanbanCard({ ro, onSelect }) {
         {/* Dates row */}
         <div className="mt-2 flex items-center justify-between gap-2">
           {/* Drop-off (manual entry, not CCC) */}
-          {ro.dropOffDate ? (
-            <span className="text-xs text-gray-400 dark:text-zinc-600">
-              In: {fmtDate(ro.dropOffDate)}
-            </span>
-          ) : (
-            <span className="text-xs text-gray-300 dark:text-zinc-700 italic">
-              {ro.carStatus === 'pending_dropoff' ? 'Pending' : 'No drop-off'}
-            </span>
-          )}
+          <DropOffInfo ro={ro} compact />
 
           {/* Due date */}
           {dueDate && (
@@ -221,9 +234,182 @@ function KanbanCard({ ro, onSelect }) {
   )
 }
 
+// ── PendingToBodyModal ────────────────────────────────────────────────────────
+function PendingToBodyModal({ ro, employees, onConfirm, onCancel }) {
+  const bodyMen = employees.filter(e => e.role === 'body_man')
+  const painters = employees.filter(e => e.role === 'painter' || e.role === 'paint_helper')
+
+  const [bodyManUid,    setBodyManUid]    = useState(ro.assignedBodyMan || '')
+  const [painterUid,    setPainterUid]    = useState(ro.assignedPainter || (painters[0]?.uid ?? ''))
+  const [authorized,    setAuthorized]    = useState(ro.customerAuthorized ?? null)
+  const [dropOffDate,   setDropOffDate]   = useState(ro.dropOffDate || '')
+  const [hasRental,     setHasRental]     = useState(ro.hasRental ?? false)
+  const [error,         setError]         = useState('')
+
+  const handleConfirm = () => {
+    if (!bodyManUid)           return setError('Please assign a body technician.')
+    if (authorized === null)   return setError('Please confirm customer authorization.')
+    if (!dropOffDate)          return setError('Please enter the drop-off date.')
+    setError('')
+    onConfirm({ bodyManUid, painterUid, authorized, dropOffDate, hasRental })
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+      <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl w-full max-w-sm border border-gray-200 dark:border-zinc-800 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-100 dark:border-zinc-800">
+          <h3 className="font-bold text-gray-900 dark:text-gray-100">Move to Body Work</h3>
+          <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">RO #{ro.roNumber} · {ro.vehicle}</p>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          {/* Body Tech */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300 mb-1.5">
+              Body Technician <span className="text-red-500">*</span>
+            </label>
+            <select
+              value={bodyManUid}
+              onChange={e => setBodyManUid(e.target.value)}
+              className="w-full border border-gray-300 dark:border-zinc-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">— Select body tech —</option>
+              {bodyMen.map(e => <option key={e.uid} value={e.uid}>{e.name}</option>)}
+            </select>
+          </div>
+
+          {/* Painter (auto-fill) */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300 mb-1.5">
+              Painter
+            </label>
+            <select
+              value={painterUid}
+              onChange={e => setPainterUid(e.target.value)}
+              className="w-full border border-gray-300 dark:border-zinc-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">— None —</option>
+              {painters.map(e => <option key={e.uid} value={e.uid}>{e.name}</option>)}
+            </select>
+          </div>
+
+          {/* Customer Authorization */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300 mb-1.5">
+              Customer Authorized to Start? <span className="text-red-500">*</span>
+            </label>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setAuthorized(true)}
+                className={`flex-1 py-2 text-sm font-medium rounded-lg border transition-colors
+                  ${authorized === true ? 'bg-green-600 text-white border-transparent' : 'border-gray-300 dark:border-zinc-700 text-gray-600 dark:text-zinc-400'}`}
+              >Yes</button>
+              <button
+                onClick={() => setAuthorized(false)}
+                className={`flex-1 py-2 text-sm font-medium rounded-lg border transition-colors
+                  ${authorized === false ? 'bg-red-500 text-white border-transparent' : 'border-gray-300 dark:border-zinc-700 text-gray-600 dark:text-zinc-400'}`}
+              >No</button>
+            </div>
+          </div>
+
+          {/* Drop-off Date */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300 mb-1.5">
+              Drop-off Date <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="date"
+              value={dropOffDate}
+              onChange={e => setDropOffDate(e.target.value)}
+              className="w-full border border-gray-300 dark:border-zinc-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          {/* Rental */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-gray-700 dark:text-zinc-300">Rental Car?</span>
+            <button
+              onClick={() => setHasRental(v => !v)}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                ${hasRental ? 'bg-blue-600' : 'bg-gray-300 dark:bg-zinc-600'}`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                ${hasRental ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
+
+          {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
+        </div>
+
+        <div className="px-5 py-4 border-t border-gray-100 dark:border-zinc-800 flex gap-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 py-2 border border-gray-300 dark:border-zinc-700 rounded-xl text-sm font-medium text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors"
+          >Cancel</button>
+          <button
+            onClick={handleConfirm}
+            className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded-xl text-sm font-medium text-white transition-colors"
+          >Confirm →</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const VIEWS = ['list', 'kanban']
 
 // ── Main ──────────────────────────────────────────────────────────────────────
+function handlePrintRos(rosToPrint, employees) {
+  const popup = window.open('', '_blank', 'width=1200,height=800')
+  if (!popup) return
+
+  const rows = rosToPrint.map(ro => `
+    <tr>
+      <td>#${ro.roNumber ?? ''}</td>
+      <td>${ro.vehicle ?? ''}</td>
+      <td>${ro.customerName ?? ''}</td>
+      <td>${ro.insuranceCompany ?? ''}</td>
+      <td>${STATUS_MAP[ro.status]?.label ?? ro.status ?? ''}</td>
+      <td>${ro.partsStatus ?? ''}</td>
+      <td>${ro.dropOffDate || 'Pending'}</td>
+      <td>${ro.cccDateOut || ro.promisedDate || ''}</td>
+      <td>${employees[ro.assignedBodyMan] ?? ''}</td>
+    </tr>
+  `).join('')
+
+  popup.document.write(`
+    <!doctype html>
+    <html>
+      <head>
+        <title>RO List</title>
+        <style>
+          @page { size: landscape; margin: 0.4in; }
+          body { font-family: Arial, sans-serif; color: #111827; }
+          h1 { font-size: 18px; margin: 0 0 4px; }
+          p { margin: 0 0 14px; font-size: 12px; color: #4b5563; }
+          table { width: 100%; border-collapse: collapse; font-size: 11px; }
+          th, td { border: 1px solid #d1d5db; padding: 6px 7px; text-align: left; vertical-align: top; }
+          th { background: #f3f4f6; font-weight: 700; }
+        </style>
+      </head>
+      <body>
+        <h1>Repair Order List</h1>
+        <p>${new Date().toLocaleString()} · ${rosToPrint.length} ROs</p>
+        <table>
+          <thead>
+            <tr>
+              <th>RO #</th><th>Vehicle</th><th>Owner</th><th>Insurance</th><th>Status</th>
+              <th>Parts</th><th>Drop-off</th><th>Due</th><th>Body Tech</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <script>window.print(); window.onafterprint = () => window.close();<\/script>
+      </body>
+    </html>
+  `)
+  popup.document.close()
+}
+
 export default function ROBoard() {
   const { role, user } = useAuth()
   const toast      = useToast()
@@ -232,36 +418,37 @@ export default function ROBoard() {
   const prevRosRef = useRef(null)          // for change-detection
 
   const [ros,            setRos]            = useState([])
-  const [employees,      setEmployees]      = useState({})
+  const [employees,      setEmployees]      = useState({})   // uid -> name map
+  const [employeeList,   setEmployeeList]   = useState([])   // [{uid, name, role}]
   const [selectedRO,     setSelectedRO]     = useState(null)
   const [loading,        setLoading]        = useState(true)
-  const [view,           setView]           = useState('list')
+  const [view,           setView]           = useState('kanban')
   const [search,         setSearch]         = useState('')
   const [filterStatus,   setFilterStatus]   = useState('all')
-  const [showDelivered,  setShowDelivered]  = useState(false)
+  const [showDeliveredArchive, setShowDeliveredArchive] = useState(false)
+  // Drag-and-drop state
+  const [dragRoId,       setDragRoId]       = useState(null)
+  const [dragOverGroup,  setDragOverGroup]  = useState(null)
+  const [statusPicker,   setStatusPicker]   = useState(null)  // { roId, groupKey, statuses }
+  const [pendingToBody,  setPendingToBody]  = useState(null)  // { ro }
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'users'), snap => {
-      const map = {}
-      snap.forEach(d => { map[d.id] = d.data().name })
+      const map  = {}
+      const list = []
+      snap.forEach(d => {
+        const data = d.data()
+        map[d.id] = data.name
+        list.push({ uid: d.id, name: data.name, role: data.role ?? '' })
+      })
       setEmployees(map)
+      setEmployeeList(list)
     })
     return unsub
   }, [])
 
   useEffect(() => {
-    const roleFilter = ROLE_STATUS_FILTER[role]
-    let q
-
-    if (isManager) {
-      q = query(collection(db, 'ros'), orderBy('roNumber', 'asc'))
-    } else if (roleFilter) {
-      q = query(collection(db, 'ros'), where('status', 'in', roleFilter), orderBy('roNumber', 'asc'))
-    } else if (role === 'estimator') {
-      q = query(collection(db, 'ros'), orderBy('roNumber', 'asc'))
-    } else {
-      q = query(collection(db, 'ros'), where('assignedBodyMan', '==', user.uid), orderBy('roNumber', 'asc'))
-    }
+    const q = query(collection(db, 'ros'), orderBy('roNumber', 'asc'))
 
     const unsub = onSnapshot(q, snap => {
       const newRos = snap.docs.map(d => ({ id: d.id, ...d.data() }))
@@ -282,11 +469,10 @@ export default function ROBoard() {
       setLoading(false)
     }, err => { console.error(err); setLoading(false) })
     return unsub
-  }, [role, user.uid, isManager])   // toast is stable, no need in deps
+  }, [])   // toast is stable, no need in deps
 
   const filtered = useMemo(() => ros.filter(ro => {
-    // Delivered filter
-    if (!showDelivered && ro.status === 'delivered') return false
+    if (ro.status === 'delivered') return false
     const matchStatus = filterStatus === 'all' || ro.status === filterStatus
     const q = search.toLowerCase()
     const matchSearch = !q
@@ -295,12 +481,18 @@ export default function ROBoard() {
       || ro.vehicle?.toLowerCase().includes(q)
       || ro.insuranceCompany?.toLowerCase().includes(q)
     return matchStatus && matchSearch
-  }), [ros, filterStatus, search, showDelivered])
+  }), [ros, filterStatus, search])
+
+  const deliveredRos = useMemo(() => {
+    return ros.filter(ro => ro.status === 'delivered')
+  }, [ros])
 
   // Count per status (for filter pills)
   const statusCounts = useMemo(() => {
     const counts = {}
-    ros.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1 })
+    ros.forEach(r => {
+      if (r.status !== 'delivered') counts[r.status] = (counts[r.status] || 0) + 1
+    })
     return counts
   }, [ros])
 
@@ -312,8 +504,81 @@ export default function ROBoard() {
     }))
   }, [filtered])
 
+  // ── Drag-and-drop handlers ───────────────────────────────────────────────────
+
+  const handleDrop = (group) => {
+    if (!dragRoId) return
+    const ro = ros.find(r => r.id === dragRoId)
+    if (!ro) return
+    setDragRoId(null)
+    setDragOverGroup(null)
+
+    // PENDING → BODY: requires confirmation modal
+    const currentGroup = STATUS_GROUPS.find(g => g.statuses.includes(ro.status))
+    if (currentGroup?.key === 'PENDING' && group.key === 'BODY') {
+      // Get full employee objects with roles
+      const allEmps = employeeList.map(e => {
+        const userData = ros // fallback; real role comes from users collection
+        return e
+      })
+      setPendingToBody({ ro })
+      return
+    }
+
+    if (group.statuses.length === 1) {
+      applyStatusDrop(dragRoId, group.statuses[0])
+    } else if (group.statuses.length > 1) {
+      setStatusPicker({ roId: dragRoId, groupKey: group.key, statuses: group.statuses })
+    }
+  }
+
+  const applyStatusDrop = async (roId, newStatus) => {
+    const ro = ros.find(r => r.id === roId)
+    if (!ro || ro.status === newStatus) return
+    const author = employees[user?.uid] ?? 'Unknown'
+    await updateDoc(doc(db, 'ros', roId), {
+      status:    newStatus,
+      updatedAt: serverTimestamp(),
+      changeLog: arrayUnion({
+        type:   'status_change',
+        value:  newStatus,
+        label:  STATUS_MAP[newStatus]?.label ?? newStatus,
+        by:     author,
+        at:     new Date().toISOString(),
+        source: 'drag',
+      }),
+    })
+  }
+
+  const applyPendingToBody = async ({ bodyManUid, painterUid, authorized, dropOffDate, hasRental }) => {
+    const ro     = pendingToBody?.ro
+    if (!ro) return
+    const author = employees[user?.uid] ?? 'Unknown'
+    const note   = `Moved to Body Work — Tech: ${employees[bodyManUid] ?? bodyManUid}` +
+      (painterUid ? `, Painter: ${employees[painterUid] ?? painterUid}` : '') +
+      `, Authorized: ${authorized ? 'Yes' : 'No'}` +
+      `, Drop-off: ${dropOffDate}` +
+      (hasRental ? ', Rental: Yes' : '')
+    await updateDoc(doc(db, 'ros', ro.id), {
+      status:              'body_work',
+      assignedBodyMan:     bodyManUid,
+      assignedPainter:     painterUid || null,
+      customerAuthorized:  authorized,
+      dropOffDate,
+      hasRental,
+      carStatus:           'car_in_shop',
+      updatedAt:           serverTimestamp(),
+      changeLog:           arrayUnion({
+        type: 'status_change', value: 'body_work', label: 'Body Work',
+        by: author, at: new Date().toISOString(), source: 'drag',
+      }),
+      notes: arrayUnion({ text: note, by: author, at: new Date().toISOString() }),
+    })
+    setPendingToBody(null)
+  }
+
   const activeCount    = ros.filter(r => r.status !== 'delivered').length
-  const deliveredCount = ros.filter(r => r.status === 'delivered').length
+  const deliveredCount = deliveredRos.length
 
   if (loading) return (
     <div className="flex items-center justify-center h-64 text-gray-400 dark:text-zinc-600">
@@ -353,14 +618,13 @@ export default function ROBoard() {
             ))}
           </div>
 
-          {canEdit && (
-            <Link
-              to="/ro/new"
+          {view === 'list' && filtered.length > 0 && (
+            <button
+              onClick={() => handlePrintRos(filtered, employees)}
               className="inline-flex items-center gap-1.5 bg-gray-900 dark:bg-gray-100 hover:bg-gray-700 dark:hover:bg-gray-300 text-white dark:text-gray-900 text-sm font-medium px-3 sm:px-4 py-2 rounded-lg transition-colors"
             >
-              <IconPlus />
-              <span className="hidden sm:inline">New RO</span>
-            </Link>
+              Print
+            </button>
           )}
         </div>
       </div>
@@ -368,7 +632,7 @@ export default function ROBoard() {
       {/* ── AI Quick Update — visible to all users (technicians use it for notes & photos) */}
       <AIInputBox
         ros={ros}
-        employees={Object.entries(employees).map(([uid, name]) => ({ uid, name }))}
+        employees={employeeList}
       />
 
       {/* ── Filters ─────────────────────────────────────────────────────── */}
@@ -396,9 +660,9 @@ export default function ROBoard() {
                 ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 border-transparent'
                 : 'bg-white dark:bg-zinc-900 text-gray-500 dark:text-zinc-400 border-gray-200 dark:border-zinc-700 hover:border-gray-400 dark:hover:border-zinc-500'}`}
           >
-            All <span className="opacity-60 ml-0.5">{ros.length}</span>
+            All <span className="opacity-60 ml-0.5">{activeCount}</span>
           </button>
-          {RO_STATUSES.map(s => {
+          {RO_STATUSES.filter(s => s.key !== 'delivered').map(s => {
             const count = statusCounts[s.key] || 0
             if (count === 0 && filterStatus !== s.key) return null
             return (
@@ -420,13 +684,13 @@ export default function ROBoard() {
           {/* Show Delivered toggle */}
           {deliveredCount > 0 && (
             <button
-              onClick={() => setShowDelivered(v => !v)}
+              onClick={() => setShowDeliveredArchive(v => !v)}
               className={`shrink-0 px-3 py-1 text-xs rounded-full font-medium border transition-colors
-                ${showDelivered
+                ${showDeliveredArchive
                   ? 'bg-zinc-700 dark:bg-zinc-300 text-white dark:text-zinc-900 border-transparent'
                   : 'bg-white dark:bg-zinc-900 text-gray-400 dark:text-zinc-500 border-gray-200 dark:border-zinc-700 hover:border-gray-400 dark:hover:border-zinc-500'}`}
             >
-              {showDelivered ? '✓ ' : ''}Delivered
+              {showDeliveredArchive ? '✓ ' : ''}Delivered
               <span className="opacity-60 ml-1">{deliveredCount}</span>
             </button>
           )}
@@ -441,11 +705,6 @@ export default function ROBoard() {
             <circle cx="7.5" cy="11.5" r="1" fill="currentColor"/><circle cx="16.5" cy="11.5" r="1" fill="currentColor"/>
           </svg>
           <p className="font-medium">No repair orders found</p>
-          {canEdit && (
-            <Link to="/ro/new" className="mt-3 inline-block text-sm text-gray-500 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-gray-100 underline underline-offset-2">
-              Add your first RO
-            </Link>
-          )}
         </div>
       )}
 
@@ -500,15 +759,31 @@ export default function ROBoard() {
           </div>
 
           {/* Desktop: full kanban */}
-          <div className="hidden sm:flex gap-3 overflow-x-auto pb-4 -mx-1 px-1">
+          <div className="hidden sm:grid sm:grid-cols-5 gap-3 pb-4">
             {kanbanGroups.map(group => (
-              <div key={group.key} className="flex-shrink-0 w-64">
-                <div className={`flex items-center gap-2 mb-2.5 px-3 py-2 rounded-xl border ${group.accent} ${group.color}`}>
+              <div
+                key={group.key}
+                className="min-w-0"
+                onDragOver={e => { e.preventDefault(); setDragOverGroup(group.key) }}
+                onDragLeave={() => setDragOverGroup(null)}
+                onDrop={() => handleDrop(group)}
+              >
+                <div className={`flex items-center gap-2 mb-2.5 px-3 py-2 rounded-xl border transition-colors
+                  ${dragOverGroup === group.key ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/30' : `${group.accent} ${group.color}`}`}>
                   <span className={`text-sm font-bold ${group.header}`}>{group.label}</span>
                   <span className={`ml-auto text-xs font-semibold ${group.header} opacity-70`}>{group.items.length}</span>
                 </div>
-                <div className="space-y-2.5">
-                  {group.items.map(ro => <KanbanCard key={ro.id} ro={ro} onSelect={setSelectedRO} />)}
+                <div className={`space-y-2.5 min-h-[60px] rounded-xl transition-colors ${dragOverGroup === group.key ? 'bg-blue-50/50 dark:bg-blue-900/10' : ''}`}>
+                  {group.items.map(ro => (
+                    <KanbanCard
+                      key={ro.id}
+                      ro={ro}
+                      onSelect={setSelectedRO}
+                      draggable={isManager}
+                      onDragStart={() => setDragRoId(ro.id)}
+                      onDragEnd={() => { setDragRoId(null); setDragOverGroup(null) }}
+                    />
+                  ))}
                   {group.items.length === 0 && (
                     <div className="text-center py-6 text-gray-300 dark:text-zinc-700 text-xs">—</div>
                   )}
@@ -517,6 +792,88 @@ export default function ROBoard() {
             ))}
           </div>
         </>
+      )}
+
+      {/* ── Status picker modal (for multi-status columns) ───────────────── */}
+      {deliveredCount > 0 && (
+        <div className="border-t border-gray-200 dark:border-zinc-800 pt-4">
+          <button
+            onClick={() => setShowDeliveredArchive(v => !v)}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:border-gray-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-zinc-500"
+          >
+            Delivered Vehicles
+            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-zinc-800 dark:text-zinc-400">{deliveredCount}</span>
+          </button>
+          {showDeliveredArchive && (
+            <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-100 text-xs uppercase tracking-wider text-gray-400 dark:border-zinc-800 dark:text-zinc-500">
+                      <th className="px-4 py-3 text-left font-semibold">RO #</th>
+                      <th className="px-4 py-3 text-left font-semibold">Vehicle</th>
+                      <th className="px-4 py-3 text-left font-semibold">Owner</th>
+                      <th className="px-4 py-3 text-left font-semibold">Insurance</th>
+                      <th className="px-4 py-3 text-left font-semibold">Due</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50 dark:divide-zinc-800">
+                    {deliveredRos.map(ro => (
+                      <tr key={ro.id} onClick={() => setSelectedRO(ro)} className="cursor-pointer hover:bg-gray-50 dark:hover:bg-zinc-800/50">
+                        <td className="px-4 py-3 font-mono text-sm font-bold text-gray-900 dark:text-gray-100">#{ro.roNumber}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700 dark:text-zinc-300">{ro.vehicle}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500 dark:text-zinc-400">{ro.customerName}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500 dark:text-zinc-400">{shortInsurance(ro.insuranceCompany)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500 dark:text-zinc-400">{fmtDate(ro.cccDateOut || ro.promisedDate)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {statusPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl w-full max-w-xs border border-gray-200 dark:border-zinc-800 overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-100 dark:border-zinc-800">
+              <p className="font-semibold text-sm text-gray-900 dark:text-gray-100">Set Status</p>
+            </div>
+            <div className="p-3 space-y-1.5">
+              {statusPicker.statuses.map(s => {
+                const info = STATUS_MAP[s]
+                return (
+                  <button
+                    key={s}
+                    onClick={() => { applyStatusDrop(statusPicker.roId, s); setStatusPicker(null) }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors text-left"
+                  >
+                    <span className={`w-2 h-2 rounded-full ${info?.dot}`} />
+                    <span className="text-sm font-medium text-gray-800 dark:text-gray-200">{info?.label ?? s}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="px-4 py-3 border-t border-gray-100 dark:border-zinc-800">
+              <button
+                onClick={() => setStatusPicker(null)}
+                className="w-full py-2 text-sm text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-gray-200"
+              >Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── PendingToBodyModal ───────────────────────────────────────────── */}
+      {pendingToBody && (
+        <PendingToBodyModal
+          ro={pendingToBody.ro}
+          employees={employeeList}
+          onConfirm={applyPendingToBody}
+          onCancel={() => setPendingToBody(null)}
+        />
       )}
 
       {/* ── RODrawer ────────────────────────────────────────────────────────── */}

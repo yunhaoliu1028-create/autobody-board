@@ -1,17 +1,22 @@
 import { useState, useEffect } from 'react'
-import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { saveApiKey, getApiKey, clearKeyCache, saveOpenAIKey, getOpenAIKey, clearOpenAIKeyCache } from '../hooks/useAI'
 import { MANAGER_ROLES } from '../constants/roles'
-import { useNavigate } from 'react-router-dom'
 
 const INPUT = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono'
+const PLAIN_INPUT = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
 
 export default function Settings() {
-  const { role } = useAuth()
-  const navigate = useNavigate()
+  const { user, userProfile, role, refreshProfile } = useAuth()
+  const isManager = MANAGER_ROLES.includes(role)
 
+  const [displayName,    setDisplayName]    = useState('')
+  const [phone,          setPhone]          = useState('')
+  const [language,       setLanguage]       = useState('english')
+  const [profileSaved,   setProfileSaved]   = useState(false)
+  const [profileSaving,  setProfileSaving]  = useState(false)
   const [apiKey,         setApiKey]         = useState('')
   const [keyMasked,      setKeyMasked]      = useState(false)
   const [keyStatus,      setKeyStatus]      = useState(null)
@@ -28,9 +33,14 @@ export default function Settings() {
   const [mapSaved,       setMapSaved]       = useState(false)
 
   useEffect(() => {
-    if (!MANAGER_ROLES.includes(role)) { navigate('/'); return }
-    loadSettings()
-  }, [role, navigate])
+    setDisplayName(userProfile?.name ?? '')
+    setPhone(userProfile?.phone ?? user?.phoneNumber ?? '')
+    setLanguage(userProfile?.language ?? 'english')
+  }, [userProfile, user])
+
+  useEffect(() => {
+    if (isManager) loadSettings()
+  }, [isManager])
 
   const loadSettings = async () => {
     const snap = await getDoc(doc(db, 'settings', 'ai'))
@@ -120,16 +130,81 @@ export default function Settings() {
     setTimeout(() => setMapSaved(false), 3000)
   }
 
+  const handleSaveProfile = async () => {
+    if (!user?.uid || !displayName.trim()) return
+    setProfileSaving(true)
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        name: displayName.trim(),
+        phone: phone.trim(),
+        language,
+        updatedAt: serverTimestamp(),
+      })
+      await refreshProfile()
+      setProfileSaved(true)
+      setTimeout(() => setProfileSaved(false), 2500)
+    } finally {
+      setProfileSaving(false)
+    }
+  }
+
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div>
         <h1 className="text-xl font-bold text-gray-900">Settings</h1>
-        <p className="text-sm text-gray-500 mt-0.5">Manager-only configuration</p>
+        <p className="text-sm text-gray-500 mt-0.5">Profile preferences</p>
       </div>
 
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+        <h3 className="text-sm font-semibold text-gray-800 mb-4">My Profile</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Display name</label>
+            <input
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              className={PLAIN_INPUT}
+              placeholder="Your name"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Phone</label>
+            <input
+              value={phone}
+              onChange={e => setPhone(e.target.value)}
+              className={PLAIN_INPUT}
+              placeholder="+1 604 123 4567"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Language</label>
+            <select
+              value={language}
+              onChange={e => setLanguage(e.target.value)}
+              className={PLAIN_INPUT + ' bg-white'}
+            >
+              <option value="english">English</option>
+              <option value="spanish">Spanish</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSaveProfile}
+              disabled={profileSaving || !displayName.trim()}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors"
+            >
+              {profileSaving ? 'Saving…' : 'Save Profile'}
+            </button>
+            {profileSaved && <span className="text-xs text-green-600">✓ Saved</span>}
+          </div>
+        </div>
+      </div>
+
+      {isManager && (
+        <>
       {/* API Key */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-        <h3 className="text-sm font-semibold text-gray-800 mb-1">🤖 Anthropic API Key</h3>
+        <h3 className="text-sm font-semibold text-gray-800 mb-1">Anthropic API Key</h3>
         <p className="text-xs text-gray-500 mb-4">
           Required for the AI Quick Update box and Meeting Import features.
           Get your key at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" className="text-blue-600 underline">console.anthropic.com</a> → API Keys.
@@ -244,6 +319,8 @@ export default function Settings() {
         Save Mappings
       </button>
       {mapSaved && <p className="text-xs text-green-600 mt-1">✓ Mappings saved</p>}
+        </>
+      )}
     </div>
   )
 }

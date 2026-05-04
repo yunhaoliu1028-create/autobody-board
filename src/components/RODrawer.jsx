@@ -29,18 +29,44 @@ const TASK_STATUS  = {
 
 // ── Note deduplication ────────────────────────────────────────────────────────
 // Strip timestamp prefix [MM/dd HH:mm - Name] and normalize body for comparison.
-function noteBody(line) {
-  return line.replace(/^\[[\d/: -]+\]\s*/, '').trim().toLowerCase()
+function noteBody(line = '') {
+  return line
+    .replace(/^\[[^\]]+\]\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
 }
 
-function dedupeNoteLines(lines) {
-  const seen = new Map()  // body → index of first occurrence
-  return lines.map((line, i) => {
+function toNoteLines(notes) {
+  if (Array.isArray(notes)) {
+    return notes
+      .map(item => {
+        if (typeof item === 'string') return item
+        const stamp = item.at ? format(new Date(item.at), 'MM/dd HH:mm') : ''
+        const author = item.by ? ` - ${item.by}` : ''
+        const prefix = stamp ? `[${stamp}${author}] ` : ''
+        return `${prefix}${item.text ?? ''}`.trim()
+      })
+      .filter(Boolean)
+      .reverse()
+  }
+  return (notes ?? '').split('\n').filter(Boolean)
+}
+
+function collapseDuplicateNoteLines(lines) {
+  const groups = []
+  const indexByBody = new Map()
+  lines.forEach(line => {
     const body = noteBody(line)
-    if (seen.has(body)) return { line, dup: true, firstIdx: seen.get(body) }
-    seen.set(body, i)
-    return { line, dup: false }
+    if (!body) return
+    if (indexByBody.has(body)) {
+      groups[indexByBody.get(body)].lines.push(line)
+      return
+    }
+    indexByBody.set(body, groups.length)
+    groups.push({ line, lines: [line] })
   })
+  return groups
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -104,6 +130,7 @@ export default function RODrawer({ ro, employees, onClose }) {
         roNumber:    ro.roNumber,
         vehicleInfo: ro.vehicle,
         assignedTo:  taskTo,
+        assignedToName: employees[taskTo] ?? '',
         assignedBy:  user.uid,
         title:       taskTitle.trim(),
         priority:    taskPriority,
@@ -128,7 +155,9 @@ export default function RODrawer({ ro, employees, onClose }) {
 
   if (!ro) return null
 
-  const noteLines    = (ro.notes ?? '').split('\n').filter(Boolean)
+  const noteLines    = toNoteLines(ro.notes)
+  const noteGroups   = collapseDuplicateNoteLines(noteLines)
+  const hiddenDupes  = noteGroups.reduce((sum, item) => sum + Math.max(0, item.lines.length - 1), 0)
   const openTasks    = tasks.filter(t => t.status !== 'completed').length
   const empOptions   = Object.entries(employees)
 
@@ -190,7 +219,7 @@ export default function RODrawer({ ro, employees, onClose }) {
         {/* ── Tab bar ───────────────────────────────────────────────────── */}
         <div className="flex border-b border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900">
           {[
-            { key: 'notes', label: 'Notes',  badge: noteLines.length },
+            { key: 'notes', label: 'Notes',  badge: noteGroups.length },
             { key: 'tasks', label: 'Tasks',  badge: openTasks },
           ].map(t => (
             <button
@@ -233,13 +262,13 @@ export default function RODrawer({ ro, employees, onClose }) {
                 </button>
               </form>
 
-              {noteLines.length > 0 ? (() => {
-                const deduped  = dedupeNoteLines(noteLines)
-                const dupCount = deduped.filter(n => n.dup).length
-                const visible  = showAllNotes ? deduped : deduped.filter(n => !n.dup)
+              {noteGroups.length > 0 ? (() => {
+                const visible  = showAllNotes
+                  ? noteGroups.flatMap(item => item.lines.map(line => ({ line, count: 1 })))
+                  : noteGroups
                 return (
                   <div className="space-y-2">
-                    {visible.map(({ line }, i) => (
+                    {visible.map(({ line, lines }, i) => (
                       <div
                         key={i}
                         className="px-3 py-2.5 bg-gray-50 dark:bg-zinc-800/50 rounded-xl border border-gray-100 dark:border-zinc-700/50"
@@ -247,16 +276,21 @@ export default function RODrawer({ ro, employees, onClose }) {
                         <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
                           {line}
                         </p>
+                        {!showAllNotes && lines?.length > 1 && (
+                          <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-1">
+                            {lines.length - 1} similar note{lines.length > 2 ? 's' : ''} hidden
+                          </p>
+                        )}
                       </div>
                     ))}
-                    {dupCount > 0 && (
+                    {hiddenDupes > 0 && (
                       <button
                         onClick={() => setShowAllNotes(v => !v)}
                         className="w-full text-xs text-gray-400 dark:text-zinc-600 hover:text-blue-600 dark:hover:text-blue-400 py-1.5 text-center transition-colors"
                       >
                         {showAllNotes
-                          ? `↑ Hide ${dupCount} duplicate${dupCount !== 1 ? 's' : ''}`
-                          : `↓ Show ${dupCount} duplicate note${dupCount !== 1 ? 's' : ''}`}
+                          ? `↑ Collapse ${hiddenDupes} duplicate note${hiddenDupes !== 1 ? 's' : ''}`
+                          : `↓ Show ${hiddenDupes} duplicate note${hiddenDupes !== 1 ? 's' : ''}`}
                       </button>
                     )}
                   </div>

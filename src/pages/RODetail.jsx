@@ -110,6 +110,7 @@ function TaskList({ roId, employees }) {
       await addDoc(collection(db, 'tasks'), {
         roId,
         assignedTo:  assignTo,
+        assignedToName: employees[assignTo] ?? '',
         assignedBy:  user.uid,
         title,
         description: desc,

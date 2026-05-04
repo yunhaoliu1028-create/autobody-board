@@ -13,6 +13,7 @@ firebase-debug.*.log*
 # Local assistant/tooling state
 .agents/
 .claude/
+backups 5-1/
 .gitdata/
 .github_deploy_key*
 .deploykeys/

@@ -243,6 +243,61 @@ function renderPossiblyDelivered() {
 }
 
 // ── Mark an RO as delivered ───────────────────────────────────────────────────
+function getMissingDeliveredCandidates() {
+  const scannedSet = new Set(scannedROs.map(r => r.roNumber))
+  const missing = []
+  for (const [roNum, info] of existingROs) {
+    if (!scannedSet.has(roNum) && info.status !== 'delivered') {
+      missing.push({ roNum, ...info })
+    }
+  }
+  return missing
+}
+
+async function markDeliveredDoc(roNum, docName, timestamp = new Date().toISOString()) {
+  const write = {
+    update: {
+      name: docName,
+      fields: {
+        status:    strVal('delivered'),
+        updatedAt: strVal(timestamp),
+      }
+    },
+    updateMask: { fieldPaths: ['status', 'updatedAt'] },
+    updateTransforms: [{
+      fieldPath: 'changeLog',
+      appendMissingElements: {
+        values: [changeLogEntry('status', 'Delivered', timestamp)]
+      }
+    }]
+  }
+
+  const res = await authFetch(COMMIT_URL, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ writes: [write] }),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.error?.message || `HTTP ${res.status}`)
+  }
+
+  if (existingROs.has(roNum)) existingROs.get(roNum).status = 'delivered'
+}
+
+async function autoMarkMissingDelivered(timestamp) {
+  const results = []
+  for (const info of getMissingDeliveredCandidates()) {
+    try {
+      await markDeliveredDoc(info.roNum, info.docName, timestamp)
+      results.push({ roNumber: info.roNum, ok: true })
+    } catch (err) {
+      results.push({ roNumber: info.roNum, ok: false, msg: err.message })
+    }
+  }
+  return results
+}
+
 async function handleMarkDelivered(roNum, docName, btn) {
   btn.disabled  = true
   btn.textContent = '…'
@@ -415,6 +470,9 @@ async function handleSync() {
       results.push({ roNumber: ro.roNumber, ok: false, msg: err.message })
     }
   }
+
+  const deliveredResults = await autoMarkMissingDelivered(timestamp)
+  renderPossiblyDelivered()
 
   // Re-render list to show updated "In system" badges
   renderROList()

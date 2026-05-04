@@ -25,10 +25,15 @@ service cloud.firestore {
     match /users/{uid} {
       // Anyone logged in can read user profiles (needed for name lookups)
       allow read: if isAuth();
-      // Only managers can write user profiles
+      // Managers can manage user profiles
       allow write: if isAuth() && isManager();
-      // Users can update their own profile (e.g. phone)
-      allow update: if isAuth() && request.auth.uid == uid;
+      // First phone-login profile can be created by that same user only as a basic employee
+      allow create: if isAuth() && request.auth.uid == uid
+        && request.resource.data.role == 'body_man';
+      // Users can update their own personal preferences only, not role/access fields
+      allow update: if isAuth() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['name', 'phone', 'language', 'updatedAt']);
     }
 
     // ── Repair Orders ─────────────────────────────────────────────────────────

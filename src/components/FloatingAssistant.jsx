@@ -4,7 +4,41 @@ import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { askShopAssistant, transcribeWithWhisper, loadAssistantMemory, appendAssistantMemory, deleteAssistantMemory } from '../hooks/useAI'
-import { format } from 'date-fns'
+import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
+
+// ── Priority based on due date ────────────────────────────────────────────────
+function dueDateToPriority(ro) {
+  const dateStr = ro?.cccDateOut || ro?.promisedDate
+  if (!dateStr) return 'medium'
+  try {
+    const due  = parseISO(dateStr)
+    if (!isValid(due)) return 'medium'
+    const days = differenceInCalendarDays(due, new Date())
+    if (days <= 2)  return 'high'
+    if (days <= 7)  return 'medium'
+    return 'low'
+  } catch { return 'medium' }
+}
+
+function normalizeName(value = '') {
+  return value
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function findEmployeeByName(employees, rawName = '') {
+  const target = normalizeName(rawName)
+  if (!target) return null
+  const targetParts = target.split(' ').filter(Boolean)
+  return employees.find(emp => {
+    const name = normalizeName(emp.name)
+    if (!name) return false
+    if (name === target || name.includes(target) || target.includes(name)) return true
+    return targetParts.some(part => part.length > 1 && name.split(' ').includes(part))
+  }) ?? null
+}
 
 // ── Quick prompt chips ────────────────────────────────────────────────────────
 const QUICK_PROMPTS = [
@@ -39,6 +73,27 @@ function MiniMarkdown({ text }) {
   )
 }
 
+function AssistantMark({ className = 'w-6 h-6' }) {
+  return (
+    <svg className={className} viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <path d="M32 4l8.8 18.9L60 32l-19.2 9.1L32 60l-8.8-18.9L4 32l19.2-9.1L32 4z" fill="url(#assistantMarkGradient)" />
+      <path d="M32 14l5.8 12.2L50 32l-12.2 5.8L32 50l-5.8-12.2L14 32l12.2-5.8L32 14z" fill="url(#assistantMarkInner)" />
+      <path d="M32 21l3.3 7.7L43 32l-7.7 3.3L32 43l-3.3-7.7L21 32l7.7-3.3L32 21z" fill="white" fillOpacity=".92" />
+      <defs>
+        <linearGradient id="assistantMarkGradient" x1="12" y1="8" x2="52" y2="56" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#050505" />
+          <stop offset=".54" stopColor="#3f3f46" />
+          <stop offset="1" stopColor="#111827" />
+        </linearGradient>
+        <linearGradient id="assistantMarkInner" x1="20" y1="18" x2="46" y2="48" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#a1a1aa" />
+          <stop offset="1" stopColor="#27272a" />
+        </linearGradient>
+      </defs>
+    </svg>
+  )
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 export default function FloatingAssistant() {
   const { user }  = useAuth()
@@ -58,6 +113,7 @@ export default function FloatingAssistant() {
   const [memory,         setMemory]         = useState([])        // loaded facts
   const [showMemory,     setShowMemory]     = useState(false)     // memory panel toggle
   const [savedFacts,     setSavedFacts]     = useState([])        // facts just saved this session
+  const [isFullscreen,   setIsFullscreen]   = useState(false)
 
   // Voice
   const [listening,      setListening]      = useState(false)
@@ -157,21 +213,41 @@ export default function FloatingAssistant() {
             notes: `${line}\n${roDoc.notes ?? ''}`,
             updatedAt: serverTimestamp(),
           })
+        } else if (action.type === 'assign_body_man') {
+          const assignee = findEmployeeByName(employees, action.assigneeName)
+          if (assignee) {
+            await updateDoc(doc(db, 'ros', roDoc.id), {
+              assignedBodyMan: assignee.uid,
+              updatedAt: serverTimestamp(),
+            })
+          }
         } else if (action.type === 'assign_task') {
-          const assignee = employees.find(e =>
-            e.name.toLowerCase().includes((action.assigneeName ?? '').toLowerCase())
-          )
-          await addDoc(collection(db, 'tasks'), {
+          const assignee = findEmployeeByName(employees, action.assigneeName)
+          if (!assignee) throw new Error(`Could not match task assignee "${action.assigneeName}".`)
+          const roDueDate  = roDoc.cccDateOut || roDoc.promisedDate || null
+          const isBodyTask = /body\s*(man|tech|work)/i.test(action.title ?? '')
+          const fields = {
             roId: roDoc.id, roNumber: roDoc.roNumber,
             vehicleInfo: roDoc.vehicle,
-            assignedTo: assignee?.uid ?? '',
+            assignedTo: assignee.uid,
             assignedBy: user?.uid ?? '',
+            assignedToName: assignee.name ?? '',
             title: action.title,
             description: action.description ?? '',
-            priority: action.priority ?? 'medium',
+            priority: dueDateToPriority(roDoc),
+            dueDate: roDueDate,
             status: 'pending',
             createdAt: serverTimestamp(),
-          })
+          }
+          if (isBodyTask) fields.assignedBodyMan = assignee.uid
+          await addDoc(collection(db, 'tasks'), fields)
+          // Also write assignedBodyMan to RO if it's a body task
+          if (isBodyTask) {
+            await updateDoc(doc(db, 'ros', roDoc.id), {
+              assignedBodyMan: assignee.uid,
+              updatedAt: serverTimestamp(),
+            })
+          }
         }
       }
       toast.success(`Applied ${pendingActions.length} action${pendingActions.length > 1 ? 's' : ''}`)
@@ -255,21 +331,28 @@ export default function FloatingAssistant() {
       {/* ── Floating button ─────────────────────────────────────────────── */}
       <button
         onClick={() => setOpen(true)}
-        className="fixed bottom-24 right-4 z-40 w-14 h-14 rounded-full shadow-xl flex items-center justify-center text-2xl
-          bg-gradient-to-br from-blue-600 to-violet-600 hover:from-blue-500 hover:to-violet-500
-          active:scale-95 transition-all border-2 border-white/20"
+        className="fixed bottom-24 right-4 z-40 w-14 h-14 rounded-full shadow-xl flex items-center justify-center
+          bg-zinc-950 hover:bg-zinc-800 active:scale-95 transition-all border border-white/20
+          ring-1 ring-black/10"
         title="Shop Assistant"
       >
-        🤖
+        <AssistantMark className="w-8 h-8" />
       </button>
 
       {/* ── Chat panel ──────────────────────────────────────────────────── */}
       {open && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-gray-50 dark:bg-zinc-950">
+        <div
+          className={`fixed z-50 flex flex-col bg-gray-50 dark:bg-zinc-950 shadow-2xl border border-gray-200 dark:border-zinc-800
+            ${isFullscreen
+              ? 'inset-0'
+              : 'right-4 bottom-24 w-[min(420px,calc(100vw-2rem))] h-[min(640px,calc(100vh-8rem))] rounded-2xl overflow-hidden'}`}
+        >
 
           {/* Header */}
           <div className="flex items-center gap-2 px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 shrink-0">
-            <span className="text-xl">🤖</span>
+            <span className="w-8 h-8 rounded-full bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center">
+              <AssistantMark className="w-5 h-5" />
+            </span>
             <div className="flex-1 min-w-0">
               <p className="font-bold text-sm text-gray-900 dark:text-gray-100">Shop Assistant <span className="text-[10px] font-normal text-violet-500 dark:text-violet-400">Opus</span></p>
               <p className="text-xs text-gray-400 dark:text-zinc-500">
@@ -292,6 +375,21 @@ export default function FloatingAssistant() {
               onClick={() => { setMessages([]); setPendingActions([]); setSmsDraft(null); setSavedFacts([]) }}
               className="text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800"
             >New</button>
+            <button
+              onClick={() => setIsFullscreen(v => !v)}
+              className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
+              title={isFullscreen ? 'Small window' : 'Full screen'}
+            >
+              {isFullscreen ? (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5"/>
+                </svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
+                </svg>
+              )}
+            </button>
             <button
               onClick={() => setOpen(false)}
               className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
@@ -333,7 +431,9 @@ export default function FloatingAssistant() {
             {/* Empty state with quick prompts */}
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center h-full gap-6 pb-8">
-                <div className="text-5xl">🤖</div>
+                <div className="w-16 h-16 rounded-2xl bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center shadow-lg">
+                  <AssistantMark className="w-10 h-10" />
+                </div>
                 <div className="text-center">
                   <p className="font-semibold text-gray-800 dark:text-gray-200">你好！我是店铺助手</p>
                   <p className="text-sm text-gray-400 dark:text-zinc-500 mt-1">可以问我任何关于店内车辆的问题</p>
@@ -363,9 +463,9 @@ export default function FloatingAssistant() {
                 <div className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-sm
                   ${msg.role === 'user'
                     ? 'bg-blue-600 text-white'
-                    : 'bg-gradient-to-br from-blue-500 to-violet-600 text-white'}`}
+                    : 'bg-zinc-950 dark:bg-zinc-100'}`}
                 >
-                  {msg.role === 'user' ? '👤' : '🤖'}
+                  {msg.role === 'user' ? '👤' : <AssistantMark className="w-4 h-4" />}
                 </div>
                 {/* Bubble */}
                 <div className={`max-w-[82%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed
@@ -384,7 +484,9 @@ export default function FloatingAssistant() {
             {/* Loading indicator */}
             {loading && (
               <div className="flex gap-2.5">
-                <div className="shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center text-sm">🤖</div>
+                <div className="shrink-0 w-7 h-7 rounded-full bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center">
+                  <AssistantMark className="w-4 h-4" />
+                </div>
                 <div className="bg-white dark:bg-zinc-800 border border-gray-100 dark:border-zinc-700 rounded-2xl rounded-tl-sm px-4 py-3">
                   <div className="flex items-center gap-1.5">
                     {[0,1,2].map(i => (
@@ -420,8 +522,9 @@ export default function FloatingAssistant() {
                   <div key={i} className="text-xs text-green-800 dark:text-green-300 bg-white/60 dark:bg-green-900/30 rounded-lg px-2.5 py-1.5">
                     <span className="font-mono font-semibold">RO#{a.roNumber}</span>
                     {' · '}
-                    {a.type === 'add_note'    && `Add note: "${a.note?.slice(0, 60)}${a.note?.length > 60 ? '…' : ''}"`}
-                    {a.type === 'assign_task' && `Assign "${a.title}" → ${a.assigneeName}`}
+                    {a.type === 'add_note'       && `Add note: "${a.note?.slice(0, 60)}${a.note?.length > 60 ? '…' : ''}"`}
+                    {a.type === 'assign_task'    && `Assign "${a.title}" → ${a.assigneeName}`}
+                    {a.type === 'assign_body_man' && `Set body tech → ${a.assigneeName}`}
                   </div>
                 ))}
                 <div className="flex gap-2 pt-1">
