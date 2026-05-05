@@ -82,19 +82,9 @@ function MiniMarkdown({ text }) {
 
 function AssistantMark({ className = 'w-6 h-6' }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      {/* Antenna dot */}
-      <circle cx="12" cy="2" r="1.5" className="fill-sky-500 dark:fill-sky-400"/>
-      <rect x="11.25" y="3.25" width="1.5" height="2.75" rx="0.75" className="fill-slate-400 dark:fill-slate-500"/>
-      {/* Head */}
-      <rect x="2.5" y="6" width="19" height="15" rx="4.5" className="fill-slate-800 dark:fill-slate-100"/>
-      {/* Left eye */}
-      <rect x="6" y="10.5" width="4" height="5" rx="1" className="fill-sky-400 dark:fill-sky-500"/>
-      {/* Right eye */}
-      <rect x="14" y="10.5" width="4" height="5" rx="1" className="fill-sky-400 dark:fill-sky-500"/>
-      {/* Mouth — two small dots */}
-      <circle cx="10" cy="18.5" r="1" className="fill-slate-600 dark:fill-slate-400"/>
-      <circle cx="14" cy="18.5" r="1" className="fill-slate-600 dark:fill-slate-400"/>
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      {/* 4-pointed sparkle star — Gemini style */}
+      <path d="M12 2C12 2 13.2 8.4 16.2 11.8C19.2 15.2 22 12 22 12C22 12 18.8 8.8 16.2 12.2C13.6 15.6 12 22 12 22C12 22 10.4 15.6 7.8 12.2C5.2 8.8 2 12 2 12C2 12 4.8 15.2 7.8 11.8C10.8 8.4 12 2 12 2Z"/>
     </svg>
   )
 }
@@ -345,7 +335,7 @@ export default function FloatingAssistant() {
         onClick={() => setOpen(true)}
         className="fixed bottom-24 right-4 z-40 w-14 h-14 rounded-full shadow-xl flex items-center justify-center
           bg-zinc-950 hover:bg-zinc-800 active:scale-95 transition-all border border-white/20
-          ring-1 ring-black/10"
+          ring-1 ring-black/10 text-white"
         title="Shop Assistant"
       >
         <AssistantMark className="w-8 h-8" />
@@ -362,7 +352,7 @@ export default function FloatingAssistant() {
 
           {/* Header */}
           <div className="flex items-center gap-2 px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 shrink-0">
-            <span className="w-8 h-8 rounded-full bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center">
+            <span className="w-8 h-8 rounded-full bg-zinc-950 dark:bg-zinc-100 text-white dark:text-zinc-900 flex items-center justify-center">
               <AssistantMark className="w-5 h-5" />
             </span>
             <div className="flex-1 min-w-0">
@@ -505,7 +495,7 @@ export default function FloatingAssistant() {
             {/* Empty state */}
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center min-h-full gap-4 py-8">
-                <div className="w-14 h-14 rounded-2xl bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center shadow-lg">
+                <div className="w-14 h-14 rounded-2xl bg-zinc-950 dark:bg-zinc-100 text-white dark:text-zinc-900 flex items-center justify-center shadow-lg">
                   <AssistantMark className="w-9 h-9" />
                 </div>
                 <div className="text-center">
@@ -544,7 +534,7 @@ export default function FloatingAssistant() {
             {/* Loading indicator */}
             {loading && (
               <div className="flex gap-2.5">
-                <div className="shrink-0 w-7 h-7 rounded-full bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center">
+                <div className="shrink-0 w-7 h-7 rounded-full bg-zinc-950 dark:bg-zinc-100 text-white dark:text-zinc-900 flex items-center justify-center">
                   <AssistantMark className="w-4 h-4" />
                 </div>
                 <div className="bg-white dark:bg-zinc-800 border border-gray-100 dark:border-zinc-700 rounded-2xl rounded-tl-sm px-4 py-3">
