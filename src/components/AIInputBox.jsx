@@ -299,14 +299,50 @@ function PhotoSheet({ onCamera, onLibrary, onClose }) {
   return (
     <div
       onClick={onClose}
-      style={{ position:'fixed', inset:0, zIndex:9000, background:'rgba(0,0,0,0.5)', display:'flex', flexDirection:'column', justifyContent:'flex-end' }}
+      className="fixed inset-0 z-[9000] flex flex-col justify-end"
+      style={{ background: 'rgba(0,0,0,0.45)' }}
     >
-      <div onClick={e => e.stopPropagation()} style={{ background:'#1c1c1e', borderRadius:'14px 14px 0 0', overflow:'hidden', paddingBottom:'env(safe-area-inset-bottom)' }}>
-        <button onClick={onCamera}  style={{ width:'100%', padding:'18px 20px', background:'none', border:'none', borderBottom:'1px solid rgba(255,255,255,0.1)', color:'#fff', fontSize:17, cursor:'pointer', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-          <span>拍照</span><span style={{ fontSize:22 }}>📷</span>
+      <div
+        onClick={e => e.stopPropagation()}
+        className="bg-white dark:bg-zinc-900 rounded-t-2xl overflow-hidden pb-safe"
+      >
+        {/* Title bar */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 dark:border-zinc-800">
+          <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">Add Photo</span>
+          <button onClick={onClose} className="text-blue-500 text-sm font-medium">Cancel</button>
+        </div>
+        {/* Camera option */}
+        <button
+          onClick={onCamera}
+          className="w-full flex items-center gap-4 px-5 py-4 border-b border-gray-100 dark:border-zinc-800 active:bg-gray-50 dark:active:bg-zinc-800 transition-colors"
+        >
+          <span className="w-10 h-10 rounded-xl bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-gray-700 dark:text-gray-200">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
+              <circle cx="12" cy="13" r="3"/>
+            </svg>
+          </span>
+          <div className="text-left">
+            <p className="text-[15px] font-medium text-gray-900 dark:text-gray-100">Take Photo</p>
+            <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5">Open camera</p>
+          </div>
         </button>
-        <button onClick={onLibrary} style={{ width:'100%', padding:'18px 20px', background:'none', border:'none', color:'#fff', fontSize:17, cursor:'pointer', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-          <span>照片图库</span><span style={{ fontSize:22 }}>🖼️</span>
+        {/* Library option */}
+        <button
+          onClick={onLibrary}
+          className="w-full flex items-center gap-4 px-5 py-4 active:bg-gray-50 dark:active:bg-zinc-800 transition-colors"
+        >
+          <span className="w-10 h-10 rounded-xl bg-gray-100 dark:bg-zinc-800 flex items-center justify-center text-gray-700 dark:text-gray-200">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <path strokeLinecap="round" d="m21 15-5-5L5 21"/>
+            </svg>
+          </span>
+          <div className="text-left">
+            <p className="text-[15px] font-medium text-gray-900 dark:text-gray-100">Photo Library</p>
+            <p className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5">Choose existing photos</p>
+          </div>
         </button>
       </div>
     </div>

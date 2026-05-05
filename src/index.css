@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Safe area helpers for PWA/standalone mode */
+.pt-safe  { padding-top:    env(safe-area-inset-top,    0px); }
+.pb-safe  { padding-bottom: env(safe-area-inset-bottom, 0px); }
+/* Main content bottom padding = tab bar (3.5rem) + home-indicator safe area */
+.pb-tab-safe { padding-bottom: calc(3.5rem + env(safe-area-inset-bottom, 0px)); }
+
 /* Hide scrollbar but keep scroll */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

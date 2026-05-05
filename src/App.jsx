@@ -12,6 +12,7 @@ import Admin         from './pages/Admin'
 import MeetingImport from './pages/MeetingImport'
 import Settings      from './pages/Settings'
 import Chat          from './pages/Chat'
+import UpdatePage    from './pages/UpdatePage'
 import { ToastProvider } from './components/Toast'
 import { MANAGER_ROLES } from './constants/roles'
 
@@ -54,6 +55,9 @@ function AppRoutes() {
       } />
       <Route path="/chat" element={
         <ProtectedRoute><Layout><Chat /></Layout></ProtectedRoute>
+      } />
+      <Route path="/update" element={
+        <ProtectedRoute><Layout><UpdatePage /></Layout></ProtectedRoute>
       } />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

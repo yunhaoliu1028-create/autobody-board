@@ -677,11 +677,13 @@ export default function ROBoard() {
         </div>
       </div>
 
-      {/* ── AI Quick Update — visible to all users (technicians use it for notes & photos) */}
-      <AIInputBox
-        ros={ros}
-        employees={employeeList}
-      />
+      {/* ── AI Quick Update — desktop only (mobile uses the Update tab) */}
+      <div className="hidden md:block">
+        <AIInputBox
+          ros={ros}
+          employees={employeeList}
+        />
+      </div>
 
       {/* ── Filters ─────────────────────────────────────────────────────── */}
       <div className="space-y-2">

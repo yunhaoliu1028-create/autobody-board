@@ -5,6 +5,7 @@
 //   conversations/{id}/messages — senderId, senderName, text, attachments[], createdAt
 
 import { useState, useEffect, useRef, useMemo } from 'react'
+import FloatingAssistant from '../components/FloatingAssistant'
 import {
   collection, doc, onSnapshot, addDoc, updateDoc,
   query, where, orderBy, serverTimestamp, getDocs,
@@ -605,6 +606,7 @@ export default function Chat() {
   const [activeConvo,   setActiveConvo]   = useState(null)
   const [showNewChat,   setShowNewChat]   = useState(false)
   const [showSidebar,   setShowSidebar]   = useState(true)  // mobile toggle
+  const [showAI,        setShowAI]        = useState(false) // inline AI panel
   const [sidebarTab,    setSidebarTab]    = useState('chats')
   const [contactSearch, setContactSearch] = useState('')
   const unreadTotal = conversations.filter(c => isUnreadConvo(c, user.uid)).length
@@ -765,6 +767,33 @@ export default function Chat() {
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
           {sidebarTab === 'chats' && (
             <div className="space-y-1">
+              {/* ── Pinned: Shop Assistant AI ─────────────────────────── */}
+              <button
+                onClick={() => { setShowAI(true); setActiveConvo(null); setShowSidebar(false) }}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors text-left
+                  ${showAI
+                    ? 'bg-zinc-900 dark:bg-zinc-100'
+                    : 'hover:bg-gray-100 dark:hover:bg-zinc-800'}`}
+              >
+                <span className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0
+                  ${showAI ? 'bg-zinc-100 dark:bg-zinc-900' : 'bg-zinc-900 dark:bg-zinc-100'}`}>
+                  <svg className={`w-4 h-4 ${showAI ? 'text-zinc-900 dark:text-zinc-100' : 'text-white dark:text-zinc-900'}`} viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2C12 2 13.2 8.4 16.2 11.8C19.2 15.2 22 12 22 12C22 12 18.8 8.8 16.2 12.2C13.6 15.6 12 22 12 22C12 22 10.4 15.6 7.8 12.2C5.2 8.8 2 12 2 12C2 12 4.8 15.2 7.8 11.8C10.8 8.4 12 2 12 2Z"/>
+                  </svg>
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className={`text-sm font-semibold ${showAI ? 'text-white dark:text-zinc-900' : 'text-gray-900 dark:text-gray-100'}`}>
+                      Shop Assistant
+                    </span>
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-violet-100 dark:bg-violet-900/50 text-violet-600 dark:text-violet-300">AI</span>
+                  </div>
+                  <p className={`text-xs truncate mt-0.5 ${showAI ? 'text-gray-300 dark:text-zinc-600' : 'text-gray-400 dark:text-zinc-500'}`}>
+                    Ask anything about the shop…
+                  </p>
+                </div>
+              </button>
+
               {messageConversations.map(convo => (
                 <ConvoItem
                   key={convo.id}
@@ -813,12 +842,17 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* ── Right panel: messages or empty state ─────────────────────────── */}
+      {/* ── Right panel: AI / messages / empty state ─────────────────────── */}
       <div className={`
-        ${!showSidebar || activeConvo ? 'flex' : 'hidden'} md:flex
-        flex-1 flex-col bg-gray-50 dark:bg-zinc-950 min-w-0
+        ${!showSidebar || activeConvo || showAI ? 'flex' : 'hidden'} md:flex
+        flex-1 flex-col bg-gray-50 dark:bg-zinc-950 min-w-0 overflow-hidden
       `}>
-        {activeConvo ? (
+        {showAI ? (
+          <FloatingAssistant
+            inline
+            onBack={() => { setShowAI(false); setShowSidebar(true) }}
+          />
+        ) : activeConvo ? (
           <ConversationPanel
             key={activeConvo.id}
             convo={activeConvo}

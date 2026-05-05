@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '../firebase/config'
@@ -99,6 +99,40 @@ function IncomingMessagePopup({ notification, onClose, onClickPopup }) {
   )
 }
 
+// ── Avatar helpers ────────────────────────────────────────────────────────────
+const AVATAR_COLORS = [
+  'bg-blue-500','bg-purple-500','bg-green-500','bg-amber-500',
+  'bg-rose-500','bg-cyan-500','bg-indigo-500','bg-teal-500',
+]
+function avatarColor(uid = '') {
+  let n = 0; for (let i = 0; i < uid.length; i++) n += uid.charCodeAt(i)
+  return AVATAR_COLORS[n % AVATAR_COLORS.length]
+}
+function avatarInitials(name = '') {
+  return name.split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2) || '?'
+}
+
+// ── Mobile tab bar items ──────────────────────────────────────────────────────
+function TabIconUpdate({ active }) {
+  return <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={active ? 2.25 : 1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
+}
+function TabIconBoard({ active }) {
+  return <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={active ? 2.25 : 1.75} viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="11" rx="1.5"/><rect x="14" y="17" width="7" height="4" rx="1.5"/></svg>
+}
+function TabIconTasks({ active }) {
+  return <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={active ? 2.25 : 1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+}
+function TabIconChat({ active }) {
+  return <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={active ? 2.25 : 1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+}
+
+const MOBILE_TABS = [
+  { path: '/update', label: 'Update', Icon: TabIconUpdate },
+  { path: '/',       label: 'Board',  Icon: TabIconBoard  },
+  { path: '/tasks',  label: 'Tasks',  Icon: TabIconTasks  },
+  { path: '/chat',   label: 'Chat',   Icon: TabIconChat   },
+]
+
 // ── Nav items ──────────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { path: '/',         label: 'RO Board', icon: <IconBoard />,    roles: null },
@@ -116,8 +150,10 @@ export default function Layout({ children }) {
   const navigate  = useNavigate()
 
   const [menuOpen,       setMenuOpen]       = useState(false)
+  const [profileOpen,    setProfileOpen]    = useState(false)
   const [notifications,  setNotifications]  = useState([])
   const [chatUnread,     setChatUnread]      = useState(0)
+  const profileRef = useRef(null)
 
   const prevConvosRef        = useRef({})   // convoId -> lastAt millis
   const initializedRef       = useRef(false)
@@ -192,6 +228,16 @@ export default function Layout({ children }) {
     })
   }, [user?.uid])
 
+  // Close profile dropdown on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (profileRef.current && !profileRef.current.contains(e.target)) setProfileOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    document.addEventListener('touchstart', handler)
+    return () => { document.removeEventListener('mousedown', handler); document.removeEventListener('touchstart', handler) }
+  }, [])
+
   const dismissNotif = (id) => setNotifications(ns => ns.filter(n => n.id !== id))
   const clickNotif   = (notif) => { dismissNotif(notif.id); navigate('/chat', { state: { convoId: notif.convoId } }) }
 
@@ -202,7 +248,7 @@ export default function Layout({ children }) {
     <div className="min-h-screen bg-gray-50 dark:bg-zinc-950 flex flex-col font-sans">
 
       {/* ── Top nav ───────────────────────────────────────────────────────── */}
-      <header className="bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 sticky top-0 z-40">
+      <header className="bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 sticky top-0 z-40 pt-safe">
         <div className="max-w-[1440px] mx-auto px-4 h-14 flex items-center justify-between gap-4">
 
           {/* Logo */}
@@ -270,68 +316,88 @@ export default function Layout({ children }) {
               Sign Out
             </button>
 
-            <button
-              className="md:hidden p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-zinc-800"
-              onClick={() => setMenuOpen(v => !v)}
-            >
-              {menuOpen ? <IconClose /> : <IconMenu />}
-            </button>
+            {/* Mobile: profile avatar button */}
+            <div className="md:hidden relative" ref={profileRef}>
+              <button
+                onClick={() => setProfileOpen(v => !v)}
+                className={`w-8 h-8 rounded-full text-white text-xs font-bold flex items-center justify-center shrink-0 ${avatarColor(user?.uid ?? '')}`}
+              >
+                {avatarInitials(displayName ?? '')}
+              </button>
+              {profileOpen && (
+                <div className="absolute right-0 top-10 w-52 bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-zinc-800 z-[60] overflow-hidden">
+                  <div className="flex items-center gap-3 px-4 py-3.5 border-b border-gray-100 dark:border-zinc-800">
+                    <div className={`w-10 h-10 rounded-full text-white text-sm font-bold flex items-center justify-center shrink-0 ${avatarColor(user?.uid ?? '')}`}>
+                      {avatarInitials(displayName ?? '')}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">{displayName}</p>
+                      <p className="text-xs text-gray-400 dark:text-zinc-500">{ROLE_LABELS[role] ?? role}</p>
+                    </div>
+                  </div>
+                  <Link
+                    to="/settings"
+                    onClick={() => setProfileOpen(false)}
+                    className="flex items-center gap-2.5 px-4 py-3 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors"
+                  >
+                    <IconSettings /> Settings
+                  </Link>
+                  <button
+                    onClick={() => { setProfileOpen(false); handleLogout() }}
+                    className="w-full flex items-center gap-2.5 px-4 py-3 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors border-t border-gray-100 dark:border-zinc-800"
+                  >
+                    <IconSignOut /> Sign Out
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Mobile dropdown */}
-        {menuOpen && (
-          <div className="md:hidden border-t border-gray-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-4 py-3 flex flex-col gap-1">
-            {visibleNav.map(item => {
-              const badge = item.path === '/chat' && chatUnread > 0 ? chatUnread : 0
-              return (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  onClick={() => setMenuOpen(false)}
-                  className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors
-                    ${location.pathname === item.path
-                      ? 'bg-gray-100 dark:bg-zinc-800 text-gray-900 dark:text-gray-100'
-                      : 'text-gray-600 dark:text-gray-400'}`}
-                >
-                  <span className="relative">
-                    {item.icon}
-                    {badge > 0 && (
-                      <span className="absolute -top-1.5 -right-1.5 min-w-[14px] h-3.5 bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center px-0.5 leading-none">
-                        {badge > 9 ? '9+' : badge}
-                      </span>
-                    )}
-                  </span>
-                  {item.label}
-                </Link>
-              )
-            })}
-            <div className="mt-2 pt-2 border-t border-gray-100 dark:border-zinc-800 flex items-center justify-between">
-              <div>
-                <p className="text-xs font-semibold text-gray-700 dark:text-gray-300">{displayName}</p>
-                <p className="text-xs text-gray-400 dark:text-gray-500">{ROLE_LABELS[role]}</p>
-              </div>
-              <button
-                onClick={handleLogout}
-                className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 hover:text-red-500 transition-colors"
-              >
-                <IconSignOut /> Sign Out
-              </button>
-            </div>
-          </div>
-        )}
       </header>
 
       {/* ── Page content ──────────────────────────────────────────────────── */}
-      <main className="flex-1 max-w-[1440px] mx-auto w-full px-4 py-6">
+      <main className="flex-1 max-w-[1440px] mx-auto w-full px-4 py-4 md:py-6 pb-tab-safe md:pb-6">
         {children}
       </main>
 
-      {/* ── Floating AI Assistant ─────────────────────────────────────────── */}
-      <FloatingAssistant />
+      {/* ── Floating AI Assistant — desktop only ─────────────────────────── */}
+      <div className="hidden md:block">
+        <FloatingAssistant />
+      </div>
 
-      {/* ── Incoming message popups (bottom-left stack) ───────────────────── */}
-      <div className="fixed bottom-6 left-6 z-[100] flex flex-col-reverse gap-3 pointer-events-none">
+      {/* ── Mobile bottom tab bar ────────────────────────────────────────── */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 dark:bg-zinc-900/95 backdrop-blur border-t border-gray-200 dark:border-zinc-800 pb-safe">
+        <div className="grid grid-cols-4 h-14">
+          {MOBILE_TABS.map(({ path, label, Icon }) => {
+            const isActive = path === '/'
+              ? location.pathname === '/'
+              : location.pathname.startsWith(path)
+            const badge = path === '/chat' && chatUnread > 0 ? chatUnread : 0
+            return (
+              <Link
+                key={path}
+                to={path}
+                className={`flex flex-col items-center justify-center gap-0.5 transition-colors active:opacity-70
+                  ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-zinc-500'}`}
+              >
+                <span className="relative">
+                  <Icon active={isActive} />
+                  {badge > 0 && (
+                    <span className="absolute -top-1 -right-1.5 min-w-[15px] h-[15px] bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center px-0.5 leading-none">
+                      {badge > 9 ? '9+' : badge}
+                    </span>
+                  )}
+                </span>
+                <span className="text-[10px] font-medium leading-none">{label}</span>
+              </Link>
+            )
+          })}
+        </div>
+      </nav>
+
+      {/* ── Incoming message popups (above tab bar on mobile) ────────────── */}
+      <div className="fixed bottom-20 md:bottom-6 left-4 md:left-6 z-[100] flex flex-col-reverse gap-3 pointer-events-none">
         {notifications.map(notif => (
           <div key={notif.id} className="pointer-events-auto">
             <IncomingMessagePopup

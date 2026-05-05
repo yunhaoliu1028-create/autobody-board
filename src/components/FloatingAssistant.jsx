@@ -90,7 +90,7 @@ function AssistantMark({ className = 'w-6 h-6' }) {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function FloatingAssistant() {
+export default function FloatingAssistant({ inline = false, onBack }) {
   const { user }  = useAuth()
   const toast     = useToast()
 
@@ -330,28 +330,40 @@ export default function FloatingAssistant() {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* ── Floating button ─────────────────────────────────────────────── */}
-      <button
-        onClick={() => setOpen(true)}
-        className="fixed bottom-24 right-4 z-40 w-14 h-14 rounded-full shadow-xl flex items-center justify-center
-          bg-zinc-950 hover:bg-zinc-800 active:scale-95 transition-all border border-white/20
-          ring-1 ring-black/10 text-white"
-        title="Shop Assistant"
-      >
-        <AssistantMark className="w-8 h-8" />
-      </button>
+      {/* ── Floating button — desktop/FAB mode only ──────────────────────── */}
+      {!inline && !open && (
+        <button
+          onClick={() => setOpen(true)}
+          className="fixed bottom-24 right-4 z-40 w-14 h-14 rounded-full shadow-xl flex items-center justify-center
+            bg-zinc-950 hover:bg-zinc-800 active:scale-95 transition-all border border-white/20
+            ring-1 ring-black/10 text-white"
+          title="Shop Assistant"
+        >
+          <AssistantMark className="w-8 h-8" />
+        </button>
+      )}
 
       {/* ── Chat panel ──────────────────────────────────────────────────── */}
-      {open && (
+      {(inline || open) && (
         <div
-          className={`fixed z-50 flex flex-col bg-gray-50 dark:bg-zinc-950 shadow-2xl border border-gray-200 dark:border-zinc-800
-            ${isFullscreen
-              ? 'inset-0'
-              : 'right-4 bottom-20 w-[min(520px,calc(100vw-2rem))] h-[min(580px,68vh)] rounded-2xl overflow-hidden'}`}
+          className={inline
+            ? 'flex flex-col h-full w-full bg-gray-50 dark:bg-zinc-950 overflow-hidden'
+            : `fixed z-50 flex flex-col bg-gray-50 dark:bg-zinc-950 shadow-2xl border border-gray-200 dark:border-zinc-800
+              ${isFullscreen ? 'inset-0' : 'right-4 bottom-20 w-[min(520px,calc(100vw-2rem))] h-[min(580px,68vh)] rounded-2xl overflow-hidden'}`}
         >
 
           {/* Header */}
           <div className="flex items-center gap-2 px-4 py-3 bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 shrink-0">
+            {inline && onBack && (
+              <button
+                onClick={onBack}
+                className="p-1.5 -ml-1 mr-1 rounded-lg text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
+                </svg>
+              </button>
+            )}
             <span className="w-8 h-8 rounded-full bg-zinc-950 dark:bg-zinc-100 text-white dark:text-zinc-900 flex items-center justify-center">
               <AssistantMark className="w-5 h-5" />
             </span>
@@ -406,29 +418,33 @@ export default function FloatingAssistant() {
               }}
               className="text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800"
             >New</button>
-            <button
-              onClick={() => setIsFullscreen(v => !v)}
-              className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
-              title={isFullscreen ? 'Small window' : 'Full screen'}
-            >
-              {isFullscreen ? (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5"/>
-                </svg>
-              ) : (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
-                </svg>
-              )}
-            </button>
-            <button
-              onClick={() => setOpen(false)}
-              className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
-              </svg>
-            </button>
+            {!inline && (
+              <>
+                <button
+                  onClick={() => setIsFullscreen(v => !v)}
+                  className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
+                  title={isFullscreen ? 'Small window' : 'Full screen'}
+                >
+                  {isFullscreen ? (
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5"/>
+                    </svg>
+                  ) : (
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
+                    </svg>
+                  )}
+                </button>
+                <button
+                  onClick={() => setOpen(false)}
+                  className="p-2 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                  </svg>
+                </button>
+              </>
+            )}
           </div>
 
           {/* Memory panel — collapsible */}
