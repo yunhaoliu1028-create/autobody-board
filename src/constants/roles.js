@@ -84,7 +84,7 @@ export const RO_STATUSES = [
   },
   {
     key: 'detail',
-    label: 'Detail',
+    label: 'QC / Detail',
     color: 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-200',
     dot:   'bg-teal-500 dark:bg-teal-400',
   },
@@ -111,7 +111,7 @@ export const RO_STATUSES = [
 export const STATUS_MAP = Object.fromEntries(RO_STATUSES.map(s => [s.key, s]))
 
 export const ROLE_STATUS_FILTER = {
-  body_man:      ['teardown', 'waiting_parts', 'body_work', 'body_complete'],
+  body_man:      ['teardown', 'waiting_parts', 'body_work', 'body_complete', 'reassembly'],
   painter:       ['paint_prep', 'in_paint', 'paint_complete'],
   paint_helper:  ['paint_prep', 'in_paint', 'paint_complete'],
   parts_manager: ['checked_in', 'teardown', 'waiting_parts', 'body_work'],

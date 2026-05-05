@@ -45,10 +45,10 @@ service cloud.firestore {
       // Managers & estimators can update; body/painter can update status only
       allow update: if isAuth() && (
         canEditRO() ||
-        // Body techs & painters can update status + notes only
+        // Body techs & painters can update status + notes + parts delay
         (myRole() in ['body_man', 'painter', 'paint_helper', 'parts_manager'] &&
          request.resource.data.diff(resource.data).affectedKeys()
-           .hasOnly(['status', 'partsStatus', 'notes', 'updatedAt']))
+           .hasOnly(['status', 'partsStatus', 'notes', 'updatedAt', 'partsDelay']))
       );
       allow delete: if isAuth() && isManager();
     }

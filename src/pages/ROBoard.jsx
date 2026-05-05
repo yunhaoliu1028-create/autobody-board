@@ -39,6 +39,18 @@ function dueDateClass(dateStr) {
   } catch { return '' }
 }
 
+const PRE_PAINT_STATUSES = new Set(['checked_in', 'teardown', 'waiting_parts', 'body_work', 'body_complete', 'paint_prep'])
+const PARTS_DELAY_LABELS = { back_ordered: 'Back Ordered', delayed: 'Delayed', wrong_part: 'Wrong Part', defective: 'Defective' }
+
+function isPaintDueSoon(ro) {
+  if (!PRE_PAINT_STATUSES.has(ro.status)) return false
+  const dueDate = ro.cccDateOut || ro.promisedDate
+  if (!dueDate) return false
+  try {
+    return differenceInDays(parseISO(dueDate), new Date()) <= 2
+  } catch { return false }
+}
+
 function fmtDate(dateStr) {
   if (!dateStr) return '—'
   try {
@@ -128,9 +140,19 @@ function RORow({ ro, employees, onSelect }) {
       {/* Body Tech */}
       <td className="px-4 py-3 text-xs text-gray-500 dark:text-zinc-300 whitespace-nowrap">{bodyTech}</td>
 
-      {/* Parts */}
+      {/* Parts + delay badge */}
       <td className="px-4 py-3 whitespace-nowrap">
-        <PartsStatusBadge status={ro.partsStatus} />
+        <div className="flex flex-col gap-1">
+          <PartsStatusBadge status={ro.partsStatus} />
+          {ro.partsDelay && (
+            <span
+              title={ro.partsDelay.note || PARTS_DELAY_LABELS[ro.partsDelay.reason] || 'Parts delay'}
+              className="text-xs px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300 font-medium"
+            >
+              ⚠ {PARTS_DELAY_LABELS[ro.partsDelay.reason] || 'Parts Delay'}
+            </span>
+          )}
+        </div>
       </td>
 
       {/* Drop-off Date (manual, not CCC) */}
@@ -138,9 +160,16 @@ function RORow({ ro, employees, onSelect }) {
         <DropOffInfo ro={ro} />
       </td>
 
-      {/* Due Date */}
+      {/* Due Date + paint alert */}
       <td className={`px-4 py-3 text-xs whitespace-nowrap ${dueDateClass(dueDate)}`}>
-        {fmtDate(dueDate)}
+        <div className="flex flex-col gap-1">
+          <span>{fmtDate(dueDate)}</span>
+          {isPaintDueSoon(ro) && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300 font-medium">
+              ⚠ Paint Due
+            </span>
+          )}
+        </div>
       </td>
 
       <td className="px-4 py-3 text-right" onClick={e => e.stopPropagation()}>
@@ -228,6 +257,25 @@ function KanbanCard({ ro, onSelect, draggable, onDragStart, onDragEnd }) {
             <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400 font-medium">
               Rental
             </span>
+          </div>
+        )}
+
+        {/* Alert badges */}
+        {(ro.partsDelay || isPaintDueSoon(ro)) && (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {ro.partsDelay && (
+              <span
+                title={ro.partsDelay.note || PARTS_DELAY_LABELS[ro.partsDelay.reason] || 'Parts delay'}
+                className="text-xs px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300 font-medium"
+              >
+                ⚠ {PARTS_DELAY_LABELS[ro.partsDelay.reason] || 'Parts Delay'}
+              </span>
+            )}
+            {isPaintDueSoon(ro) && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300 font-medium">
+                ⚠ Paint Due
+              </span>
+            )}
           </div>
         )}
     </div>

@@ -79,6 +79,7 @@ export default function RODrawer({ ro, employees, onClose }) {
   const [note,         setNote]         = useState('')
   const [savingNote,   setSavingNote]   = useState(false)
   const [showAllNotes, setShowAllNotes] = useState(false)
+  const [noteFilter,   setNoteFilter]   = useState('all')
   const [showTaskForm, setShowTaskForm] = useState(false)
   const [taskTo,       setTaskTo]       = useState('')
   const [taskTitle,    setTaskTitle]    = useState('')
@@ -156,7 +157,12 @@ export default function RODrawer({ ro, employees, onClose }) {
   if (!ro) return null
 
   const noteLines    = toNoteLines(ro.notes)
-  const noteGroups   = collapseDuplicateNoteLines(noteLines)
+  const isCommNote   = line => /^\[Customer\s*-/i.test(line)
+  const filteredLines = noteFilter === 'customer'
+    ? noteLines.filter(isCommNote)
+    : noteLines
+  const noteGroups   = collapseDuplicateNoteLines(filteredLines)
+  const hasCommNotes = noteLines.some(isCommNote)
   const hiddenDupes  = noteGroups.reduce((sum, item) => sum + Math.max(0, item.lines.length - 1), 0)
   const openTasks    = tasks.filter(t => t.status !== 'completed').length
   const empOptions   = Object.entries(employees)
@@ -246,6 +252,25 @@ export default function RODrawer({ ro, employees, onClose }) {
           {/* Notes tab */}
           {tab === 'notes' && (
             <>
+              {/* Filter chips — only show when there are customer notes */}
+              {hasCommNotes && (
+                <div className="flex gap-1.5 mb-1">
+                  {['all', 'customer'].map(f => (
+                    <button
+                      key={f}
+                      onClick={() => setNoteFilter(f)}
+                      className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${
+                        noteFilter === f
+                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300'
+                          : 'bg-gray-100 text-gray-500 dark:bg-zinc-800 dark:text-zinc-400 hover:bg-gray-200 dark:hover:bg-zinc-700'
+                      }`}
+                    >
+                      {f === 'all' ? 'All' : 'Customer'}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               <form onSubmit={addNote} className="flex gap-2">
                 <input
                   value={note}
@@ -268,11 +293,22 @@ export default function RODrawer({ ro, employees, onClose }) {
                   : noteGroups
                 return (
                   <div className="space-y-2">
-                    {visible.map(({ line, lines }, i) => (
+                    {visible.map(({ line, lines }, i) => {
+                      const isCustomer = isCommNote(line)
+                      return (
                       <div
                         key={i}
-                        className="px-3 py-2.5 bg-gray-50 dark:bg-zinc-800/50 rounded-xl border border-gray-100 dark:border-zinc-700/50"
+                        className={`px-3 py-2.5 rounded-xl border ${
+                          isCustomer
+                            ? 'bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800/50'
+                            : 'bg-gray-50 dark:bg-zinc-800/50 border-gray-100 dark:border-zinc-700/50'
+                        }`}
                       >
+                        {isCustomer && (
+                          <span className="inline-block text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400 mb-1">
+                            Customer
+                          </span>
+                        )}
                         <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
                           {line}
                         </p>
@@ -282,7 +318,8 @@ export default function RODrawer({ ro, employees, onClose }) {
                           </p>
                         )}
                       </div>
-                    ))}
+                      )
+                    })}
                     {hiddenDupes > 0 && (
                       <button
                         onClick={() => setShowAllNotes(v => !v)}
