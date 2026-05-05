@@ -82,36 +82,19 @@ function MiniMarkdown({ text }) {
 
 function AssistantMark({ className = 'w-6 h-6' }) {
   return (
-    <svg className={className} viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      {/* Antenna */}
-      <rect x="30" y="2" width="4" height="11" rx="2" fill="#374151"/>
-      <circle cx="32" cy="2" r="3.5" fill="#3b82f6"/>
-      <circle cx="32" cy="2" r="1.8" fill="#93c5fd"/>
-      {/* Head shell */}
-      <rect x="9" y="13" width="46" height="38" rx="13" fill="#111827"/>
-      <rect x="9" y="13" width="46" height="38" rx="13" fill="none" stroke="#1e293b" strokeWidth="1.5"/>
-      {/* Face screen */}
-      <rect x="14" y="18" width="36" height="28" rx="8" fill="#020617"/>
-      {/* Eye outer glow */}
-      <circle cx="24" cy="30" r="6" fill="#1e3a5f"/>
-      <circle cx="40" cy="30" r="6" fill="#1e3a5f"/>
-      {/* Eye iris */}
-      <circle cx="24" cy="30" r="4.5" fill="#1d4ed8"/>
-      <circle cx="40" cy="30" r="4.5" fill="#1d4ed8"/>
-      {/* Eye bright center */}
-      <circle cx="24" cy="30" r="2.8" fill="#3b82f6"/>
-      <circle cx="40" cy="30" r="2.8" fill="#3b82f6"/>
-      {/* Catchlights */}
-      <circle cx="25.5" cy="28.2" r="1.3" fill="white" opacity="0.9"/>
-      <circle cx="41.5" cy="28.2" r="1.3" fill="white" opacity="0.9"/>
-      {/* Mouth — status bar */}
-      <rect x="21" y="40" width="22" height="2.5" rx="1.25" fill="#1e293b"/>
-      <rect x="21" y="40" width="14" height="2.5" rx="1.25" fill="#2563eb"/>
-      {/* Side ears */}
-      <rect x="3"  y="25" width="6" height="14" rx="3" fill="#111827" stroke="#1e293b" strokeWidth="1"/>
-      <rect x="55" y="25" width="6" height="14" rx="3" fill="#111827" stroke="#1e293b" strokeWidth="1"/>
-      <rect x="4.5" y="28" width="2" height="8" rx="1" fill="#3b82f6" opacity="0.5"/>
-      <rect x="57.5" y="28" width="2" height="8" rx="1" fill="#3b82f6" opacity="0.5"/>
+    <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      {/* Antenna dot */}
+      <circle cx="12" cy="2" r="1.5" className="fill-sky-500 dark:fill-sky-400"/>
+      <rect x="11.25" y="3.25" width="1.5" height="2.75" rx="0.75" className="fill-slate-400 dark:fill-slate-500"/>
+      {/* Head */}
+      <rect x="2.5" y="6" width="19" height="15" rx="4.5" className="fill-slate-800 dark:fill-slate-100"/>
+      {/* Left eye */}
+      <rect x="6" y="10.5" width="4" height="5" rx="1" className="fill-sky-400 dark:fill-sky-500"/>
+      {/* Right eye */}
+      <rect x="14" y="10.5" width="4" height="5" rx="1" className="fill-sky-400 dark:fill-sky-500"/>
+      {/* Mouth — two small dots */}
+      <circle cx="10" cy="18.5" r="1" className="fill-slate-600 dark:fill-slate-400"/>
+      <circle cx="14" cy="18.5" r="1" className="fill-slate-600 dark:fill-slate-400"/>
     </svg>
   )
 }
