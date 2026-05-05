@@ -82,18 +82,36 @@ function MiniMarkdown({ text }) {
 
 function AssistantMark({ className = 'w-6 h-6' }) {
   return (
-    <svg className={className} viewBox="0 0 64 64" fill="none" shapeRendering="crispEdges" aria-hidden="true">
-      <rect x="20" y="6" width="24" height="6" rx="2" fill="#111827" />
-      <rect x="29" y="12" width="6" height="6" fill="#4b5563" />
-      <rect x="12" y="18" width="40" height="34" rx="8" fill="#111827" />
-      <rect x="16" y="22" width="32" height="26" rx="5" fill="#f8fafc" />
-      <rect x="22" y="30" width="8" height="8" rx="2" fill="#111827" />
-      <rect x="34" y="30" width="8" height="8" rx="2" fill="#111827" />
-      <rect x="27" y="42" width="10" height="3" rx="1" fill="#9ca3af" />
-      <rect x="6" y="28" width="6" height="14" rx="2" fill="#374151" />
-      <rect x="52" y="28" width="6" height="14" rx="2" fill="#374151" />
-      <rect x="23" y="31" width="2" height="2" fill="#f8fafc" />
-      <rect x="35" y="31" width="2" height="2" fill="#f8fafc" />
+    <svg className={className} viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      {/* Antenna */}
+      <rect x="30" y="2" width="4" height="11" rx="2" fill="#374151"/>
+      <circle cx="32" cy="2" r="3.5" fill="#3b82f6"/>
+      <circle cx="32" cy="2" r="1.8" fill="#93c5fd"/>
+      {/* Head shell */}
+      <rect x="9" y="13" width="46" height="38" rx="13" fill="#111827"/>
+      <rect x="9" y="13" width="46" height="38" rx="13" fill="none" stroke="#1e293b" strokeWidth="1.5"/>
+      {/* Face screen */}
+      <rect x="14" y="18" width="36" height="28" rx="8" fill="#020617"/>
+      {/* Eye outer glow */}
+      <circle cx="24" cy="30" r="6" fill="#1e3a5f"/>
+      <circle cx="40" cy="30" r="6" fill="#1e3a5f"/>
+      {/* Eye iris */}
+      <circle cx="24" cy="30" r="4.5" fill="#1d4ed8"/>
+      <circle cx="40" cy="30" r="4.5" fill="#1d4ed8"/>
+      {/* Eye bright center */}
+      <circle cx="24" cy="30" r="2.8" fill="#3b82f6"/>
+      <circle cx="40" cy="30" r="2.8" fill="#3b82f6"/>
+      {/* Catchlights */}
+      <circle cx="25.5" cy="28.2" r="1.3" fill="white" opacity="0.9"/>
+      <circle cx="41.5" cy="28.2" r="1.3" fill="white" opacity="0.9"/>
+      {/* Mouth — status bar */}
+      <rect x="21" y="40" width="22" height="2.5" rx="1.25" fill="#1e293b"/>
+      <rect x="21" y="40" width="14" height="2.5" rx="1.25" fill="#2563eb"/>
+      {/* Side ears */}
+      <rect x="3"  y="25" width="6" height="14" rx="3" fill="#111827" stroke="#1e293b" strokeWidth="1"/>
+      <rect x="55" y="25" width="6" height="14" rx="3" fill="#111827" stroke="#1e293b" strokeWidth="1"/>
+      <rect x="4.5" y="28" width="2" height="8" rx="1" fill="#3b82f6" opacity="0.5"/>
+      <rect x="57.5" y="28" width="2" height="8" rx="1" fill="#3b82f6" opacity="0.5"/>
     </svg>
   )
 }
@@ -118,6 +136,11 @@ export default function FloatingAssistant() {
   const [showMemory,     setShowMemory]     = useState(false)     // memory panel toggle
   const [savedFacts,     setSavedFacts]     = useState([])        // facts just saved this session
   const [isFullscreen,   setIsFullscreen]   = useState(false)
+  const [showChatHistory, setShowChatHistory] = useState(false)
+  const [chatHistory,     setChatHistory]     = useState(() => {
+    try { return JSON.parse(localStorage.getItem('autobody.chat.history.v1') || '[]') }
+    catch { return [] }
+  })
 
   // Voice
   const [listening,      setListening]      = useState(false)
@@ -351,7 +374,7 @@ export default function FloatingAssistant() {
           className={`fixed z-50 flex flex-col bg-gray-50 dark:bg-zinc-950 shadow-2xl border border-gray-200 dark:border-zinc-800
             ${isFullscreen
               ? 'inset-0'
-              : 'right-4 bottom-20 w-[min(520px,calc(100vw-2rem))] h-[min(660px,calc(100vh-7rem))] rounded-2xl overflow-hidden'}`}
+              : 'right-4 bottom-20 w-[min(520px,calc(100vw-2rem))] h-[min(580px,68vh)] rounded-2xl overflow-hidden'}`}
         >
 
           {/* Header */}
@@ -367,7 +390,7 @@ export default function FloatingAssistant() {
             </div>
             {/* Memory button */}
             <button
-              onClick={() => setShowMemory(v => !v)}
+              onClick={() => { setShowMemory(v => !v); setShowChatHistory(false) }}
               className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors
                 ${showMemory
                   ? 'bg-violet-100 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300'
@@ -376,9 +399,38 @@ export default function FloatingAssistant() {
             >
               🧠 {memory.length}
             </button>
+            {/* Chat history button */}
+            <button
+              onClick={() => { setShowChatHistory(v => !v); setShowMemory(false) }}
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors
+                ${showChatHistory
+                  ? 'bg-gray-100 dark:bg-zinc-700 text-gray-700 dark:text-zinc-200'
+                  : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-zinc-800'}`}
+              title="Chat history"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <span>{chatHistory.length}</span>
+            </button>
             {/* New chat */}
             <button
-              onClick={() => { setMessages([]); setPendingActions([]); setSmsDraft(null); setSavedFacts([]) }}
+              onClick={() => {
+                if (messages.length > 1) {
+                  const entry = {
+                    id: Date.now(),
+                    at: new Date().toISOString(),
+                    preview: messages.find(m => m.role === 'user')?.content?.slice(0, 70) || '…',
+                    messages: messages.slice(0, 30),
+                  }
+                  setChatHistory(prev => {
+                    const updated = [entry, ...prev].slice(0, 15)
+                    localStorage.setItem('autobody.chat.history.v1', JSON.stringify(updated))
+                    return updated
+                  })
+                }
+                setMessages([]); setPendingActions([]); setSmsDraft(null); setSavedFacts([])
+              }}
               className="text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800"
             >New</button>
             <button
@@ -428,6 +480,39 @@ export default function FloatingAssistant() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Chat history panel */}
+          {showChatHistory && (
+            <div className="bg-gray-50 dark:bg-zinc-800/60 border-b border-gray-200 dark:border-zinc-700 px-4 py-3 shrink-0 max-h-52 overflow-y-auto">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-gray-600 dark:text-zinc-300">Past Conversations</p>
+                {chatHistory.length > 0 && (
+                  <button
+                    onClick={() => { localStorage.removeItem('autobody.chat.history.v1'); setChatHistory([]) }}
+                    className="text-xs text-gray-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400"
+                  >Clear all</button>
+                )}
+              </div>
+              {chatHistory.length === 0 ? (
+                <p className="text-xs text-gray-400 dark:text-zinc-500">No past conversations yet.</p>
+              ) : (
+                <div className="space-y-1">
+                  {chatHistory.map(c => (
+                    <button
+                      key={c.id}
+                      onClick={() => { setMessages(c.messages); setShowChatHistory(false) }}
+                      className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-white dark:hover:bg-zinc-700 transition-colors"
+                    >
+                      <span className="block text-[10px] text-gray-400 dark:text-zinc-500">
+                        {new Date(c.at).toLocaleDateString()} {new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      <span className="block text-xs text-gray-700 dark:text-zinc-200 truncate">{c.preview}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

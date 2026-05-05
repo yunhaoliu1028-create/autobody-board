@@ -901,13 +901,25 @@ export default function AIInputBox({ ros = [], employees = [] }) {
     <div className="bg-white dark:bg-zinc-900 rounded-2xl border-2 border-blue-200 dark:border-blue-800 shadow-sm p-5 mb-5">
 
       {/* Header */}
-      <div className="mb-4">
+      <div className="mb-4 flex items-start justify-between gap-2">
         <div>
           <h2 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight">Quick Update</h2>
           <p className="text-xs text-gray-400 dark:text-zinc-500">
             {images.length > 0 ? '📷 Photos ready — tap Submit to upload' : 'type or speak — AI will parse & apply'}
           </p>
         </div>
+        <button
+          type="button"
+          onClick={() => setShowHistory(v => !v)}
+          className={`shrink-0 p-1.5 rounded-lg border text-xs transition-colors ${
+            showHistory
+              ? 'bg-blue-50 border-blue-300 text-blue-600 dark:bg-blue-950/40 dark:border-blue-700 dark:text-blue-300'
+              : 'border-gray-200 dark:border-zinc-700 text-gray-500 dark:text-zinc-400 hover:border-blue-400 hover:text-blue-600 bg-white dark:bg-zinc-800'
+          }`}
+          title="GIB history"
+        >
+          <IconHistory />
+        </button>
       </div>
 
       {showHistory && (
@@ -986,19 +998,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
         {/* ── Mobile button layout ──────────────────────────────────────── */}
         <div className="sm:hidden space-y-2.5">
           {/* Voice + Photos — 2-col */}
-          <div className="grid grid-cols-3 gap-2.5">
-            <button
-              type="button"
-              onClick={() => setShowHistory(v => !v)}
-              className={`flex flex-col items-center justify-center gap-1 h-14 rounded-xl border-2 text-sm font-semibold transition-all active:scale-95 ${
-                showHistory
-                  ? 'bg-blue-50 border-blue-300 text-blue-600 dark:bg-blue-950/40 dark:border-blue-700 dark:text-blue-300'
-                  : 'bg-gray-50 border-gray-200 dark:bg-zinc-800 dark:border-zinc-700 text-gray-600 dark:text-zinc-300'
-              }`}
-            >
-              <IconHistory />
-              <span className="text-xs">History</span>
-            </button>
+          <div className="grid grid-cols-2 gap-2.5">
             {/* Voice button — Whisper powered */}
             <button
               type="button"
@@ -1088,19 +1088,6 @@ export default function AIInputBox({ ros = [], employees = [] }) {
               ? <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
               : <IconMic active={listening} />
             }
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowHistory(v => !v)}
-            className={`flex items-center justify-center px-2.5 py-2 rounded-lg border transition-colors shrink-0 ${
-              showHistory
-                ? 'border-blue-400 text-blue-600 bg-blue-50 dark:border-blue-700 dark:text-blue-300 dark:bg-blue-950/40'
-                : 'border-gray-300 dark:border-zinc-700 text-gray-500 dark:text-zinc-400 hover:border-blue-400 hover:text-blue-600 bg-white dark:bg-zinc-800'
-            }`}
-            title="GIB history"
-          >
-            <IconHistory />
           </button>
 
           <button
