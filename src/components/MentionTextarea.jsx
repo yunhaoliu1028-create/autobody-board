@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 export const DEFAULT_SUBLET_VENDORS = [
   'AC Auto Glass',
@@ -54,10 +54,18 @@ export default function MentionTextarea({
   inputRef,
   ...props
 }) {
-  const ownRef = useRef(null)
-  const ref = inputRef || ownRef
-  const [mention, setMention] = useState(null)
+  const ownRef    = useRef(null)
+  const ref       = inputRef || ownRef
+  const listRef   = useRef(null)
+  const [mention,     setMention]     = useState(null)
   const [activeIndex, setActiveIndex] = useState(0)
+
+  // Scroll active item into view whenever selection changes
+  useEffect(() => {
+    if (!listRef.current) return
+    const item = listRef.current.children[activeIndex]
+    item?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [activeIndex])
 
   const matches = useMemo(() => {
     if (!mention) return []
@@ -128,7 +136,10 @@ export default function MentionTextarea({
         onKeyDown={handleKeyDown}
         onInput={onInput}
         onClick={e => updateMention(e.currentTarget.value, e.currentTarget.selectionStart)}
-        onKeyUp={e => updateMention(e.currentTarget.value, e.currentTarget.selectionStart)}
+        onKeyUp={e => {
+          if (['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) return
+          updateMention(e.currentTarget.value, e.currentTarget.selectionStart)
+        }}
         placeholder={placeholder}
         rows={rows}
         disabled={disabled}
@@ -137,7 +148,8 @@ export default function MentionTextarea({
       />
       {mention && matches.length > 0 && (
         <div
-          className={`absolute w-36 max-w-[min(9rem,calc(100vw-2rem))] max-h-28 overflow-y-auto rounded-md border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-lg z-50 p-0.5 ${
+          ref={listRef}
+          className={`absolute w-44 max-w-[min(11rem,calc(100vw-2rem))] max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-xl z-50 p-0.5 ${
             dropdownPlacement === 'inside'
               ? 'left-3 top-10'
               : dropdownPlacement === 'top' ? 'left-0 bottom-full mb-1.5' : 'left-0 top-full mt-1.5'
@@ -148,18 +160,20 @@ export default function MentionTextarea({
               key={item.id}
               type="button"
               onMouseDown={e => { e.preventDefault(); selectMention(item) }}
-              className={`w-full flex items-center gap-1 px-1.5 py-0.5 rounded text-left transition-colors ${
-                idx === activeIndex ? 'bg-gray-100 dark:bg-zinc-800' : 'hover:bg-gray-50 dark:hover:bg-zinc-800/70'
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors ${
+                idx === activeIndex
+                  ? 'bg-blue-50 dark:bg-blue-950/50 ring-1 ring-blue-200 dark:ring-blue-800'
+                  : 'hover:bg-gray-50 dark:hover:bg-zinc-800/70'
               }`}
             >
-              <span className={`w-3.5 h-3.5 rounded-full flex items-center justify-center text-[7px] font-bold ${
-                item.type === 'employee' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-white'
+              <span className={`shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold ${
+                item.type === 'employee' ? 'bg-blue-600 text-white' : 'bg-zinc-700 dark:bg-zinc-500 text-white'
               }`}>
                 {item.name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()}
               </span>
               <span className="min-w-0">
-                <span className="block text-[9px] font-semibold text-gray-900 dark:text-gray-100 truncate">@{item.name}</span>
-                <span className="block text-[8px] leading-tight text-gray-400 dark:text-zinc-500 truncate">{item.meta}</span>
+                <span className="block text-xs font-semibold text-gray-900 dark:text-gray-100 truncate">@{item.name}</span>
+                <span className="block text-[10px] leading-tight text-gray-400 dark:text-zinc-500 truncate">{item.meta}</span>
               </span>
             </button>
           ))}

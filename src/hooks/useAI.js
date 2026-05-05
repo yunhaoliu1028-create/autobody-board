@@ -300,7 +300,7 @@ ${memBlock}
 
 ─── RESPONSE FORMAT ─────────────────────────────────────────────
 Always return valid JSON:
-{"reply":"response in SAME language as user (Chinese if Chinese). Markdown ok: **bold**, - bullets, ## headers.","actions":[],"smsText":null,"memoryFacts":[]}
+{"reply":"response in English by default. Only use Chinese if user's message is clearly in Chinese; only Spanish if clearly in Spanish. Markdown ok: **bold**, - bullets, ## headers.","actions":[],"smsText":null,"memoryFacts":[]}
 
 ─── ACTIONS (when asked to act on ROs) ──────────────────────────
 {"type":"add_note","roNumber":"9448","note":"English text","confidence":"high"}

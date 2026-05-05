@@ -49,10 +49,10 @@ function findEmployeeByName(employees, rawName = '') {
 
 // ── Quick prompt chips ────────────────────────────────────────────────────────
 const QUICK_PROMPTS = [
-  { label: '🌅 晨会简报', text: '请给我一个今天的晨会简报：目前重点需要关注的车子，有什么问题，今天预计交车的有哪些？' },
-  { label: '🚗 今日交车', text: '请列出今天和明天预计交车的车子，告诉我是否还有未完成的事项或部件未到。' },
-  { label: '⚠️ 需跟进',  text: '请列出目前最需要关注和跟进的车子，包括超期、部件未到、或有其他问题的，按优先级排列。' },
-  { label: '📱 生成短信', text: '请帮我生成一条简短的中文短信，总结今天店内所有车子的状态，供发给老板参考，控制在300字以内。' },
+  { label: '🌅 Morning Briefing', text: 'Give me a morning briefing: which vehicles need attention today, any issues, and which are expected for delivery?' },
+  { label: '🚗 Today\'s Deliveries', text: 'List vehicles expected for delivery today and tomorrow. Are there any outstanding tasks or missing parts?' },
+  { label: '⚠️ Needs Follow-up',   text: 'List the vehicles that need the most attention right now — overdue, missing parts, or other issues — sorted by priority.' },
+  { label: '📱 SMS Summary',        text: 'Generate a brief SMS summary of all vehicles in the shop today for the owner, under 280 characters.' },
 ]
 
 // ── Simple markdown renderer (bold, bullet lists) ─────────────────────────────
@@ -191,7 +191,7 @@ export default function FloatingAssistant() {
       }
     } catch (err) {
       const errMsg = err.message === 'NO_API_KEY'
-        ? '⚙️ 请先在 Settings 中配置 Anthropic API Key。'
+        ? '⚙️ Please configure your Anthropic API Key in Settings first.'
         : `❌ ${err.message}`
       setMessages(prev => [...prev, { role: 'assistant', content: errMsg }])
     } finally {
@@ -256,7 +256,7 @@ export default function FloatingAssistant() {
       }
       toast.success(`Applied ${pendingActions.length} action${pendingActions.length > 1 ? 's' : ''}`)
       setPendingActions([])
-      setMessages(prev => [...prev, { role: 'assistant', content: '✅ 操作已完成！' }])
+      setMessages(prev => [...prev, { role: 'assistant', content: '✅ Actions applied!' }])
     } catch (err) {
       toast.error('Apply failed: ' + err.message)
     } finally {
@@ -434,30 +434,16 @@ export default function FloatingAssistant() {
           {/* Messages area */}
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0">
 
-            {/* Empty state with quick prompts */}
+            {/* Empty state */}
             {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center min-h-full gap-5 py-8">
+              <div className="flex flex-col items-center justify-center min-h-full gap-4 py-8">
                 <div className="w-14 h-14 rounded-2xl bg-zinc-950 dark:bg-zinc-100 flex items-center justify-center shadow-lg">
                   <AssistantMark className="w-9 h-9" />
                 </div>
                 <div className="text-center">
-                  <p className="font-semibold text-gray-800 dark:text-gray-200">你好！我是店铺助手</p>
-                  <p className="text-sm text-gray-400 dark:text-zinc-500 mt-1">可以问我任何关于店内车辆的问题</p>
-                </div>
-                <div className="grid grid-cols-2 gap-2 w-full max-w-xs">
-                  {QUICK_PROMPTS.map(q => (
-                    <button
-                      key={q.label}
-                      onClick={() => sendMessage(q.text)}
-                      disabled={!dataLoaded}
-                      className="px-3 py-2.5 text-xs font-medium text-left rounded-xl border border-gray-200 dark:border-zinc-700
-                        bg-white dark:bg-zinc-800 text-gray-700 dark:text-zinc-300
-                        hover:border-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 dark:hover:border-blue-700
-                        disabled:opacity-40 transition-all active:scale-95"
-                    >
-                      {q.label}
-                    </button>
-                  ))}
+                  <p className="font-semibold text-gray-800 dark:text-gray-200">Shop Assistant</p>
+                  <p className="text-sm text-gray-400 dark:text-zinc-500 mt-1">Ask me anything about vehicles in the shop</p>
+                  <p className="text-xs text-gray-300 dark:text-zinc-600 mt-1.5">Use the quick prompts below ↓</p>
                 </div>
               </div>
             )}
@@ -509,7 +495,7 @@ export default function FloatingAssistant() {
               <div className="flex items-start gap-2 bg-violet-50 dark:bg-violet-950/40 border border-violet-200 dark:border-violet-800 rounded-2xl px-3.5 py-2.5">
                 <span className="text-base shrink-0">🧠</span>
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-violet-700 dark:text-violet-400">记忆已更新</p>
+                  <p className="text-xs font-semibold text-violet-700 dark:text-violet-400">Memory updated</p>
                   {savedFacts.map((f, i) => (
                     <p key={i} className="text-xs text-violet-600 dark:text-violet-400 mt-0.5">+ {f}</p>
                   ))}
@@ -522,7 +508,7 @@ export default function FloatingAssistant() {
             {pendingActions.length > 0 && (
               <div className="bg-green-50 dark:bg-green-950/40 border border-green-200 dark:border-green-800 rounded-2xl p-3 space-y-2">
                 <p className="text-xs font-semibold text-green-700 dark:text-green-400">
-                  🎯 {pendingActions.length} 个操作待确认
+                  🎯 {pendingActions.length} action{pendingActions.length !== 1 ? 's' : ''} to confirm
                 </p>
                 {pendingActions.map((a, i) => (
                   <div key={i} className="text-xs text-green-800 dark:text-green-300 bg-white/60 dark:bg-green-900/30 rounded-lg px-2.5 py-1.5">
@@ -538,11 +524,11 @@ export default function FloatingAssistant() {
                     onClick={applyActions}
                     disabled={applying}
                     className="px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-xs font-semibold rounded-lg"
-                  >{applying ? 'Applying…' : '✓ 执行操作'}</button>
+                  >{applying ? 'Applying…' : '✓ Apply'}</button>
                   <button
                     onClick={() => setPendingActions([])}
                     className="px-3 py-1.5 border border-green-300 text-green-700 text-xs rounded-lg hover:bg-green-100 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-900/40"
-                  >取消</button>
+                  >Cancel</button>
                 </div>
               </div>
             )}
@@ -550,17 +536,17 @@ export default function FloatingAssistant() {
             {/* SMS draft card */}
             {smsDraft && (
               <div className="bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-2xl p-3">
-                <p className="text-xs font-semibold text-blue-700 dark:text-blue-400 mb-2">📱 短信草稿</p>
+                <p className="text-xs font-semibold text-blue-700 dark:text-blue-400 mb-2">📱 SMS Draft</p>
                 <p className="text-sm text-blue-900 dark:text-blue-200 whitespace-pre-wrap leading-relaxed">{smsDraft}</p>
                 <div className="flex gap-2 mt-3">
                   <button
                     onClick={() => copyText(smsDraft)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg"
-                  >{copied ? '✓ 已复制' : '复制'}</button>
+                  >{copied ? '✓ Copied' : 'Copy'}</button>
                   <button
                     onClick={() => openSMS(smsDraft)}
                     className="px-3 py-1.5 border border-blue-300 text-blue-700 text-xs rounded-lg hover:bg-blue-100 dark:border-blue-700 dark:text-blue-400"
-                  >📨 打开短信</button>
+                  >📨 Open SMS</button>
                 </div>
               </div>
             )}
@@ -569,84 +555,101 @@ export default function FloatingAssistant() {
           </div>
 
           {/* ── Input area ─────────────────────────────────────────────── */}
-          <div className="shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-800 px-4 py-3 pb-[env(safe-area-inset-bottom,14px)]">
-            <div className="flex items-end gap-2.5">
+          <div className="shrink-0 bg-white dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-800 px-3 pt-2.5 pb-[env(safe-area-inset-bottom,10px)] space-y-2">
 
-              {/* Voice button */}
+            {/* Textarea */}
+            <MentionTextarea
+              inputRef={inputRef}
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              candidates={mentionCandidates}
+              dropdownPlacement="top"
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
+                  e.preventDefault()
+                  sendMessage()
+                }
+              }}
+              placeholder="Ask about any vehicle…"
+              rows={2}
+              className="w-full px-3 py-2.5 border border-gray-200 dark:border-zinc-700 rounded-xl text-sm
+                bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100
+                placeholder-gray-400 dark:placeholder-zinc-600
+                focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800
+                leading-relaxed transition-colors resize-none"
+              style={{ maxHeight: 120, overflowY: 'auto' }}
+              disabled={loading}
+            />
+
+            {/* Toolbar: mic | quick-prompt chips | send */}
+            <div className="flex items-center gap-1.5">
+
+              {/* Voice */}
               <button
                 type="button"
                 onClick={toggleVoice}
                 disabled={isTranscribing}
-                className={`shrink-0 w-11 h-11 rounded-xl flex flex-col items-center justify-center gap-0.5 border-2 transition-all active:scale-95
+                title={listening ? `Recording ${String(Math.floor(recordSecs/60)).padStart(2,'0')}:${String(recordSecs%60).padStart(2,'0')}` : 'Voice input'}
+                className={`shrink-0 w-8 h-8 rounded-lg flex items-center justify-center border transition-all active:scale-95
                   ${listening
                     ? 'bg-red-500 border-red-400 text-white'
                     : isTranscribing
-                    ? 'bg-purple-100 border-purple-300 text-purple-600'
+                    ? 'bg-purple-100 border-purple-300 text-purple-600 dark:bg-purple-950/30 dark:border-purple-700'
                     : 'border-gray-200 dark:border-zinc-700 text-gray-400 dark:text-zinc-500 hover:border-blue-400 hover:text-blue-600 bg-white dark:bg-zinc-800'}`}
               >
                 {listening ? (
-                  <span className="flex items-end gap-[2px] h-4">
+                  <span className="flex items-end gap-[2px] h-3.5 px-0.5">
                     {[0,1,2,3].map(i => (
-                      <span key={i} className="w-[2.5px] rounded-full bg-white"
+                      <span key={i} className="w-[2px] rounded-full bg-white"
                         style={{ height: `${Math.max(20, Math.min(100, audioLevel * 100 * [0.7,1,0.8,0.9][i] + 10))}%` }} />
                     ))}
                   </span>
                 ) : isTranscribing ? (
-                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                  <svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
                   </svg>
                 ) : (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                     <rect x="9" y="2" width="6" height="11" rx="3"/>
                     <path strokeLinecap="round" d="M5 10a7 7 0 0014 0M12 19v3M8 22h8"/>
                   </svg>
                 )}
-                {listening && (
-                  <span className="text-[9px] font-mono text-white leading-none">
-                    {String(Math.floor(recordSecs/60)).padStart(2,'0')}:{String(recordSecs%60).padStart(2,'0')}
-                  </span>
-                )}
               </button>
 
-              {/* Text input */}
-              <MentionTextarea
-                inputRef={inputRef}
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                candidates={mentionCandidates}
-                dropdownPlacement="inside"
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
-                    e.preventDefault()
-                    sendMessage()
-                  }
-                }}
-                placeholder="问我关于车辆的任何问题…"
-                rows={3}
-                className="flex-1 resize-y min-h-[92px] px-3.5 py-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-sm
-                  bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100
-                  placeholder-gray-400 dark:placeholder-zinc-600
-                  focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800
-                  leading-relaxed transition-colors"
-                style={{ maxHeight: 180, overflowY: 'auto' }}
-                disabled={loading}
-              />
+              {/* Quick-prompt chips — horizontally scrollable */}
+              <div className="flex-1 flex gap-1.5 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+                {QUICK_PROMPTS.map(q => (
+                  <button
+                    key={q.label}
+                    type="button"
+                    onClick={() => sendMessage(q.text)}
+                    disabled={!dataLoaded || loading}
+                    className="shrink-0 px-2.5 py-1 text-[11px] font-medium rounded-full border border-gray-200 dark:border-zinc-700
+                      bg-white dark:bg-zinc-800 text-gray-600 dark:text-zinc-300
+                      hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50
+                      dark:hover:border-blue-700 dark:hover:bg-blue-950/40 dark:hover:text-blue-300
+                      disabled:opacity-40 transition-all whitespace-nowrap"
+                  >
+                    {q.label}
+                  </button>
+                ))}
+              </div>
 
-              {/* Send button */}
+              {/* Send */}
               <button
                 onClick={() => sendMessage()}
                 disabled={!input.trim() || loading || !dataLoaded}
-                className="shrink-0 w-11 h-11 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40
+                className="shrink-0 w-8 h-8 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40
                   text-white flex items-center justify-center transition-all active:scale-95"
               >
                 {loading ? (
-                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                  <svg className="animate-spin w-3.5 h-3.5" viewBox="0 0 24 24" fill="none">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
                   </svg>
                 ) : (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5"/>
                   </svg>
                 )}

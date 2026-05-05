@@ -881,7 +881,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
   }
 
   const canSubmit = (text.trim() || images.length > 0) && !loading && !applying && !isTranscribing
-  const mentionCandidates = useMemo(() => buildMentionCandidates(employees), [employees])
+  const mentionCandidates = useMemo(() => buildMentionCandidates(employees, []), [employees])
 
   return (
     <>
