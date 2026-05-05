@@ -29,11 +29,11 @@ function normalizeName(value = '') {
     .trim()
 }
 
-function findEmployeeByName(employees, rawName = '') {
+function findEmployeeByName(employees, rawName = '', preferredRole = null) {
   const target = normalizeName(rawName)
   if (!target) return null
   const targetParts = target.split(' ').filter(Boolean)
-  return employees.find(emp => {
+  const matches = employees.filter(emp => {
     const name = normalizeName(emp.name)
     if (!name) return false
     const nameParts = name.split(' ').filter(Boolean)
@@ -44,7 +44,25 @@ function findEmployeeByName(employees, rawName = '') {
     return targetParts.every(part =>
       nameParts.some(namePart => namePart === part || namePart.startsWith(part))
     )
-  }) ?? null
+  })
+  if (preferredRole) {
+    const roleMatch = matches.find(emp => emp.role === preferredRole)
+    if (roleMatch) return roleMatch
+  }
+  return matches[0] ?? null
+}
+
+function isBodyTaskAction(action) {
+  const text = `${action.title ?? ''} ${action.description ?? ''} ${action.assigneeName ?? ''}`
+  return /\b(body\s*(man|tech|work)|teardown|repair|process repair|assigned body)\b/i.test(text)
+}
+
+function normalizedTaskTitle(action, isBodyTask) {
+  return isBodyTask ? 'Teardown & process repair' : (action.title || 'Task')
+}
+
+function normalizedTaskDescription(action, isBodyTask) {
+  return isBodyTask ? '' : (action.description ?? '')
 }
 
 // ── Quick prompt chips ────────────────────────────────────────────────────────
@@ -214,26 +232,43 @@ export default function FloatingAssistant({ inline = false, onBack }) {
             updatedAt: serverTimestamp(),
           })
         } else if (action.type === 'assign_body_man') {
-          const assignee = findEmployeeByName(employees, action.assigneeName)
+          const assignee = findEmployeeByName(employees, action.assigneeName, 'body_man')
           if (assignee) {
             await updateDoc(doc(db, 'ros', roDoc.id), {
               assignedBodyMan: assignee.uid,
               updatedAt: serverTimestamp(),
             })
+            await addDoc(collection(db, 'tasks'), {
+              roId: roDoc.id, roNumber: roDoc.roNumber,
+              vehicleInfo: roDoc.vehicle,
+              assignedTo: assignee.uid,
+              assignedBy: user?.uid ?? '',
+              assignedToName: assignee.name ?? '',
+              title: 'Teardown & process repair',
+              description: '',
+              category: 'body',
+              partsStatus: roDoc.partsStatus ?? '',
+              priority: dueDateToPriority(roDoc),
+              dueDate: roDoc.cccDateOut || roDoc.promisedDate || null,
+              status: 'pending',
+              createdAt: serverTimestamp(),
+            })
           }
         } else if (action.type === 'assign_task') {
-          const assignee = findEmployeeByName(employees, action.assigneeName)
+          const isBodyTask = isBodyTaskAction(action)
+          const assignee = findEmployeeByName(employees, action.assigneeName, isBodyTask ? 'body_man' : null)
           if (!assignee) throw new Error(`Could not match task assignee "${action.assigneeName}".`)
           const roDueDate  = roDoc.cccDateOut || roDoc.promisedDate || null
-          const isBodyTask = /body\s*(man|tech|work)/i.test(action.title ?? '')
           const fields = {
             roId: roDoc.id, roNumber: roDoc.roNumber,
             vehicleInfo: roDoc.vehicle,
             assignedTo: assignee.uid,
             assignedBy: user?.uid ?? '',
             assignedToName: assignee.name ?? '',
-            title: action.title,
-            description: action.description ?? '',
+            title: normalizedTaskTitle(action, isBodyTask),
+            description: normalizedTaskDescription(action, isBodyTask),
+            category: isBodyTask ? 'body' : '',
+            partsStatus: roDoc.partsStatus ?? '',
             priority: dueDateToPriority(roDoc),
             dueDate: roDueDate,
             status: 'pending',

@@ -42,22 +42,16 @@ service cloud.firestore {
       allow read: if isAuth();
       // Only estimators / managers can create new ROs
       allow create: if isAuth() && canEditRO();
-      // Managers & estimators can update; body/painter can update status only
-      allow update: if isAuth() && (
-        canEditRO() ||
-        // Body techs & painters can update status + notes + parts delay
-        (myRole() in ['body_man', 'painter', 'paint_helper', 'parts_manager'] &&
-         request.resource.data.diff(resource.data).affectedKeys()
-           .hasOnly(['status', 'partsStatus', 'notes', 'updatedAt', 'partsDelay']))
-      );
+      // Any logged-in employee can update existing ROs through the app/GIB flow.
+      allow update: if isAuth();
       allow delete: if isAuth() && isManager();
     }
 
     // ── Tasks ─────────────────────────────────────────────────────────────────
     match /tasks/{taskId} {
       allow read: if isAuth();
-      // Only managers can create tasks
-      allow create: if isAuth() && isManager();
+      // Any logged-in employee can create tasks through the app/GIB flow.
+      allow create: if isAuth();
       // Managers can update anything; assignees can update status only
       allow update: if isAuth() && (
         isManager() ||

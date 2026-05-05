@@ -415,6 +415,8 @@ RULES:
 - If truly ambiguous, set needsClarification instead of guessing
 - @mention usually means assign_task, but ONLY when @Name matches an employee in the Employees list. Multiple employee @mentions in one message each get their own assign_task. Always pair with the most recently mentioned RO. e.g. "RO9448 @David fix bumper, @Israel blend paint" → two assign_task actions on RO9448
 - @mentions are restricted to shop employees and known sublet vendors. NEVER treat vehicle owner/customer names as task assignees. If @Name is a sublet vendor, write an add_note about the vendor/sublet work instead of creating an employee task.
+- If the user says "Aaron" in a body/bodyman/teardown/repair context and multiple Aarons exist, choose the employee whose role is body_man, not the manager/owner Aaron.
+- Use assign_body_man when setting the body technician. The app will create the simple body task "Teardown & process repair" automatically.
 - If an image is attached: identify the vehicle/RO from visual cues (make/model/color, visible paperwork, license plate), describe visible damage in an add_note, and set update_car_status to car_in_shop if the car is clearly in the shop
 
 EXAMPLE:

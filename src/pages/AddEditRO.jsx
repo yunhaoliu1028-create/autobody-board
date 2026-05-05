@@ -124,7 +124,7 @@ export default function AddEditRO() {
     <div className="max-w-3xl mx-auto">
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm text-gray-500 mb-5">
-        <Link to="/" className="hover:text-blue-600">Board</Link>
+        <Link to="/board" className="hover:text-blue-600">Board</Link>
         <span>›</span>
         {!isNew && (
           <>

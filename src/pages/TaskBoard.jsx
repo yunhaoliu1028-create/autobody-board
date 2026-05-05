@@ -6,7 +6,7 @@ import {
 import { differenceInCalendarDays, parseISO, isValid } from 'date-fns'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
-import { MANAGER_ROLES } from '../constants/roles'
+import { MANAGER_ROLES, PARTS_STATUSES } from '../constants/roles'
 
 function liveTaskPriority(task) {
   if (!task.dueDate) return task.priority ?? 'low'
@@ -41,6 +41,22 @@ const PRIORITY_DOT = {
   low: 'bg-gray-300',
 }
 
+const PARTS_LABELS = Object.fromEntries(PARTS_STATUSES.map(status => [status.key, status.label]))
+const BODY_ASSIGNMENT_RE = /\bassigned body\s*(man|tech)|body\s*(man|tech)\b/i
+
+function displayTaskTitle(task) {
+  if (task.category === 'body' || BODY_ASSIGNMENT_RE.test(task.title ?? '')) {
+    return 'Teardown & process repair'
+  }
+  return task.title || 'Task'
+}
+
+function taskPartsLabel(task) {
+  const value = task.partsStatus || task.roPartsStatus
+  if (!value) return 'Parts status unknown'
+  return `Parts: ${PARTS_LABELS[value] ?? value}`
+}
+
 function TaskCard({ task, isManager, employees, onStatusChange, onAssigneeChange }) {
   const priority     = liveTaskPriority(task)
   const assigneeName = task.assignedToName || employees[task.assignedTo] || 'Unassigned'
@@ -72,13 +88,10 @@ function TaskCard({ task, isManager, employees, onStatusChange, onAssigneeChange
 
       {/* Row 3: Task title / operation */}
       <p className="text-sm font-medium text-gray-800 dark:text-gray-100 leading-snug">
-        {task.title}
+        {displayTaskTitle(task)}
       </p>
 
-      {/* Description (optional) */}
-      {task.description && (
-        <p className="text-xs text-gray-500 dark:text-zinc-400 line-clamp-2">{task.description}</p>
-      )}
+      <p className="text-xs text-gray-500 dark:text-zinc-400">{taskPartsLabel(task)}</p>
 
       {/* Bottom row: assignee (manager) + action buttons */}
       <div className="flex items-center justify-between gap-2 pt-0.5">
@@ -128,6 +141,7 @@ export default function TaskBoard() {
 
   const [tasks, setTasks] = useState([])
   const [employees, setEmployees] = useState({})
+  const [rosById, setRosById] = useState({})
   const [loading, setLoading] = useState(true)
   const [viewAll, setViewAll] = useState(false)
   const [error, setError] = useState('')
@@ -142,10 +156,33 @@ export default function TaskBoard() {
   }, [])
 
   useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'ros'), snap => {
+      const byId = {}
+      snap.forEach(d => {
+        const data = d.data()
+        byId[d.id] = {
+          partsStatus: data.partsStatus ?? '',
+          vehicleInfo: data.vehicle ?? '',
+        }
+      })
+      setRosById(byId)
+    })
+    return unsub
+  }, [])
+
+  useEffect(() => {
     const q = query(collection(db, 'tasks'))
     const unsub = onSnapshot(q, snap => {
       const allTasks = snap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
+        .map(d => {
+          const task = { id: d.id, ...d.data() }
+          const ro = rosById[task.roId]
+          return {
+            ...task,
+            roPartsStatus: ro?.partsStatus ?? '',
+            vehicleInfo: task.vehicleInfo || ro?.vehicleInfo || '',
+          }
+        })
         .filter(task => ['pending', 'in_progress', 'completed'].includes(task.status || 'pending'))
         .sort((a, b) => taskCreatedMillis(b) - taskCreatedMillis(a))
 
@@ -161,7 +198,7 @@ export default function TaskBoard() {
       setLoading(false)
     })
     return unsub
-  }, [user.uid, isManager, viewAll])
+  }, [user.uid, isManager, viewAll, rosById])
 
   const handleStatusChange = async (taskId, newStatus) => {
     await updateDoc(doc(db, 'tasks', taskId), {

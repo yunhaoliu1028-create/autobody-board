@@ -13,6 +13,7 @@ import MeetingImport from './pages/MeetingImport'
 import Settings      from './pages/Settings'
 import Chat          from './pages/Chat'
 import UpdatePage    from './pages/UpdatePage'
+import MobileScreen  from './pages/MobileScreen'
 import { ToastProvider } from './components/Toast'
 import { MANAGER_ROLES } from './constants/roles'
 
@@ -21,9 +22,15 @@ function AppRoutes() {
 
   return (
     <Routes>
+      {import.meta.env.DEV && (
+        <>
+          <Route path="/mobile-screen" element={<MobileScreen />} />
+        </>
+      )}
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
 
-      <Route path="/" element={
+      <Route path="/" element={<Navigate to="/update" replace />} />
+      <Route path="/board" element={
         <ProtectedRoute><Layout><ROBoard /></Layout></ProtectedRoute>
       } />
       <Route path="/ro/new" element={

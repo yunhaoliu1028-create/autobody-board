@@ -282,6 +282,84 @@ function KanbanCard({ ro, onSelect, draggable, onDragStart, onDragEnd }) {
   )
 }
 
+function MobileROCard({ ro, onSelect, expanded = false, onToggle }) {
+  const dueDate = ro.cccDateOut || ro.promisedDate
+  const status = STATUS_MAP[ro.status]
+
+  return (
+    <article className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <button type="button" onClick={() => onSelect(ro)} className="w-full text-left">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-base font-extrabold text-gray-950 dark:text-gray-100">#{ro.roNumber}</span>
+              {status && (
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ${status.color}`}>
+                  {status.label}
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-sm font-semibold leading-snug text-gray-900 dark:text-gray-100">{ro.vehicle || 'Vehicle missing'}</p>
+            {ro.vehicleColor && <p className="text-xs text-gray-400 dark:text-zinc-500">{ro.vehicleColor}</p>}
+          </div>
+          <PartsStatusBadge status={ro.partsStatus} />
+        </div>
+      </button>
+
+      <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+        <span className="truncate text-gray-500 dark:text-zinc-400">{shortInsurance(ro.insuranceCompany) || ro.customerName || 'No owner'}</span>
+        {dueDate && <span className={`shrink-0 font-semibold ${dueDateClass(dueDate)}`}>Due {fmtDate(dueDate)}</span>}
+      </div>
+
+      {(ro.partsDelay || isPaintDueSoon(ro)) && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {ro.partsDelay && (
+            <span className="rounded bg-orange-100 px-1.5 py-0.5 text-xs font-medium text-orange-700 dark:bg-orange-900/50 dark:text-orange-300">
+              Parts Delay
+            </span>
+          )}
+          {isPaintDueSoon(ro) && (
+            <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/50 dark:text-red-300">
+              Paint Due
+            </span>
+          )}
+        </div>
+      )}
+
+      {onToggle && (
+        <button
+          type="button"
+          onClick={onToggle}
+          className="mt-2 text-xs font-semibold text-blue-600 dark:text-blue-400"
+        >
+          {expanded ? 'Hide details' : 'Show full info'}
+        </button>
+      )}
+
+      {expanded && (
+        <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg bg-gray-50 p-2 text-xs dark:bg-zinc-800/70">
+          <dt className="text-gray-400">Owner</dt><dd className="text-right text-gray-700 dark:text-zinc-200">{ro.customerName || '-'}</dd>
+          <dt className="text-gray-400">Insurance</dt><dd className="text-right text-gray-700 dark:text-zinc-200">{ro.insuranceCompany || '-'}</dd>
+          <dt className="text-gray-400">Claim</dt><dd className="text-right text-gray-700 dark:text-zinc-200">{ro.claimNumber || '-'}</dd>
+          <dt className="text-gray-400">Drop-off</dt><dd className="text-right text-gray-700 dark:text-zinc-200">{ro.dropOffDate ? fmtDate(ro.dropOffDate) : 'Pending'}</dd>
+        </dl>
+      )}
+    </article>
+  )
+}
+
+function MobileListCard({ ro, onSelect }) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <MobileROCard
+      ro={ro}
+      onSelect={onSelect}
+      expanded={expanded}
+      onToggle={() => setExpanded(v => !v)}
+    />
+  )
+}
+
 // ── PendingToBodyModal ────────────────────────────────────────────────────────
 function PendingToBodyModal({ ro, employees, onConfirm, onCancel }) {
   const bodyMen = employees.filter(e => e.role === 'body_man')
@@ -642,21 +720,20 @@ export default function ROBoard() {
     <div className="space-y-4">
 
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">Production Board</h1>
           <p className="text-sm text-gray-400 dark:text-zinc-500 mt-0.5">
             {activeCount} active · {deliveredCount} delivered
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {/* View toggle — hidden on mobile (kanban too wide for small screens) */}
-          <div className="hidden sm:flex bg-gray-100 dark:bg-zinc-800 rounded-lg p-1 gap-0.5">
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="flex bg-gray-100 dark:bg-zinc-800 rounded-lg p-1 gap-0.5">
             {VIEWS.map(v => (
               <button
                 key={v}
                 onClick={() => setView(v)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md font-medium transition-colors
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs rounded-md font-medium transition-colors
                   ${view === v
                     ? 'bg-white dark:bg-zinc-700 shadow-sm text-gray-900 dark:text-gray-100'
                     : 'text-gray-400 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
@@ -669,7 +746,7 @@ export default function ROBoard() {
           {view === 'list' && filtered.length > 0 && (
             <button
               onClick={() => handlePrintRos(filtered, employees)}
-              className="inline-flex items-center gap-1.5 bg-gray-900 dark:bg-gray-100 hover:bg-gray-700 dark:hover:bg-gray-300 text-white dark:text-gray-900 text-sm font-medium px-3 sm:px-4 py-2 rounded-lg transition-colors"
+              className="hidden sm:inline-flex items-center gap-1.5 bg-gray-900 dark:bg-gray-100 hover:bg-gray-700 dark:hover:bg-gray-300 text-white dark:text-gray-900 text-sm font-medium px-3 sm:px-4 py-2 rounded-lg transition-colors"
             >
               Print
             </button>
@@ -760,7 +837,13 @@ export default function ROBoard() {
 
       {/* ── List view ────────────────────────────────────────────────────── */}
       {view === 'list' && filtered.length > 0 && (
-        <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-gray-200 dark:border-zinc-800 overflow-hidden shadow-sm">
+        <>
+        <div className="space-y-2 sm:hidden">
+          {filtered.map(ro => (
+            <MobileListCard key={ro.id} ro={ro} onSelect={setSelectedRO} />
+          ))}
+        </div>
+        <div className="hidden sm:block bg-white dark:bg-zinc-900 rounded-2xl border border-gray-200 dark:border-zinc-800 overflow-hidden shadow-sm">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -782,30 +865,29 @@ export default function ROBoard() {
             </table>
           </div>
         </div>
+        </>
       )}
 
       {/* ── Kanban view ───────────────────────────────────────────────────── */}
       {view === 'kanban' && filtered.length > 0 && (
         <>
-          {/* Mobile: render as list (kanban columns are too wide for small screens) */}
-          <div className="sm:hidden bg-white dark:bg-zinc-900 rounded-2xl border border-gray-200 dark:border-zinc-800 overflow-hidden shadow-sm">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100 dark:border-zinc-800 text-xs text-gray-400 dark:text-zinc-500 uppercase tracking-wider">
-                    <th className="px-4 py-3 text-left font-semibold">RO #</th>
-                    <th className="px-4 py-3 text-left font-semibold">Vehicle · Owner</th>
-                    <th className="px-4 py-3 text-left font-semibold">Status</th>
-                    <th className="px-4 py-3 text-left font-semibold">Parts</th>
-                    <th className="px-4 py-3 text-left font-semibold">Due</th>
-                    <th className="px-4 py-3" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50 dark:divide-zinc-800">
-                  {filtered.map(ro => <RORow key={ro.id} ro={ro} employees={employees} onSelect={setSelectedRO} />)}
-                </tbody>
-              </table>
-            </div>
+          <div className="space-y-3 sm:hidden">
+            {kanbanGroups.map(group => (
+              <section key={group.key} className="space-y-2">
+                <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${group.accent} ${group.color}`}>
+                  <span className={`text-sm font-bold ${group.header}`}>{group.label}</span>
+                  <span className={`ml-auto text-xs font-semibold ${group.header} opacity-70`}>{group.items.length}</span>
+                </div>
+                <div className="space-y-2">
+                  {group.items.map(ro => (
+                    <MobileROCard key={ro.id} ro={ro} onSelect={setSelectedRO} />
+                  ))}
+                  {group.items.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-gray-200 py-4 text-center text-xs text-gray-300 dark:border-zinc-800 dark:text-zinc-700">No vehicles</div>
+                  )}
+                </div>
+              </section>
+            ))}
           </div>
 
           {/* Desktop: full kanban */}

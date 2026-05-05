@@ -128,14 +128,14 @@ function TabIconChat({ active }) {
 
 const MOBILE_TABS = [
   { path: '/update', label: 'Update', Icon: TabIconUpdate },
-  { path: '/',       label: 'Board',  Icon: TabIconBoard  },
+  { path: '/board',  label: 'Board',  Icon: TabIconBoard  },
   { path: '/tasks',  label: 'Tasks',  Icon: TabIconTasks  },
   { path: '/chat',   label: 'Chat',   Icon: TabIconChat   },
 ]
 
 // ── Nav items ──────────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { path: '/',         label: 'RO Board', icon: <IconBoard />,    roles: null },
+  { path: '/board',    label: 'RO Board', icon: <IconBoard />,    roles: null },
   { path: '/tasks',    label: 'Tasks',    icon: <IconTasks />,    roles: null },
   { path: '/chat',     label: 'Chat',     icon: <IconChat />,     roles: null },
   { path: '/meeting',  label: 'Meeting',  icon: <IconMeeting />,  roles: MANAGER_ROLES },
@@ -370,9 +370,7 @@ export default function Layout({ children }) {
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 dark:bg-zinc-900/95 backdrop-blur border-t border-gray-200 dark:border-zinc-800 pb-safe">
         <div className="grid grid-cols-4 h-14">
           {MOBILE_TABS.map(({ path, label, Icon }) => {
-            const isActive = path === '/'
-              ? location.pathname === '/'
-              : location.pathname.startsWith(path)
+            const isActive = location.pathname.startsWith(path)
             const badge = path === '/chat' && chatUnread > 0 ? chatUnread : 0
             return (
               <Link

@@ -406,7 +406,7 @@ export default function RODetail() {
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'ros', id), snap => {
       if (snap.exists()) setRo({ id: snap.id, ...snap.data() })
-      else navigate('/')
+      else navigate('/board')
       setLoading(false)
     })
     return unsub
@@ -451,7 +451,7 @@ export default function RODetail() {
       {/* ── Breadcrumb + actions ──────────────────────────────────────────── */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-zinc-400">
-          <Link to="/" className="hover:text-blue-600 dark:hover:text-blue-400">Board</Link>
+          <Link to="/board" className="hover:text-blue-600 dark:hover:text-blue-400">Board</Link>
           <span>›</span>
           <span className="font-semibold text-gray-900 dark:text-gray-100">RO #{ro.roNumber}</span>
         </div>

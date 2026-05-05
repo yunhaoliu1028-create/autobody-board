@@ -446,10 +446,6 @@ function ConversationPanel({ convo, myUid, allUsers, onBack }) {
     setRecording(true)
   }
 
-  const handleKey = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(e) }
-  }
-
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -501,12 +497,12 @@ function ConversationPanel({ convo, myUid, allUsers, onBack }) {
       </div>
 
       {/* Input */}
-      <form onSubmit={send} className="px-4 py-3 border-t border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shrink-0">
-        <div className="flex items-center gap-1.5 mb-2 text-gray-400 dark:text-zinc-500">
+      <form onSubmit={send} className="px-3 py-2 border-t border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shrink-0">
+        <div className="flex items-center gap-1 mb-1.5 text-gray-400 dark:text-zinc-500">
           <button
             type="button"
             onClick={toggleRecording}
-            className={`p-2 rounded-lg transition-colors ${recording ? 'bg-red-50 text-red-600' : 'hover:bg-gray-100 dark:hover:bg-zinc-800 hover:text-gray-700 dark:hover:text-zinc-200'}`}
+            className={`p-1.5 rounded-lg transition-colors ${recording ? 'bg-red-50 text-red-600' : 'hover:bg-gray-100 dark:hover:bg-zinc-800 hover:text-gray-700 dark:hover:text-zinc-200'}`}
             title={recording ? 'Stop recording' : 'Voice'}
           >
             <IconMic />
@@ -517,24 +513,24 @@ function ConversationPanel({ convo, myUid, allUsers, onBack }) {
           <button type="button" onClick={() => fileRef.current?.click()} className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800 hover:text-gray-700 dark:hover:text-zinc-200" title="File">
             <IconFile />
           </button>
-          {recording && <span className="text-xs text-red-500 font-medium ml-1">Recording... tap mic to send</span>}
+          {recording && <span className="text-xs text-red-500 font-medium ml-1">Recording...</span>}
         </div>
         <div className="flex items-end gap-2">
         <textarea
           value={text}
           onChange={e => setText(e.target.value)}
-          onKeyDown={handleKey}
+          enterKeyHint="newline"
           placeholder="Message…"
-          rows={3}
-          className="flex-1 min-h-[96px] max-h-56 border border-gray-300 dark:border-zinc-700 rounded-xl px-3.5 py-3 text-sm bg-white dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y overflow-y-auto leading-relaxed"
+          rows={1}
+          className="flex-1 min-h-[42px] max-h-28 border border-gray-300 dark:border-zinc-700 rounded-xl px-3.5 py-2.5 text-sm bg-white dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none overflow-y-auto leading-relaxed"
         />
         <button
           type="submit"
           disabled={!text.trim() || sending}
-          className="h-10 px-3 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded-xl transition-colors shrink-0 flex items-center gap-1.5 text-sm font-semibold"
+          className="h-[42px] w-[46px] bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded-xl transition-colors shrink-0 flex items-center justify-center text-sm font-semibold"
+          title="Send"
         >
           <IconSend />
-          Send
         </button>
         </div>
         <input ref={imageRef} type="file" accept="image/*" multiple className="hidden" onChange={e => handleFiles(e.target.files, 'image')} />
@@ -699,7 +695,7 @@ export default function Chat() {
   const messageConversations = conversations.filter(c => c.lastSenderId || c.lastMessage)
 
   return (
-    <div className="flex h-[calc(100vh-56px)] -my-6 -mx-4 overflow-hidden">
+    <div className="flex h-[calc(100dvh-8rem)] md:h-[calc(100vh-56px)] -my-4 md:-my-6 -mx-4 overflow-hidden">
 
       {/* ── Left sidebar: conversation list ─────────────────────────────── */}
       <div className={`

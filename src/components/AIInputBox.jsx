@@ -30,11 +30,11 @@ function normalizeName(value = '') {
     .trim()
 }
 
-function findEmployeeByName(employees, rawName = '') {
+function findEmployeeByName(employees, rawName = '', preferredRole = null) {
   const target = normalizeName(rawName)
   if (!target) return null
   const targetParts = target.split(' ').filter(Boolean)
-  return employees.find(emp => {
+  const matches = employees.filter(emp => {
     const name = normalizeName(emp.name)
     if (!name) return false
     const nameParts = name.split(' ').filter(Boolean)
@@ -45,7 +45,25 @@ function findEmployeeByName(employees, rawName = '') {
     return targetParts.every(part =>
       nameParts.some(namePart => namePart === part || namePart.startsWith(part))
     )
-  }) ?? null
+  })
+  if (preferredRole) {
+    const roleMatch = matches.find(emp => emp.role === preferredRole)
+    if (roleMatch) return roleMatch
+  }
+  return matches[0] ?? null
+}
+
+function isBodyTaskAction(action) {
+  const text = `${action.title ?? ''} ${action.description ?? ''} ${action.assigneeName ?? ''}`
+  return /\b(body\s*(man|tech|work)|teardown|repair|process repair|assigned body)\b/i.test(text)
+}
+
+function normalizedTaskTitle(action, isBodyTask) {
+  return isBodyTask ? 'Teardown & process repair' : (action.title || 'Task')
+}
+
+function normalizedTaskDescription(action, isBodyTask) {
+  return isBodyTask ? '' : (action.description ?? '')
 }
 
 // ── Photo-type keyword detection (no AI needed) ───────────────────────────────
@@ -851,26 +869,43 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           entry.changeLogEntries.push({ type: 'update_rental', value: String(action.hasRental), by: author, at: now, source: 'gib' })
           break
         case 'assign_body_man': {
-          const assignee = findEmployeeByName(employees, action.assigneeName)
+          const assignee = findEmployeeByName(employees, action.assigneeName, 'body_man')
           if (assignee) {
             entry.fields.assignedBodyMan = assignee.uid
             entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
+            const roDueDate = roDoc.cccDateOut || roDoc.promisedDate || null
+            entry.taskPromises.push(addDoc(collection(db, 'tasks'), {
+              roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
+              assignedTo: assignee.uid, assignedBy: user.uid,
+              assignedToName: assignee.name ?? '',
+              title: 'Teardown & process repair',
+              description: '',
+              category: 'body',
+              partsStatus: roDoc.partsStatus ?? '',
+              priority: dueDateToPriority(roDoc),
+              dueDate: roDueDate,
+              status: 'pending',
+              createdAt: serverTimestamp(),
+            }))
           }
           break
         }
         case 'assign_task': {
-          const assignee = findEmployeeByName(employees, action.assigneeName)
+          const isBodyTask = isBodyTaskAction(action)
+          const assignee = findEmployeeByName(employees, action.assigneeName, isBodyTask ? 'body_man' : null)
           if (!assignee) {
             throw new Error(`Could not match task assignee "${action.assigneeName}". Edit the suggested action and choose a valid employee name.`)
           }
           const roDueDate  = roDoc.cccDateOut || roDoc.promisedDate || null
-          const isBodyTask = /body\s*(man|tech|work)/i.test(action.title ?? '')
           if (isBodyTask) entry.fields.assignedBodyMan = assignee.uid
           entry.taskPromises.push(addDoc(collection(db, 'tasks'), {
             roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
             assignedTo: assignee.uid, assignedBy: user.uid,
             assignedToName: assignee.name ?? '',
-            title: action.title, description: action.description ?? '',
+            title: normalizedTaskTitle(action, isBodyTask),
+            description: normalizedTaskDescription(action, isBodyTask),
+            category: isBodyTask ? 'body' : '',
+            partsStatus: roDoc.partsStatus ?? '',
             priority: dueDateToPriority(roDoc),
             dueDate: roDueDate,
             status: 'pending',
@@ -887,7 +922,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
       const updates = { ...fields }
       if (changeLogEntries.length) updates.changeLog = arrayUnion(...changeLogEntries)
       return Promise.all([
-        updateDoc(doc(db, 'ros', roDoc.id), updates).catch(e => console.error(e)),
+        updateDoc(doc(db, 'ros', roDoc.id), updates),
         ...taskPromises,
       ])
     })
@@ -934,10 +969,10 @@ export default function AIInputBox({ ros = [], employees = [] }) {
         onClose={() => setShowCamera(false)}
       />
     )}
-    <div className="bg-white dark:bg-zinc-900 rounded-2xl border-2 border-blue-200 dark:border-blue-800 shadow-sm p-5 mb-5">
+    <div className="bg-white dark:bg-zinc-900 rounded-xl border border-blue-100 dark:border-blue-900 shadow-sm p-4 mb-4">
 
       {/* Header */}
-      <div className="mb-4 flex items-start justify-between gap-2">
+      <div className="mb-3 flex items-start justify-between gap-2">
         <div>
           <h2 className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight">Quick Update</h2>
           <p className="text-xs text-gray-400 dark:text-zinc-500">
@@ -1027,7 +1062,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
             ? 'RO number + photo type, e.g. "9556 check-in" or "9556 in progress photos"'
             : 'e.g. "RO9448 dropped off 4-25, w/o rental, ordered parts thru PT eta 4-29"'}
           rows={4}
-          className="w-full px-4 py-3 mb-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-[15px] sm:text-sm leading-relaxed bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800 resize-none transition-colors"
+          className="w-full min-h-[118px] px-4 py-3 mb-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-base sm:text-sm leading-relaxed bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800 resize-none transition-colors"
           disabled={loading || applying}
         />
 
@@ -1040,7 +1075,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
               type="button"
               onClick={toggleVoice}
               disabled={isTranscribing}
-              className={`flex flex-col items-center justify-center gap-1 h-14 rounded-xl border-2 text-sm font-semibold transition-all active:scale-95
+              className={`flex items-center justify-center gap-2.5 h-12 rounded-xl border text-sm font-semibold transition-all active:scale-95
                 ${listening
                   ? 'bg-red-500 border-red-400 text-white'
                   : isTranscribing
@@ -1071,7 +1106,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
               ) : (
                 <>
                   <IconMic active={false} cls="w-5 h-5" />
-                  <span className="text-xs">Voice</span>
+                  <span>Voice</span>
                 </>
               )}
             </button>
@@ -1080,7 +1115,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
             <button
               type="button"
               onClick={() => setShowPhotoSheet(true)}
-              className="relative flex items-center justify-center gap-2.5 h-14 rounded-xl border-2 bg-gray-50 border-gray-200 dark:bg-zinc-800 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 text-sm font-semibold transition-all active:scale-95"
+              className="relative flex items-center justify-center gap-2.5 h-12 rounded-xl border bg-gray-50 border-gray-200 dark:bg-zinc-800 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 text-sm font-semibold transition-all active:scale-95"
             >
               <IconImage cls="w-5 h-5" />
               {images.length > 0 ? `Photos (${images.length})` : 'Photos'}
@@ -1091,7 +1126,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           <button
             type="submit"
             disabled={!canSubmit}
-            className="w-full h-14 bg-blue-600 active:bg-blue-700 disabled:opacity-40 text-white text-base font-bold rounded-xl transition-all active:scale-[0.98]"
+            className="w-full h-[52px] bg-blue-600 active:bg-blue-700 disabled:opacity-40 text-white text-base font-bold rounded-xl transition-all active:scale-[0.98]"
           >
             {loading ? (
               <span className="flex items-center justify-center gap-2">
