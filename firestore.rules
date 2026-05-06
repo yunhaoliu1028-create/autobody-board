@@ -52,12 +52,12 @@ service cloud.firestore {
       allow read: if isAuth();
       // Any logged-in employee can create tasks through the app/GIB flow.
       allow create: if isAuth();
-      // Managers can update anything; assignees can update status only
+      // Managers can update anything; assignees can update status and add notes
       allow update: if isAuth() && (
         isManager() ||
         (request.auth.uid == resource.data.assignedTo &&
          request.resource.data.diff(resource.data).affectedKeys()
-           .hasOnly(['status', 'completedAt', 'updatedAt']))
+           .hasOnly(['status', 'completedAt', 'updatedAt', 'taskNotes']))
       );
       allow delete: if isAuth() && isManager();
     }
@@ -90,8 +90,10 @@ service cloud.firestore {
 
     // ── Settings (AI key, mappings) ───────────────────────────────────────────
     match /settings/{docId} {
-      // Only managers can read/write settings (API key storage etc.)
-      allow read, write: if isAuth() && isManager();
+      // All employees can read settings (needed for AI key access)
+      // Only managers can write settings
+      allow read: if isAuth();
+      allow write: if isAuth() && isManager();
     }
   }
 }

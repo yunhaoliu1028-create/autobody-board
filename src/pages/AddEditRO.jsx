@@ -18,7 +18,7 @@ const EMPTY = {
   claimNumber:         '',
   deductible:          '',
   dateIn:              '',
-  promisedDate:        '',
+  eta:                 '',
   dropOffDate:         '',
   hasRental:           null,   // null = unknown, true = has rental, false = no rental
   carStatus:           'pending_dropoff',
@@ -158,19 +158,20 @@ export default function AddEditRO() {
               </Field>
             )}
 
-            {/* CCC Date-Out: locked if imported from CCC */}
-            {form.cccDateOut ? (
+            {/* CCC Date-Out: locked reference from CCC sync */}
+            {form.cccDateOut && (
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1 flex items-center gap-1">
                   CCC Date-Out <span className="text-orange-400" title="Sourced from CCC – not editable">🔒</span>
                 </label>
                 <div className={INPUT + ' bg-gray-50 text-gray-500 cursor-not-allowed'}>{form.cccDateOut}</div>
               </div>
-            ) : (
-              <Field label="Promise Date">
-                <input type="date" className={INPUT} value={form.promisedDate} onChange={set('promisedDate')} />
-              </Field>
             )}
+
+            {/* ETA: shop's own target completion date — editable by GIB or manually */}
+            <Field label="ETA (Shop)">
+              <input type="date" className={INPUT} value={form.eta ?? ''} onChange={set('eta')} />
+            </Field>
 
             <Field label="Drop-Off Date">
               <input type="date" className={INPUT} value={form.dropOffDate} onChange={set('dropOffDate')} />

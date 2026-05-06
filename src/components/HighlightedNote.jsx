@@ -2,7 +2,22 @@ const NOTE_HIGHLIGHTS = [
   {
     label: 'Repair Authorization',
     className: 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200',
-    pattern: /\b(repair authorization|authorization|authorized|auth(?:orization)? pending|approved repair|repair approved)\b/gi,
+    pattern: /\b(repair authorization|repair authorized|authorization|authorized|auth(?:orization)? pending|approved repair|repair approved)\b/gi,
+  },
+  {
+    label: 'Dropped Off',
+    className: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/50 dark:text-cyan-200',
+    pattern: /\b(vehicle\s+)?(dropped off|drop-?off|drop off|d\/o)\b/gi,
+  },
+  {
+    label: 'Customer Concern',
+    className: 'bg-rose-100 text-rose-800 dark:bg-rose-900/50 dark:text-rose-200',
+    pattern: /\b(customer concern|customer concerned|concern|concerned)\b/gi,
+  },
+  {
+    label: 'Supplement',
+    className: 'bg-violet-100 text-violet-800 dark:bg-violet-900/50 dark:text-violet-200',
+    pattern: /\b(supp|supplement|pending on supp)\b/gi,
   },
   {
     label: 'Release Vehicle',

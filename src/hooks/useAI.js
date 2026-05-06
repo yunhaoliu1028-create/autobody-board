@@ -279,7 +279,8 @@ export async function askShopAssistant({ messages, ros, employees }) {
     if (r.hasRental)    lines.push(`rental:yes`)
     if (r.totalAmount)  lines.push(`est:$${r.totalAmount}`)
     if (r.notes) {
-      const firstNote = r.notes.split('\n').find(Boolean)?.slice(0, 70)
+      const notesStr  = typeof r.notes === 'string' ? r.notes : ''
+      const firstNote = notesStr.split('\n').find(Boolean)?.slice(0, 70)
       if (firstNote) lines.push(`note:${firstNote}`)
     }
     return lines.join(' | ')  // single line per RO saves tokens vs multiline
@@ -404,11 +405,16 @@ Employees: ${empList || '(none listed)'}
 ${SHOP_GLOSSARY}
 ${memBlock}
 
+FIELD NOTES:
+- "ETA" (shop's target completion date) is separate from "CCC Date-Out" (a locked CCC formula date). update_due_date sets the shop ETA — it does NOT touch CCC Date-Out.
+- "Drop-Off Date" (shown as "In:" on the board) tracks when the vehicle physically arrived. It starts blank and is only set via update_dropoff_date or manual edit.
+
 RULES:
 - ALL output (notes, task titles, descriptions) MUST be written in English, regardless of the input language. The user may speak/type in Chinese, Spanish, or mixed — always produce English output.
 - Match RO numbers flexibly: "9448", "RO9448", "#9448" all work
 - For assignees, match partial names (e.g. "David" → the employee named David)
 - When a user updates ETA / completion date AND mentions calling the customer, create BOTH update_due_date AND an add_note saying who called and what was communicated
+- When input contains drop-off keywords (dropped off, drop off, 放车, 送来, 已到, 进店), ALWAYS generate BOTH update_dropoff_date AND an add_note describing the drop-off event. Never emit update_dropoff_date without a paired add_note.
 - Write notes in professional, concise third-person shop format (not casual)
 - Dates without year: assume current year (${today.split('-')[0]}). Format as YYYY-MM-DD.
 - If parts vendor is mentioned, include it in the note
@@ -429,8 +435,8 @@ Output:
     { "type": "update_car_status",   "roNumber": "9448", "carStatus": "car_in_shop", "confidence": "high" },
     { "type": "update_due_date",     "roNumber": "9448", "dueDate": "${today.split('-')[0]}-05-05", "confidence": "high" },
     { "type": "update_parts_status", "roNumber": "9448", "partsStatus": "ordered", "confidence": "high" },
-    { "type": "add_note", "roNumber": "9448", "note": "Customer declined rental. Parts ordered via Parts Trader, ETA 4/29.", "confidence": "high" },
-    { "type": "add_note", "roNumber": "9448", "note": "Called customer — updated target completion date to 5/5.", "confidence": "high" }
+    { "type": "add_note", "roNumber": "9448", "note": "Vehicle dropped off on 4/25. Customer declined rental. Parts ordered via Parts Trader, ETA 4/29.", "confidence": "high" },
+    { "type": "add_note", "roNumber": "9448", "note": "Called customer — updated shop ETA to 5/5.", "confidence": "high" }
   ],
   "needsClarification": null
 }
@@ -443,6 +449,8 @@ Return ONLY valid JSON in this exact format:
     { "type": "update_status",       "roNumber": "9531", "status": "body_work",                                       "confidence": "high" },
     { "type": "update_parts_status", "roNumber": "9448", "partsStatus": "all_received",                               "confidence": "high" },
     { "type": "assign_task",         "roNumber": "9482", "assigneeName": "David", "title": "Start body work on rear quarter panel", "description": "optional details", "priority": "medium", "confidence": "high" },
+    { "type": "assign_body_man",     "roNumber": "9448", "assigneeName": "Aaron",                                     "confidence": "high" },
+    { "type": "assign_painter",      "roNumber": "9448", "assigneeName": "Israel",                                    "confidence": "high" },
     { "type": "update_car_status",   "roNumber": "9448", "carStatus": "car_in_shop",                                  "confidence": "high" },
     { "type": "update_dropoff_date", "roNumber": "9448", "dropOffDate": "2026-04-25",                                 "confidence": "high" },
     { "type": "update_due_date",     "roNumber": "9448", "dueDate": "2026-05-05",                                     "confidence": "high" },
@@ -451,7 +459,9 @@ Return ONLY valid JSON in this exact format:
   "needsClarification": null
 }
 
-Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, detail, qc, ready, delivered
+- Use assign_body_man when setting the body technician — auto-creates "Teardown & process repair" task.
+- Use assign_painter when setting the painter — auto-creates "Paint preparation & paint job" task.
+Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, calibration, detail, ready, delivered
 Valid partsStatus: not_ordered, ordered, partially_received, all_received
 Valid carStatus: pending_dropoff, car_in_shop
 Valid priority: low, medium, high`
@@ -555,7 +565,7 @@ Return ONLY valid JSON (no extra text):
   "unrecognized": ["phrases that mentioned vehicles/tasks but couldn't be matched to an RO"]
 }
 
-Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, detail, qc, ready, delivered
+Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, calibration, detail, ready, delivered
 Valid partsStatus: not_ordered, ordered, partially_received, all_received
 Valid carStatus: pending_dropoff, car_in_shop
 Valid priority: low, medium, high`

@@ -89,12 +89,6 @@ export const RO_STATUSES = [
     dot:   'bg-teal-500 dark:bg-teal-400',
   },
   {
-    key: 'qc',
-    label: 'QC',
-    color: 'bg-lime-100 text-lime-800 dark:bg-lime-900/60 dark:text-lime-200',
-    dot:   'bg-lime-500 dark:bg-lime-400',
-  },
-  {
     key: 'ready',
     label: 'Ready for Pickup',
     color: 'bg-green-100 text-green-800 dark:bg-green-900/60 dark:text-green-200',
@@ -159,7 +153,7 @@ export const STATUS_GROUPS = [
   {
     key:      'REASSEM',
     label:    'Reassembly',
-    statuses: ['reassembly', 'calibration', 'detail', 'qc'],
+    statuses: ['reassembly', 'calibration', 'detail'],
     color:    'bg-sky-50 dark:bg-sky-900/30',
     header:   'text-sky-700 dark:text-sky-300',
     accent:   'border-sky-300 dark:border-sky-700',

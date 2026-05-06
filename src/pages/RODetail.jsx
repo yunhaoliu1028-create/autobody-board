@@ -8,6 +8,7 @@ import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { StatusBadge, PartsStatusBadge, CCCFieldLabel } from '../components/StatusBadge'
+import HighlightedNote from '../components/HighlightedNote'
 import {
   RO_STATUSES, PARTS_STATUSES, MANAGER_ROLES, EDIT_RO_ROLES,
 } from '../constants/roles'
@@ -271,7 +272,9 @@ function NotesList({ deduped, dupCount }) {
     <div className="space-y-1.5">
       {visible.map(({ line }, i) => (
         <div key={i} className="px-3 py-2.5 bg-gray-50 dark:bg-zinc-800/50 rounded-xl border border-gray-100 dark:border-zinc-700/50">
-          <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">{line}</p>
+          <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
+            <HighlightedNote text={line} />
+          </p>
         </div>
       ))}
       {dupCount > 0 && (
@@ -443,7 +446,7 @@ export default function RODetail() {
   if (!ro) return null
 
   const currentIdx = RO_STATUSES.findIndex(s => s.key === ro.status)
-  const dueDate    = ro.cccDateOut || ro.promisedDate
+  const dueDate    = ro.eta || ro.cccDateOut || ro.promisedDate
 
   return (
     <div className="max-w-5xl mx-auto space-y-4">
@@ -501,7 +504,7 @@ export default function RODetail() {
           <div className="text-right space-y-3 shrink-0 min-w-[100px]">
             {dueDate && (
               <div>
-                <p className="text-xs text-gray-400 dark:text-zinc-500 uppercase tracking-wide mb-0.5">Due</p>
+                <p className="text-xs text-gray-400 dark:text-zinc-500 uppercase tracking-wide mb-0.5">ETA</p>
                 <p className={`text-sm font-bold ${dueDateClass(dueDate)}`}>{fmtDate(dueDate)}</p>
               </div>
             )}
@@ -568,7 +571,7 @@ export default function RODetail() {
 
           <div className="col-span-full border-t border-gray-100 dark:border-zinc-800 my-1" />
 
-          {/* Dates */}
+          {/* Dates — all four fields */}
           {ro.cccDateIn ? (
             <div>
               <CCCFieldLabel label="CCC Date-In" />
@@ -578,16 +581,21 @@ export default function RODetail() {
             <Field label="Date In" value={fmtDate(ro.dateIn)} />
           )}
 
-          {ro.cccDateOut ? (
+          {ro.cccDateOut && (
             <div>
               <CCCFieldLabel label="CCC Date-Out" />
               <p className="text-sm font-medium text-gray-800 dark:text-gray-200 mt-0.5">{fmtDate(ro.cccDateOut)}</p>
             </div>
-          ) : (
-            <Field label="Promise Date" value={fmtDate(ro.promisedDate)} />
           )}
 
           <Field label="Drop-Off Date" value={fmtDate(ro.dropOffDate)} />
+
+          <div>
+            <p className="text-xs text-gray-400 dark:text-zinc-500 mb-0.5">ETA <span className="text-gray-300 dark:text-zinc-600 font-normal">(shop)</span></p>
+            <p className={`text-sm font-medium mt-0.5 ${dueDate ? dueDateClass(dueDate) : 'text-gray-400 dark:text-zinc-500'}`}>
+              {fmtDate(ro.eta) !== '—' ? fmtDate(ro.eta) : ro.cccDateOut ? fmtDate(ro.cccDateOut) : '—'}
+            </p>
+          </div>
 
           <div className="col-span-full border-t border-gray-100 dark:border-zinc-800 my-1" />
 
@@ -681,8 +689,19 @@ export default function RODetail() {
             Add
           </button>
         </form>
-        {ro.notes ? (() => {
-          const lines   = ro.notes.split('\n').filter(Boolean)
+        {ro.notes && typeof ro.notes === 'string' ? (() => {
+          const lines = []
+          let current = ''
+          ro.notes.split('\n').forEach(line => {
+            if (/^\[[^\]]+\]/.test(line)) {
+              if (current.trim()) lines.push(current.trim())
+              current = line
+              return
+            }
+            if (!line.trim()) return
+            current = current ? `${current}\n${line}` : line
+          })
+          if (current.trim()) lines.push(current.trim())
           const deduped = dedupeNoteLines(lines)
           const dupCnt  = deduped.filter(n => n.dup).length
           return (

@@ -44,7 +44,7 @@ const PARTS_DELAY_LABELS = { back_ordered: 'Back Ordered', delayed: 'Delayed', w
 
 function isPaintDueSoon(ro) {
   if (!PRE_PAINT_STATUSES.has(ro.status)) return false
-  const dueDate = ro.cccDateOut || ro.promisedDate
+  const dueDate = ro.eta || ro.cccDateOut || ro.promisedDate
   if (!dueDate) return false
   try {
     return differenceInDays(parseISO(dueDate), new Date()) <= 2
@@ -98,7 +98,7 @@ function RORow({ ro, employees, onSelect }) {
   const bodyTech  = employees[ro.assignedBodyMan]   ?? '—'
   // Estimator: prefer CCC name, fall back to assigned UID lookup
   const estimator = ro.estimatorName || employees[ro.assignedEstimator] || '—'
-  const dueDate   = ro.cccDateOut || ro.promisedDate  // CCC out-date takes priority
+  const dueDate   = ro.eta || ro.cccDateOut || ro.promisedDate
 
   return (
     <tr
@@ -186,7 +186,7 @@ function RORow({ ro, employees, onSelect }) {
 
 // ── Kanban card ───────────────────────────────────────────────────────────────
 function KanbanCard({ ro, onSelect, draggable, onDragStart, onDragEnd }) {
-  const dueDate = ro.cccDateOut || ro.promisedDate
+  const dueDate = ro.eta || ro.cccDateOut || ro.promisedDate
 
   return (
     <div
@@ -283,7 +283,7 @@ function KanbanCard({ ro, onSelect, draggable, onDragStart, onDragEnd }) {
 }
 
 function MobileROCard({ ro, onSelect, expanded = false, onToggle }) {
-  const dueDate = ro.cccDateOut || ro.promisedDate
+  const dueDate = ro.eta || ro.cccDateOut || ro.promisedDate
   const status = STATUS_MAP[ro.status]
 
   return (
@@ -365,6 +365,8 @@ function PendingToBodyModal({ ro, employees, onConfirm, onCancel }) {
   const bodyMen = employees.filter(e => e.role === 'body_man')
   const painters = employees.filter(e => e.role === 'painter' || e.role === 'paint_helper')
 
+  const prefilled = !!ro.dropOffDate  // was already set via GIB before drag
+
   const [bodyManUid,    setBodyManUid]    = useState(ro.assignedBodyMan || '')
   const [painterUid,    setPainterUid]    = useState(ro.assignedPainter || (painters[0]?.uid ?? ''))
   const [authorized,    setAuthorized]    = useState(ro.customerAuthorized ?? null)
@@ -439,9 +441,16 @@ function PendingToBodyModal({ ro, employees, onConfirm, onCancel }) {
 
           {/* Drop-off Date */}
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300 mb-1.5">
-              Drop-off Date <span className="text-red-500">*</span>
-            </label>
+            <div className="flex items-center gap-2 mb-1.5">
+              <label className="block text-xs font-semibold text-gray-700 dark:text-zinc-300">
+                Drop-off Date <span className="text-red-500">*</span>
+              </label>
+              {prefilled && (
+                <span className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-100 text-cyan-700 dark:bg-cyan-900/50 dark:text-cyan-300 font-medium">
+                  ✓ from GIB
+                </span>
+              )}
+            </div>
             <input
               type="date"
               value={dropOffDate}
@@ -679,12 +688,15 @@ export default function ROBoard() {
   const applyPendingToBody = async ({ bodyManUid, painterUid, authorized, dropOffDate, hasRental }) => {
     const ro     = pendingToBody?.ro
     if (!ro) return
-    const author = employees[user?.uid] ?? 'Unknown'
-    const note   = `Moved to Body Work — Tech: ${employees[bodyManUid] ?? bodyManUid}` +
+    const author  = employees[user?.uid] ?? 'Unknown'
+    const stamp   = new Date().toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+    const noteText = `Moved to Body Work — Tech: ${employees[bodyManUid] ?? bodyManUid}` +
       (painterUid ? `, Painter: ${employees[painterUid] ?? painterUid}` : '') +
       `, Authorized: ${authorized ? 'Yes' : 'No'}` +
       `, Drop-off: ${dropOffDate}` +
       (hasRental ? ', Rental: Yes' : '')
+    const noteLine   = `[${stamp} - ${author}] ${noteText}`
+    const prevNotes  = typeof ro.notes === 'string' ? ro.notes : ''
     await updateDoc(doc(db, 'ros', ro.id), {
       status:              'body_work',
       assignedBodyMan:     bodyManUid,
@@ -698,7 +710,7 @@ export default function ROBoard() {
         type: 'status_change', value: 'body_work', label: 'Body Work',
         by: author, at: new Date().toISOString(), source: 'drag',
       }),
-      notes: arrayUnion({ text: note, by: author, at: new Date().toISOString() }),
+      notes: prevNotes ? `${noteLine}\n${prevNotes}` : noteLine,
     })
     setPendingToBody(null)
   }

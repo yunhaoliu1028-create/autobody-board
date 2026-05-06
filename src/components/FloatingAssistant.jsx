@@ -9,7 +9,7 @@ import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
 
 // ── Priority based on due date ────────────────────────────────────────────────
 function dueDateToPriority(ro) {
-  const dateStr = ro?.cccDateOut || ro?.promisedDate
+  const dateStr = ro?.eta || ro?.cccDateOut || ro?.promisedDate
   if (!dateStr) return 'medium'
   try {
     const due  = parseISO(dateStr)
@@ -249,7 +249,30 @@ export default function FloatingAssistant({ inline = false, onBack }) {
               category: 'body',
               partsStatus: roDoc.partsStatus ?? '',
               priority: dueDateToPriority(roDoc),
-              dueDate: roDoc.cccDateOut || roDoc.promisedDate || null,
+              dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
+              status: 'pending',
+              createdAt: serverTimestamp(),
+            })
+          }
+        } else if (action.type === 'assign_painter') {
+          const assignee = findEmployeeByName(employees, action.assigneeName, 'painter')
+          if (assignee) {
+            await updateDoc(doc(db, 'ros', roDoc.id), {
+              assignedPainter: assignee.uid,
+              updatedAt: serverTimestamp(),
+            })
+            await addDoc(collection(db, 'tasks'), {
+              roId: roDoc.id, roNumber: roDoc.roNumber,
+              vehicleInfo: roDoc.vehicle,
+              assignedTo: assignee.uid,
+              assignedBy: user?.uid ?? '',
+              assignedToName: assignee.name ?? '',
+              title: 'Paint preparation & paint job',
+              description: '',
+              category: 'paint',
+              partsStatus: roDoc.partsStatus ?? '',
+              priority: dueDateToPriority(roDoc),
+              dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
               status: 'pending',
               createdAt: serverTimestamp(),
             })
@@ -258,7 +281,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
           const isBodyTask = isBodyTaskAction(action)
           const assignee = findEmployeeByName(employees, action.assigneeName, isBodyTask ? 'body_man' : null)
           if (!assignee) throw new Error(`Could not match task assignee "${action.assigneeName}".`)
-          const roDueDate  = roDoc.cccDateOut || roDoc.promisedDate || null
+          const roDueDate  = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
           const fields = {
             roId: roDoc.id, roNumber: roDoc.roNumber,
             vehicleInfo: roDoc.vehicle,

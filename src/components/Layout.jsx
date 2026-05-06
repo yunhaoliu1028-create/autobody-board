@@ -153,6 +153,7 @@ export default function Layout({ children }) {
   const [profileOpen,    setProfileOpen]    = useState(false)
   const [notifications,  setNotifications]  = useState([])
   const [chatUnread,     setChatUnread]      = useState(0)
+  const [chatPanelOpen,  setChatPanelOpen]   = useState(false)
   const profileRef = useRef(null)
 
   const prevConvosRef        = useRef({})   // convoId -> lastAt millis
@@ -161,14 +162,20 @@ export default function Layout({ children }) {
 
   // Track which convo is open in Chat page
   useEffect(() => {
-    const handler = (e) => { activeChatConvoIdRef.current = e.detail?.convoId ?? null }
+    const handler = (e) => {
+      activeChatConvoIdRef.current = e.detail?.convoId ?? null
+      setChatPanelOpen(Boolean(e.detail?.convoId || e.detail?.panelOpen))
+    }
     window.addEventListener('chatConvoChanged', handler)
     return () => window.removeEventListener('chatConvoChanged', handler)
   }, [])
 
   // Clear active convo when leaving /chat
   useEffect(() => {
-    if (location.pathname !== '/chat') activeChatConvoIdRef.current = null
+    if (location.pathname !== '/chat') {
+      activeChatConvoIdRef.current = null
+      setChatPanelOpen(false)
+    }
   }, [location.pathname])
 
   // Global subscription: conversations → unread count + popup notifications
@@ -357,7 +364,7 @@ export default function Layout({ children }) {
       </header>
 
       {/* ── Page content ──────────────────────────────────────────────────── */}
-      <main className="flex-1 max-w-[1440px] mx-auto w-full px-4 py-4 md:py-6 pb-tab-safe md:pb-6">
+      <main className={`flex-1 max-w-[1440px] mx-auto w-full px-4 py-4 md:py-6 md:pb-6 ${chatPanelOpen && location.pathname === '/chat' ? 'pb-safe' : 'pb-tab-safe'}`}>
         {children}
       </main>
 
@@ -367,7 +374,7 @@ export default function Layout({ children }) {
       </div>
 
       {/* ── Mobile bottom tab bar ────────────────────────────────────────── */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 dark:bg-zinc-900/95 backdrop-blur border-t border-gray-200 dark:border-zinc-800 pb-safe">
+      <nav className={`md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 dark:bg-zinc-900/95 backdrop-blur border-t border-gray-200 dark:border-zinc-800 pb-safe transition-transform duration-200 ${chatPanelOpen && location.pathname === '/chat' ? 'translate-y-full' : 'translate-y-0'}`}>
         <div className="grid grid-cols-4 h-14">
           {MOBILE_TABS.map(({ path, label, Icon }) => {
             const isActive = location.pathname.startsWith(path)

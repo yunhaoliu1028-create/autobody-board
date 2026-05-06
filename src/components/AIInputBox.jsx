@@ -10,7 +10,7 @@ import MentionTextarea, { buildMentionCandidates } from './MentionTextarea'
 import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
 
 function dueDateToPriority(ro) {
-  const dateStr = ro?.cccDateOut || ro?.promisedDate
+  const dateStr = ro?.eta || ro?.cccDateOut || ro?.promisedDate
   if (!dateStr) return 'medium'
   try {
     const due  = parseISO(dateStr)
@@ -102,6 +102,7 @@ const ACTION_LABELS = {
   update_parts_status: { label: 'Parts Status',    color: 'bg-amber-50  border-amber-200  dark:bg-amber-950/35  dark:border-amber-800/80' },
   assign_task:         { label: 'Assign Task',     color: 'bg-green-50  border-green-200  dark:bg-green-950/35  dark:border-green-800/80' },
   assign_body_man:     { label: 'Set Body Tech',  color: 'bg-blue-50   border-blue-200   dark:bg-blue-950/35   dark:border-blue-800/80' },
+  assign_painter:      { label: 'Set Painter',    color: 'bg-purple-50 border-purple-200 dark:bg-purple-950/35 dark:border-purple-800/80' },
   update_car_status:   { label: 'Car Status',      color: 'bg-orange-50 border-orange-200 dark:bg-orange-950/35 dark:border-orange-800/80' },
   update_dropoff_date: { label: 'Drop-Off Date',   color: 'bg-cyan-50   border-cyan-200   dark:bg-cyan-950/35   dark:border-cyan-800/80' },
   update_due_date:     { label: 'Target Date',     color: 'bg-rose-50   border-rose-200   dark:bg-rose-950/35   dark:border-rose-800/80' },
@@ -259,6 +260,14 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
     )
   }
 
+  // ── Duplicate detection for update_dropoff_date ────────────────────────────
+  const dropoffDupStatus = (() => {
+    if (draft.type !== 'update_dropoff_date') return null
+    const roDoc = ros?.find(r => r.roNumber === draft.roNumber)
+    if (!roDoc?.dropOffDate) return null
+    return roDoc.dropOffDate === draft.dropOffDate ? 'same' : 'different'
+  })()
+
   // ── Preview (read mode) ────────────────────────────────────────────────────
   const detail = () => {
     switch (draft.type) {
@@ -267,7 +276,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
       case 'update_parts_status': return <span className="text-yellow-700 dark:text-amber-300 font-medium">{PARTS_STATUSES.find(p => p.key === draft.partsStatus)?.label ?? draft.partsStatus}</span>
       case 'update_car_status':   return <span className="text-gray-800 dark:text-zinc-100"><strong>{CAR_STATUS_MAP[draft.carStatus]?.label ?? draft.carStatus}</strong></span>
       case 'update_dropoff_date': return <span className="text-gray-700 dark:text-zinc-200">Drop Off: <strong className="text-gray-900 dark:text-white">{draft.dropOffDate}</strong></span>
-      case 'update_due_date':     return <span className="text-gray-700 dark:text-zinc-200">Target Completion: <strong className="text-gray-900 dark:text-white">{draft.dueDate}</strong></span>
+      case 'update_due_date':     return <span className="text-gray-700 dark:text-zinc-200">ETA: <strong className="text-gray-900 dark:text-white">{draft.dueDate}</strong></span>
       case 'update_rental':       return <span className="text-gray-800 dark:text-zinc-100">{draft.hasRental ? 'Customer has rental' : 'No rental'}</span>
       case 'assign_task':
         return (
@@ -290,6 +299,11 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
         <span className="font-semibold text-gray-800 dark:text-zinc-100">RO#{draft.roNumber}</span>
         <span className="text-gray-400 dark:text-zinc-500 mx-1.5">·</span>
         <span className="text-xs font-semibold text-gray-600 dark:text-zinc-300 uppercase tracking-wide">{meta.label}</span>
+        {dropoffDupStatus === 'same' && (
+          <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300 font-semibold" title="Drop-off date already recorded — will skip field update, any note will still apply">
+            Duplicate — date already set
+          </span>
+        )}
         <div className="text-sm mt-0.5">{detail()}</div>
       </div>
       {draft.confidence === 'low' && (
@@ -856,12 +870,26 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           entry.fields.carStatus = action.carStatus
           entry.changeLogEntries.push({ type: 'update_car_status', value: action.carStatus, by: author, at: now, source: 'gib' })
           break
-        case 'update_dropoff_date':
-          entry.fields.dropOffDate = action.dropOffDate
-          entry.changeLogEntries.push({ type: 'update_dropoff_date', value: action.dropOffDate, by: author, at: now, source: 'gib' })
+        case 'update_dropoff_date': {
+          const isDuplicate = roDoc.dropOffDate && roDoc.dropOffDate === action.dropOffDate
+          if (!isDuplicate) {
+            // New or updated date — write it
+            entry.fields.dropOffDate = action.dropOffDate
+            entry.changeLogEntries.push({ type: 'update_dropoff_date', value: action.dropOffDate, by: author, at: now, source: 'gib' })
+          }
+          // Auto-add drop-off note if GIB didn't already include one for this RO.
+          // For duplicates: note is still written if it contains new info (time detail etc.)
+          // For non-duplicates: always add a note if GIB didn't provide one.
+          const hasDropoffNote = actions.some(a => a.type === 'add_note' && a.roNumber === action.roNumber)
+          if (!hasDropoffNote && !isDuplicate) {
+            const autoNote = `[${stamp} - ${author}] Vehicle dropped off on ${action.dropOffDate}.`
+            const prevNotes = entry.fields.notes ?? roDoc.notes ?? ''
+            entry.fields.notes = prevNotes ? `${autoNote}\n${prevNotes}` : autoNote
+          }
           break
+        }
         case 'update_due_date':
-          entry.fields.promisedDate = action.dueDate
+          entry.fields.eta = action.dueDate
           entry.changeLogEntries.push({ type: 'update_due_date', value: action.dueDate, by: author, at: now, source: 'gib' })
           break
         case 'update_rental':
@@ -873,7 +901,7 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           if (assignee) {
             entry.fields.assignedBodyMan = assignee.uid
             entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
-            const roDueDate = roDoc.cccDateOut || roDoc.promisedDate || null
+            const roDueDate = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
             entry.taskPromises.push(addDoc(collection(db, 'tasks'), {
               roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
               assignedTo: assignee.uid, assignedBy: user.uid,
@@ -890,13 +918,35 @@ export default function AIInputBox({ ros = [], employees = [] }) {
           }
           break
         }
+        case 'assign_painter': {
+          const assignee = findEmployeeByName(employees, action.assigneeName, 'painter')
+          if (assignee) {
+            entry.fields.assignedPainter = assignee.uid
+            entry.changeLogEntries.push({ type: 'assign_painter', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
+            const roDueDate = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
+            entry.taskPromises.push(addDoc(collection(db, 'tasks'), {
+              roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
+              assignedTo: assignee.uid, assignedBy: user.uid,
+              assignedToName: assignee.name ?? '',
+              title: 'Paint preparation & paint job',
+              description: '',
+              category: 'paint',
+              partsStatus: roDoc.partsStatus ?? '',
+              priority: dueDateToPriority(roDoc),
+              dueDate: roDueDate,
+              status: 'pending',
+              createdAt: serverTimestamp(),
+            }))
+          }
+          break
+        }
         case 'assign_task': {
           const isBodyTask = isBodyTaskAction(action)
           const assignee = findEmployeeByName(employees, action.assigneeName, isBodyTask ? 'body_man' : null)
           if (!assignee) {
             throw new Error(`Could not match task assignee "${action.assigneeName}". Edit the suggested action and choose a valid employee name.`)
           }
-          const roDueDate  = roDoc.cccDateOut || roDoc.promisedDate || null
+          const roDueDate  = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
           if (isBodyTask) entry.fields.assignedBodyMan = assignee.uid
           entry.taskPromises.push(addDoc(collection(db, 'tasks'), {
             roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,

@@ -4,7 +4,7 @@
 //   conversations/{id}          — type, members[], dmKey, name, lastMessage, lastAt
 //   conversations/{id}/messages — senderId, senderName, text, attachments[], createdAt
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import FloatingAssistant from '../components/FloatingAssistant'
 import {
   collection, doc, onSnapshot, addDoc, updateDoc,
@@ -27,6 +27,8 @@ function IconCheck()  { return <svg className="w-3.5 h-3.5" fill="none" stroke="
 function IconMic()    { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="11" rx="3"/><path strokeLinecap="round" d="M5 10a7 7 0 0014 0M12 19v3M8 22h8"/></svg> }
 function IconImage()  { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path strokeLinecap="round" d="m21 15-5-5L5 21"/></svg> }
 function IconFile()   { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6M8 13h8M8 17h5"/></svg> }
+function IconPlay()   { return <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10-6.5-10-6.5Z"/></svg> }
+function IconPause()  { return <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7V5Zm6 0h4v14h-4V5Z"/></svg> }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function dmKey(uid1, uid2) {
@@ -265,8 +267,65 @@ function NewChatModal({ myUid, allUsers, onClose, onOpenConvo }) {
 }
 
 // ── Message bubble ─────────────────────────────────────────────────────────────
+function VoiceAttachment({ src, isOwn }) {
+  const audioRef = useRef(null)
+  const [playing, setPlaying] = useState(false)
+  const [duration, setDuration] = useState('')
+
+  const toggle = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    if (audio.paused) audio.play()
+    else audio.pause()
+  }
+
+  const setAudioDuration = () => {
+    const seconds = audioRef.current?.duration
+    if (!Number.isFinite(seconds)) return
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.round(seconds % 60).toString().padStart(2, '0')
+    setDuration(`${mins}:${secs}`)
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      className={`flex min-w-44 items-center gap-3 rounded-full px-3 py-2 shadow-sm transition-colors ${
+        isOwn
+          ? 'bg-green-500 text-white hover:bg-green-600'
+          : 'bg-white text-gray-800 hover:bg-gray-50 dark:bg-zinc-800 dark:text-gray-100 dark:hover:bg-zinc-700'
+      }`}
+      title="Voice message"
+    >
+      <audio
+        ref={audioRef}
+        src={src}
+        preload="metadata"
+        className="hidden"
+        onLoadedMetadata={setAudioDuration}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+      />
+      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+        isOwn ? 'bg-white/20' : 'bg-green-500 text-white'
+      }`}>
+        {playing ? <IconPause /> : <IconPlay />}
+      </span>
+      <span className={`h-1 flex-1 rounded-full ${isOwn ? 'bg-white/35' : 'bg-green-200 dark:bg-green-900'}`}>
+        <span className={`block h-full w-1/2 rounded-full ${isOwn ? 'bg-white' : 'bg-green-500'}`} />
+      </span>
+      <span className={`text-xs font-medium ${isOwn ? 'text-white/90' : 'text-gray-500 dark:text-zinc-400'}`}>
+        {duration || '0:00'}
+      </span>
+    </button>
+  )
+}
+
 function MessageBubble({ msg, isOwn, showName }) {
   const attachments = msg.attachments || []
+  const audioOnly = !msg.text && attachments.length > 0 && attachments.every(att => att.type === 'audio')
   return (
     <div className={`flex gap-2 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
       {!isOwn && (
@@ -277,10 +336,13 @@ function MessageBubble({ msg, isOwn, showName }) {
           <p className="text-xs text-gray-400 dark:text-zinc-500 px-1">{msg.senderName}</p>
         )}
         <div
-          className={`px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words
-            ${isOwn
-              ? 'bg-green-500 text-white rounded-tr-sm'
-              : 'bg-gray-100 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 rounded-tl-sm'}`}
+          className={audioOnly
+            ? 'text-sm leading-relaxed'
+            : `px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words
+              ${isOwn
+                ? 'bg-green-500 text-white rounded-tr-sm'
+                : 'bg-gray-100 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 rounded-tl-sm'}`
+          }
         >
           {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
           {attachments.length > 0 && (
@@ -291,7 +353,7 @@ function MessageBubble({ msg, isOwn, showName }) {
                     <img src={att.url} alt={att.name || 'image'} className="max-w-56 rounded-xl border border-black/5 object-cover" />
                   </a>
                 ) : att.type === 'audio' ? (
-                  <audio key={idx} controls src={att.url} className="max-w-56 h-9" />
+                  <VoiceAttachment key={idx} src={att.url} isOwn={isOwn} />
                 ) : (
                   <a
                     key={idx}
@@ -497,41 +559,59 @@ function ConversationPanel({ convo, myUid, allUsers, onBack }) {
       </div>
 
       {/* Input */}
-      <form onSubmit={send} className="px-3 py-2 border-t border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900 shrink-0">
-        <div className="flex items-center gap-1 mb-1.5 text-gray-400 dark:text-zinc-500">
+      <form
+        onSubmit={send}
+        className="sticky bottom-0 shrink-0 border-t border-gray-200 bg-[#f6f6f6] px-2.5 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] dark:border-zinc-800 dark:bg-[#1c1c1e]"
+      >
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={toggleRecording}
-            className={`p-1.5 rounded-lg transition-colors ${recording ? 'bg-red-50 text-red-600' : 'hover:bg-gray-100 dark:hover:bg-zinc-800 hover:text-gray-700 dark:hover:text-zinc-200'}`}
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors ${
+              recording
+                ? 'border-red-300 bg-red-50 text-red-600 dark:border-red-800 dark:bg-red-950/40'
+                : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-100 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800'
+            }`}
             title={recording ? 'Stop recording' : 'Voice'}
           >
             <IconMic />
           </button>
-          <button type="button" onClick={() => imageRef.current?.click()} className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800 hover:text-gray-700 dark:hover:text-zinc-200" title="Image">
+
+          <div className="flex min-h-10 flex-1 items-center rounded-lg border border-gray-200 bg-white px-3 dark:border-zinc-700 dark:bg-zinc-800">
+            <textarea
+              value={text}
+              onChange={e => setText(e.target.value)}
+              enterKeyHint="newline"
+              placeholder={recording ? 'Recording...' : 'Message...'}
+              rows={1}
+              className="max-h-24 min-h-[24px] flex-1 resize-none bg-transparent py-1.5 text-[16px] leading-6 text-gray-900 placeholder-gray-400 focus:outline-none dark:text-gray-100 dark:placeholder-zinc-500"
+            />
+            <span className="ml-2 text-gray-400 dark:text-zinc-500">
+              <IconMic />
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => imageRef.current?.click()}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-gray-300 bg-white text-gray-600 hover:bg-gray-100 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            title="Image"
+          >
             <IconImage />
           </button>
-          <button type="button" onClick={() => fileRef.current?.click()} className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800 hover:text-gray-700 dark:hover:text-zinc-200" title="File">
-            <IconFile />
+          <button
+            type={text.trim() ? 'submit' : 'button'}
+            onClick={() => { if (!text.trim()) fileRef.current?.click() }}
+            disabled={sending}
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors ${
+              text.trim()
+                ? 'border-green-500 bg-green-600 text-white hover:bg-green-700 disabled:opacity-40'
+                : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-100 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800'
+            }`}
+            title={text.trim() ? 'Send' : 'File'}
+          >
+            {text.trim() ? <IconSend /> : <IconFile />}
           </button>
-          {recording && <span className="text-xs text-red-500 font-medium ml-1">Recording...</span>}
-        </div>
-        <div className="flex items-end gap-2">
-        <textarea
-          value={text}
-          onChange={e => setText(e.target.value)}
-          enterKeyHint="newline"
-          placeholder="Message…"
-          rows={1}
-          className="flex-1 min-h-[42px] max-h-28 border border-gray-300 dark:border-zinc-700 rounded-xl px-3.5 py-2.5 text-sm bg-white dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none overflow-y-auto leading-relaxed"
-        />
-        <button
-          type="submit"
-          disabled={!text.trim() || sending}
-          className="h-[42px] w-[46px] bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded-xl transition-colors shrink-0 flex items-center justify-center text-sm font-semibold"
-          title="Send"
-        >
-          <IconSend />
-        </button>
         </div>
         <input ref={imageRef} type="file" accept="image/*" multiple className="hidden" onChange={e => handleFiles(e.target.files, 'image')} />
         <input ref={fileRef} type="file" multiple className="hidden" onChange={e => handleFiles(e.target.files)} />
@@ -597,6 +677,7 @@ function ConvoItem({ convo, myUid, allUsers, isActive, unread, onClick }) {
 export default function Chat() {
   const { user } = useAuth()
   const location = useLocation()
+  const panelHistoryRef = useRef(false)
   const [conversations, setConversations] = useState([])
   const [allUsers,      setAllUsers]      = useState([])  // { uid, name, role }
   const [activeConvo,   setActiveConvo]   = useState(null)
@@ -648,8 +729,42 @@ export default function Chat() {
     if (convo) openConvo(convo)
   }, [location.state, conversations])
 
+  const closePanel = useCallback(() => {
+    setActiveConvo(null)
+    setShowAI(false)
+    setShowSidebar(true)
+    window.dispatchEvent(new CustomEvent('chatConvoChanged', { detail: { convoId: null, panelOpen: false } }))
+  }, [])
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (activeConvo || showAI) {
+        panelHistoryRef.current = false
+        closePanel()
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [activeConvo, showAI, closePanel])
+
+  const pushPanelHistory = () => {
+    if (window.innerWidth >= 768 || panelHistoryRef.current) return
+    window.history.pushState({ chatPanel: true }, '', window.location.href)
+    panelHistoryRef.current = true
+  }
+
+  const backToChatList = () => {
+    if (panelHistoryRef.current) {
+      window.history.back()
+      return
+    }
+    closePanel()
+  }
+
   const openConvo = async (convo) => {
+    pushPanelHistory()
     setActiveConvo(convo)
+    setShowAI(false)
     setShowSidebar(false)
     // Tell Layout which convo is open (suppress popup for this convo)
     window.dispatchEvent(new CustomEvent('chatConvoChanged', { detail: { convoId: convo.id } }))
@@ -694,8 +809,18 @@ export default function Chat() {
 
   const messageConversations = conversations.filter(c => c.lastSenderId || c.lastMessage)
 
+  const openAssistantPanel = () => {
+    pushPanelHistory()
+    setShowAI(true)
+    setActiveConvo(null)
+    setShowSidebar(false)
+    window.dispatchEvent(new CustomEvent('chatConvoChanged', { detail: { convoId: null, panelOpen: true } }))
+  }
+
   return (
-    <div className="flex h-[calc(100dvh-8rem)] md:h-[calc(100vh-56px)] -my-4 md:-my-6 -mx-4 overflow-hidden">
+    <div className={`flex md:h-[calc(100vh-56px)] md:-my-6 -mx-4 overflow-hidden ${
+      activeConvo || showAI ? 'h-[calc(100dvh-3.5rem)] -my-4' : 'h-[calc(100dvh-8rem)] -my-4'
+    }`}>
 
       {/* ── Left sidebar: conversation list ─────────────────────────────── */}
       <div className={`
@@ -765,7 +890,7 @@ export default function Chat() {
             <div className="space-y-1">
               {/* ── Pinned: Shop Assistant AI ─────────────────────────── */}
               <button
-                onClick={() => { setShowAI(true); setActiveConvo(null); setShowSidebar(false) }}
+                onClick={openAssistantPanel}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors text-left
                   ${showAI
                     ? 'bg-zinc-900 dark:bg-zinc-100'
@@ -846,7 +971,7 @@ export default function Chat() {
         {showAI ? (
           <FloatingAssistant
             inline
-            onBack={() => { setShowAI(false); setShowSidebar(true) }}
+            onBack={backToChatList}
           />
         ) : activeConvo ? (
           <ConversationPanel
@@ -854,7 +979,7 @@ export default function Chat() {
             convo={activeConvo}
             myUid={user.uid}
             allUsers={allUsers}
-            onBack={() => { setActiveConvo(null); setShowSidebar(true) }}
+            onBack={backToChatList}
           />
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-gray-300 dark:text-zinc-700 gap-3">

@@ -12,6 +12,7 @@ import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { StatusBadge, PartsStatusBadge } from './StatusBadge'
 import { MANAGER_ROLES, PARTS_STATUSES } from '../constants/roles'
+import HighlightedNote from './HighlightedNote'
 import { format } from 'date-fns'
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -50,7 +51,19 @@ function toNoteLines(notes) {
       .filter(Boolean)
       .reverse()
   }
-  return (notes ?? '').split('\n').filter(Boolean)
+  const entries = []
+  let current = ''
+  ;(notes ?? '').split('\n').forEach(line => {
+    if (/^\[[^\]]+\]/.test(line)) {
+      if (current.trim()) entries.push(current.trim())
+      current = line
+      return
+    }
+    if (!line.trim()) return
+    current = current ? `${current}\n${line}` : line
+  })
+  if (current.trim()) entries.push(current.trim())
+  return entries
 }
 
 function collapseDuplicateNoteLines(lines) {
@@ -310,7 +323,7 @@ export default function RODrawer({ ro, employees, onClose }) {
                           </span>
                         )}
                         <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                          {line}
+                          <HighlightedNote text={line} />
                         </p>
                         {!showAllNotes && lines?.length > 1 && (
                           <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-1">

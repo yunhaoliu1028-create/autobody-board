@@ -602,15 +602,15 @@ async function writeRO(ro, timestamp, existingDocName, oldData) {
         insuranceCompany: strVal(ro.insuranceCompany),
         claimNumber:      strVal(ro.claimNumber),
         estimatorName:    strVal(ro.estimatorName),
-        // Store CCC dates separately (locked in UI)
+        // Store CCC dates separately (locked in UI — never modified by GIB or manual edit)
         cccDateIn:        strVal(ro.dateIn),
         cccDateOut:       strVal(ro.promisedDate),
         cccImported:      { booleanValue: true },
         cccColumn:        strVal(ro.cccColumn || ''),
         cccLastSync:      strVal(timestamp),
+        // Shop ETA — initialized from CCC date-out, but freely editable by GIB/manually
+        eta:              strVal(ro.promisedDate),
         // Editable fields — start blank, set manually
-        dateIn:           strVal(ro.dateIn),
-        promisedDate:     strVal(ro.promisedDate),
         dropOffDate:      strVal(''),
         carStatus:        strVal('pending_dropoff'),
         // Status managed by web app — NOT from CCC
