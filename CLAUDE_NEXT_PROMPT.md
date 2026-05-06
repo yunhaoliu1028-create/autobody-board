@@ -8,7 +8,8 @@ Use this file before continuing work. The source of truth is GitHub `main`.
 - Local path: `C:\Users\Owner\Desktop\CAR PHOTO\YUNHAO LIU\autobody-board`
 - GitHub: `yunhaoliu1028-create/autobody-board`
 - Branch: `main`
-- Latest confirmed commit: `c429855 Drag task groups as manager`
+- Latest functional app commit before this handoff: `c429855 Drag task groups as manager`
+- This handoff file may exist in a newer commit. Always pull the latest `main`.
 - Deployed site: `https://bodyshop-board.web.app`
 - Current working tree was clean when this handoff was generated.
 
@@ -96,7 +97,7 @@ You are continuing work on my autobody-board project.
 
 Before making changes:
 1. Work from this folder: C:\Users\Owner\Desktop\CAR PHOTO\YUNHAO LIU\autobody-board
-2. Pull/sync latest GitHub main first. Current expected latest commit is c429855.
+2. Pull/sync latest GitHub main first. It should include CLAUDE_NEXT_PROMPT.md.
 3. Read CODEX_HANDOFF.md and CLAUDE_NEXT_PROMPT.md.
 4. Do not work only inside .claude/worktrees unless you will merge/commit/push the result back to main.
 
