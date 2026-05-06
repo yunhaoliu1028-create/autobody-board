@@ -425,6 +425,8 @@ export default function TaskBoard() {
   const [ros, setRos] = useState([])
   const [tasks, setTasks] = useState([])
   const [employees, setEmployees] = useState({})
+  const [employeeRows, setEmployeeRows] = useState([])
+  const [viewUid, setViewUid] = useState(user.uid)
   const [loading, setLoading] = useState(true)
   const [dragId, setDragId] = useState(null)
   const [overId, setOverId] = useState(null)
@@ -433,11 +435,27 @@ export default function TaskBoard() {
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'users'), snap => {
       const map = {}
-      snap.forEach(d => { map[d.id] = d.data().name })
+      const rows = []
+      snap.forEach(d => {
+        const data = d.data()
+        map[d.id] = data.name
+        rows.push({ uid: d.id, name: data.name || data.email || 'Unnamed', role: data.role || '' })
+      })
       setEmployees(map)
+      setEmployeeRows(rows.sort((a, b) => a.name.localeCompare(b.name)))
     })
     return unsub
   }, [])
+
+  useEffect(() => {
+    if (!isManager) setViewUid(user.uid)
+  }, [isManager, user.uid])
+
+  useEffect(() => {
+    setDragId(null)
+    setOverId(null)
+    setShowDone(false)
+  }, [viewUid])
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'ros'), snap => {
@@ -455,7 +473,7 @@ export default function TaskBoard() {
   }, [])
 
   const assignedROs = useMemo(() => {
-    const uid = user.uid
+    const uid = viewUid
     return ros
       .filter(ro =>
         ro.status !== 'delivered' &&
@@ -473,21 +491,21 @@ export default function TaskBoard() {
         const eb = etaOf(b) ?? '9999'
         return ea < eb ? -1 : ea > eb ? 1 : 0
       })
-  }, [ros, user.uid])
+  }, [ros, viewUid])
 
-  const myTasks = useMemo(() => tasks.filter(t => t.assignedTo === user.uid), [tasks, user.uid])
+  const visibleTasks = useMemo(() => tasks.filter(t => t.assignedTo === viewUid), [tasks, viewUid])
 
   const activeTasks = useMemo(() => {
-    return myTasks
+    return visibleTasks
       .filter(t => t.status !== 'completed')
       .sort((a, b) => taskSortKey(a) - taskSortKey(b))
-  }, [myTasks])
+  }, [visibleTasks])
 
   const doneTasks = useMemo(() => {
-    return myTasks
+    return visibleTasks
       .filter(t => t.status === 'completed')
       .sort((a, b) => taskSortKey(b) - taskSortKey(a))
-  }, [myTasks])
+  }, [visibleTasks])
 
   const activeTaskGroups = useMemo(() => groupTasksByRO(activeTasks), [activeTasks])
   const doneTaskGroups = useMemo(() => groupTasksByRO(doneTasks), [doneTasks])
@@ -496,6 +514,7 @@ export default function TaskBoard() {
     () => employees[user.uid] ?? user.email ?? 'Unknown',
     [employees, user]
   )
+  const viewingName = employees[viewUid] ?? (viewUid === user.uid ? 'Me' : 'Selected employee')
 
   const handleStatusChange = async (taskId, newStatus) => {
     try {
@@ -569,9 +588,36 @@ export default function TaskBoard() {
 
   return (
     <div className="space-y-8 pb-8">
+      {isManager && (
+        <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl border border-gray-200 bg-white px-3.5 py-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-800/90">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500">Manager View</p>
+            <p className="mt-0.5 text-sm font-medium text-gray-800 dark:text-gray-100">
+              Viewing {viewingName}'s task board
+            </p>
+          </div>
+          <label className="flex min-w-56 flex-col gap-1 text-xs font-medium text-gray-500 dark:text-zinc-400">
+            Employee
+            <select
+              value={viewUid}
+              onChange={e => setViewUid(e.target.value)}
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-zinc-600 dark:bg-zinc-900 dark:text-gray-100"
+            >
+              {employeeRows.map(emp => (
+                <option key={emp.uid} value={emp.uid}>
+                  {emp.name}{emp.role ? ` - ${emp.role}` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+
       <section>
         <div className="flex items-baseline gap-2 mb-3">
-          <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">My ROs</h2>
+          <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">
+            {isManager && viewUid !== user.uid ? `${viewingName}'s ROs` : 'My ROs'}
+          </h2>
           <span className="text-sm text-gray-400 dark:text-zinc-500">
             {assignedROs.length} assigned · sorted by priority
           </span>
@@ -597,7 +643,9 @@ export default function TaskBoard() {
 
       <section>
         <div className="flex items-baseline gap-2 mb-3">
-          <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">Daily Tasks</h2>
+          <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">
+            {isManager && viewUid !== user.uid ? `${viewingName}'s Daily Tasks` : 'Daily Tasks'}
+          </h2>
           <span className="text-sm text-gray-400 dark:text-zinc-500">
             {activeTasks.length} active{isManager && ' · drag to reorder'}
           </span>
