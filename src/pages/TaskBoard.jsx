@@ -283,8 +283,7 @@ function MobileAssignedROCard({ ro }) {
 }
 
 function DailyTaskRow({
-  task, isManager, isDragging, isOver,
-  onDragStart, onDragEnd, onDragOver, onDrop,
+  task,
   onStatusChange, onNote,
 }) {
   const [noteOpen, setNoteOpen] = useState(false)
@@ -307,22 +306,12 @@ function DailyTaskRow({
 
   return (
     <div
-      draggable={isManager && !isDone}
-      onDragStart={isManager ? onDragStart : undefined}
-      onDragEnd={isManager ? onDragEnd : undefined}
-      onDragOver={isManager ? onDragOver : undefined}
-      onDrop={isManager ? onDrop : undefined}
       className={`rounded-lg border bg-white dark:bg-zinc-800/90 transition-all
         ${isDone ? 'opacity-50' : ''}
-        ${isDragging ? 'opacity-40 scale-[0.98]' : ''}
-        ${isOver ? 'border-blue-400 dark:border-blue-500 shadow-sm' : 'border-gray-100 dark:border-zinc-700'}
+        border-gray-100 dark:border-zinc-700
       `}
     >
       <div className="flex items-start gap-2.5 px-3 py-2.5">
-        {isManager && !isDone && (
-          <span className="mt-0.5 shrink-0 cursor-grab active:cursor-grabbing text-gray-300 dark:text-zinc-600 select-none">::</span>
-        )}
-
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-gray-800 dark:text-gray-100 leading-snug">
             {displayTaskTitle(task)}
@@ -379,15 +368,35 @@ function DailyTaskRow({
 
 function DailyTaskGroupCard({
   group, isManager, dragId, overId, setDragId, setOverId,
-  onDrop, onStatusChange, onNote,
+  onDrop, onStatusChange, onNote, draggable = true,
 }) {
+  const canDrag = isManager && draggable
+  const isDragging = dragId === group.id
+  const isOver = overId === group.id
+
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-800/90">
+    <div
+      draggable={canDrag}
+      onDragStart={canDrag ? () => setDragId(group.id) : undefined}
+      onDragEnd={canDrag ? () => { setDragId(null); setOverId(null) } : undefined}
+      onDragOver={canDrag ? e => { e.preventDefault(); setOverId(group.id) } : undefined}
+      onDrop={canDrag ? onDrop : undefined}
+      className={`rounded-xl border bg-white p-3 shadow-sm transition-all dark:bg-zinc-800/90
+        ${canDrag ? 'cursor-grab active:cursor-grabbing' : ''}
+        ${isDragging ? 'opacity-50 scale-[0.99]' : ''}
+        ${isOver ? 'border-blue-400 shadow-md dark:border-blue-500' : 'border-gray-200 dark:border-zinc-700'}
+      `}
+    >
       <div className="mb-2 flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <Link to={`/ro/${group.roId}`} className="font-mono text-xs font-bold text-blue-600 hover:underline dark:text-blue-400">
-            RO#{group.roNumber}
-          </Link>
+          <div className="flex items-center gap-2">
+            {canDrag && (
+              <span className="shrink-0 select-none text-xs font-bold text-gray-300 dark:text-zinc-600" title="Drag to reorder">::</span>
+            )}
+            <Link to={`/ro/${group.roId}`} className="font-mono text-xs font-bold text-blue-600 hover:underline dark:text-blue-400">
+              RO#{group.roNumber}
+            </Link>
+          </div>
           {group.vehicleInfo && (
             <p className="mt-0.5 truncate text-xs text-gray-400 dark:text-zinc-500">{group.vehicleInfo}</p>
           )}
@@ -401,13 +410,6 @@ function DailyTaskGroupCard({
           <DailyTaskRow
             key={task.id}
             task={task}
-            isManager={isManager}
-            isDragging={dragId === task.id}
-            isOver={overId === task.id}
-            onDragStart={() => setDragId(task.id)}
-            onDragEnd={() => { setDragId(null); setOverId(null) }}
-            onDragOver={e => { e.preventDefault(); setOverId(task.id) }}
-            onDrop={onDrop}
             onStatusChange={onStatusChange}
             onNote={onNote}
           />
@@ -560,19 +562,20 @@ export default function TaskBoard() {
       setOverId(null)
       return
     }
-    const sorted = [...activeTasks]
-    const fromIdx = sorted.findIndex(t => t.id === dragId)
-    const toIdx = sorted.findIndex(t => t.id === overId)
+    const sortedGroups = [...activeTaskGroups]
+    const fromIdx = sortedGroups.findIndex(group => group.id === dragId)
+    const toIdx = sortedGroups.findIndex(group => group.id === overId)
     if (fromIdx === -1 || toIdx === -1) {
       setDragId(null)
       setOverId(null)
       return
     }
-    const reordered = [...sorted]
-    const [moved] = reordered.splice(fromIdx, 1)
-    reordered.splice(fromIdx < toIdx ? toIdx : toIdx, 0, moved)
+    const reorderedGroups = [...sortedGroups]
+    const [moved] = reorderedGroups.splice(fromIdx, 1)
+    reorderedGroups.splice(toIdx, 0, moved)
+    const reorderedTasks = reorderedGroups.flatMap(group => group.tasks)
     const batch = writeBatch(db)
-    reordered.forEach((t, i) => batch.update(doc(db, 'tasks', t.id), { sortOrder: i * 1000 }))
+    reorderedTasks.forEach((t, i) => batch.update(doc(db, 'tasks', t.id), { sortOrder: i * 1000 }))
     setDragId(null)
     setOverId(null)
     try {
@@ -695,6 +698,7 @@ export default function TaskBoard() {
                     onDrop={() => {}}
                     onStatusChange={handleStatusChange}
                     onNote={handleTaskNote}
+                    draggable={false}
                   />
                 ))}
               </div>
