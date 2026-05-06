@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import {
   arrayUnion, collection, doc, onSnapshot, serverTimestamp, updateDoc, writeBatch,
 } from 'firebase/firestore'
-import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
+import { differenceInCalendarDays, format, isValid, parseISO, subDays } from 'date-fns'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
@@ -33,6 +33,16 @@ function fmtDate(s) {
     return isValid(d) ? format(d, 'M/dd') : s
   } catch {
     return s
+  }
+}
+
+function fmtPaintDue(s) {
+  if (!s) return null
+  try {
+    const d = parseISO(s)
+    return isValid(d) ? format(subDays(d, 1), 'M/dd') : null
+  } catch {
+    return null
   }
 }
 
@@ -105,12 +115,45 @@ function groupTasksByRO(list) {
     }
   }
   return [...map.values()]
-    .map(group => ({ ...group, tasks: [...group.tasks].sort((a, b) => taskSortKey(a) - taskSortKey(b)) }))
+    .map(group => ({ ...group, tasks: dedupeTasks([...group.tasks].sort((a, b) => taskSortKey(a) - taskSortKey(b))) }))
     .sort((a, b) => a.sortKey - b.sortKey)
+}
+
+function semanticTaskKey(task) {
+  const title = (task.title || '').toLowerCase()
+  const description = (task.description || '').toLowerCase()
+  const text = `${title} ${description}`
+  if (task.category === 'body' || /\b(teardown|tear down|process repair|perform teardown)\b/.test(text)) return 'teardown'
+  return title.replace(/\b(on|for|the|a|an|vehicle|car)\b/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim() || task.id
+}
+
+function statusRank(status) {
+  if (status === 'in_progress') return 3
+  if (status === 'pending') return 2
+  if (status === 'completed') return 1
+  return 0
+}
+
+function dedupeTasks(list) {
+  const map = new Map()
+  for (const task of list) {
+    const key = semanticTaskKey(task)
+    const current = map.get(key)
+    if (!current || statusRank(task.status) > statusRank(current.status) || taskSortKey(task) > taskSortKey(current)) {
+      map.set(key, task)
+    }
+  }
+  return [...map.values()].sort((a, b) => taskSortKey(a) - taskSortKey(b))
+}
+
+function displayTaskTitle(task) {
+  if (semanticTaskKey(task) === 'teardown') return 'Teardown'
+  return task.title || 'Task'
 }
 
 function AssignedROCard({ ro }) {
   const eta = etaOf(ro)
+  const paintDue = fmtPaintDue(eta)
   const priority = roEtaPriority(ro)
   const status = STATUS_MAP[ro.status]
   const ps = PRIORITY_STYLE[priority] ?? PRIORITY_STYLE.low
@@ -118,27 +161,28 @@ function AssignedROCard({ ro }) {
   return (
     <Link
       to={`/ro/${ro.id}`}
-      className={`block bg-white dark:bg-zinc-800/90 rounded-xl border border-gray-200 dark:border-zinc-700 shadow-sm hover:shadow-md hover:border-gray-300 dark:hover:border-zinc-600 transition-all p-3.5 ${ps.bar}`}
+      className={`block overflow-hidden bg-white dark:bg-zinc-800/90 rounded-xl border border-gray-200 dark:border-zinc-700 shadow-sm hover:shadow-md hover:border-gray-300 dark:hover:border-zinc-600 transition-all p-3.5 ${ps.bar}`}
     >
       <div className="flex items-start justify-between gap-2 mb-2">
         <span className="font-mono text-sm font-extrabold text-gray-900 dark:text-gray-100">
           #{ro.roNumber}
         </span>
-        <div className="flex flex-wrap justify-end gap-1 shrink-0">
-          <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${ps.tag}`}>
-            {priority.toUpperCase()}
+        <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-bold ${ps.tag}`}>
+          {priority.toUpperCase()}
+        </span>
+      </div>
+
+      <div className="mb-2 flex min-w-0 gap-1">
+        {ro.partsStatus && (
+          <span className={`min-w-0 truncate text-[10px] px-1.5 py-0.5 rounded font-semibold ${partsClass(ro.partsStatus)}`}>
+            {PARTS_LABEL[ro.partsStatus] ?? ro.partsStatus}
           </span>
-          {ro.partsStatus && (
-            <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${partsClass(ro.partsStatus)}`}>
-              {PARTS_LABEL[ro.partsStatus] ?? ro.partsStatus}
-            </span>
-          )}
-          {status && (
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${status.color}`}>
-              {status.label}
-            </span>
-          )}
-        </div>
+        )}
+        {status && (
+          <span className={`min-w-0 truncate text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${status.color}`}>
+            {status.label}
+          </span>
+        )}
       </div>
 
       <p className="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate leading-snug">
@@ -168,8 +212,8 @@ function AssignedROCard({ ro }) {
         <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${rentalClass(ro)}`}>
           {rentalText(ro)}
         </span>
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${eta ? 'bg-violet-50 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300' : 'bg-gray-100 text-gray-400 dark:bg-zinc-700 dark:text-zinc-500'}`}>
-          {eta ? `Paint due ${fmtDate(eta)}` : 'No paint due'}
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${paintDue ? 'bg-violet-50 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300' : 'bg-gray-100 text-gray-400 dark:bg-zinc-700 dark:text-zinc-500'}`}>
+          {paintDue ? `Paint due ${paintDue}` : 'No paint due'}
         </span>
       </div>
     </Link>
@@ -178,6 +222,7 @@ function AssignedROCard({ ro }) {
 
 function MobileAssignedROCard({ ro }) {
   const eta = etaOf(ro)
+  const paintDue = fmtPaintDue(eta)
   const status = STATUS_MAP[ro.status]
   const priority = roEtaPriority(ro)
 
@@ -228,8 +273,8 @@ function MobileAssignedROCard({ ro }) {
           <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${rentalClass(ro)}`}>
             {rentalText(ro)}
           </span>
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${eta ? 'bg-violet-50 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300' : 'bg-gray-100 text-gray-400 dark:bg-zinc-700 dark:text-zinc-500'}`}>
-            {eta ? `Paint due ${fmtDate(eta)}` : 'No paint due'}
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${paintDue ? 'bg-violet-50 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300' : 'bg-gray-100 text-gray-400 dark:bg-zinc-700 dark:text-zinc-500'}`}>
+            {paintDue ? `Paint due ${paintDue}` : 'No paint due'}
           </span>
         </div>
       </article>
@@ -280,11 +325,8 @@ function DailyTaskRow({
 
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-gray-800 dark:text-gray-100 leading-snug">
-            {task.title || 'Task'}
+            {displayTaskTitle(task)}
           </p>
-          {task.description && (
-            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5 line-clamp-2">{task.description}</p>
-          )}
           {task.taskNotes?.length > 0 && (
             <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1 italic leading-snug">
               "{task.taskNotes[task.taskNotes.length - 1].text}"
