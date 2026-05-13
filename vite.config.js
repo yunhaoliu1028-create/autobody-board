@@ -7,6 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      injectRegister: 'auto',
       includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
       manifest: {
         name: 'CS SCA Collision Board',
@@ -24,6 +25,8 @@ export default defineConfig({
         ],
       },
       workbox: {
+        skipWaiting: true,
+        clientsClaim: true,
         // Cache app shell + static assets
         globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
         // Don't cache Firebase API calls or Anthropic calls

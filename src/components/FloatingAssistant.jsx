@@ -187,8 +187,14 @@ export default function FloatingAssistant({ inline = false, onBack }) {
     setLoading(true)
 
     try {
-      const result = await askShopAssistant({ messages: nextMsgs, ros, employees })
-      setMessages(prev => [...prev, { role: 'assistant', content: result.reply ?? '...' }])
+      const caller = employees.find(e => e.uid === user?.uid)
+      const result = await askShopAssistant({
+        messages: nextMsgs, ros, employees,
+        callerName: caller?.name ?? null,
+        callerRole: caller?.role ?? null,
+      })
+      const replyText = result.reply && result.reply !== '...' ? result.reply : '⚠️ No response text returned. Please try again.'
+      setMessages(prev => [...prev, { role: 'assistant', content: replyText }])
       if (result.actions?.length)     setPendingActions(result.actions)
       if (result.smsText)             setSmsDraft(result.smsText)
       // Save any new memory facts the AI identified

@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mobile Worker View Mockup</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08090d;
+      --panel: #16171d;
+      --panel2: #1d1f26;
+      --line: rgba(255,255,255,.09);
+      --muted: #8f96a6;
+      --text: #f4f5f8;
+      --blue: #64a2ff;
+      --green: #57d38b;
+      --amber: #e7b957;
+      --red: #ff6b78;
+      --cyan: #58cad7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at top, rgba(100,162,255,.08), transparent 34rem), var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button { font: inherit; border: 0; cursor: pointer; }
+    .frame {
+      position: relative;
+      width: min(420px, 100vw);
+      height: min(900px, 100vh);
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 26px;
+      background: var(--bg);
+      box-shadow: 0 28px 90px rgba(0,0,0,.55);
+    }
+    .screen { height: 100%; overflow: auto; padding: 20px 14px 86px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }
+    .hello h1 { margin: 0; font-size: 22px; line-height: 1.05; font-weight: 680; }
+    .hello p { margin: 6px 0 0; color: var(--muted); font-size: 13px; font-weight: 420; }
+    .avatar {
+      width: 42px; height: 42px; border-radius: 999px; display: grid; place-items: center;
+      background: rgba(100,162,255,.16); border: 1px solid rgba(100,162,255,.28); color: #c8ddff; font-weight: 650;
+    }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+    .stat { padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.035); }
+    .stat b { display: block; font-size: 20px; line-height: 1; font-weight: 650; }
+    .stat span { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; }
+    .chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 8px; }
+    .chip {
+      padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line);
+      background: rgba(255,255,255,.035); color: #cdd2df; font-size: 13px; font-weight: 600; white-space: nowrap;
+    }
+    .chip.active { border-color: rgba(100,162,255,.8); background: rgba(100,162,255,.14); color: #e4efff; }
+    .section-title { display: flex; align-items: baseline; gap: 7px; margin: 13px 0 8px; }
+    .section-title h2 { margin: 0; font-size: 15px; font-weight: 650; }
+    .section-title span { color: var(--muted); font-size: 12px; }
+    .card {
+      margin-bottom: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 12px;
+      background: rgba(255,255,255,.045);
+    }
+    .card.attention { border-color: var(--line); box-shadow: inset 2px 0 0 rgba(231,185,87,.9); }
+    .card.selected { outline: 1.5px solid rgba(100,162,255,.7); outline-offset: 1px; }
+    .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .ro { color: #84b6ff; font-size: 13px; font-weight: 650; }
+    .vehicle { margin-top: 4px; font-size: 16px; font-weight: 680; line-height: 1.15; }
+    .sub { margin-top: 4px; font-size: 12px; color: var(--muted); }
+    .badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+    .badge { border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 620; color: #d9dde8; white-space: nowrap; background: rgba(255,255,255,.07); }
+    .badge.blue { background: rgba(100,162,255,.15); color: #cfe2ff; }
+    .badge.green { background: rgba(87,211,139,.16); color: #baf3ce; }
+    .badge.amber { background: rgba(231,185,87,.16); color: #f4d89b; }
+    .badge.red { background: rgba(255,107,120,.16); color: #ffc2c8; }
+    .badge.cyan { background: rgba(88,202,215,.15); color: #b8f3f8; }
+    .task-state {
+      min-width: 62px;
+      min-height: 26px;
+      border-radius: 999px;
+      border: 1px solid rgba(100,162,255,.65);
+      background: transparent;
+      color: #cfe2ff;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 620;
+    }
+    .task-state.working { border-color: rgba(231,185,87,.55); background: rgba(231,185,87,.14); color: #f4d89b; }
+    .task-state.done { border-color: rgba(87,211,139,.42); background: rgba(87,211,139,.14); color: #baf3ce; }
+    .task-item.done p { color: #7f8797; text-decoration: line-through; }
+    .task-line {
+      margin-top: 12px; border: 0; background: transparent;
+      border-radius: 0; padding: 0;
+    }
+    .task-line.multi { display: grid; gap: 0; }
+    .task-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .label { color: var(--muted); font-size: 11px; font-weight: 620; text-transform: uppercase; }
+    .done-count { color: #8f96a8; font-size: 11px; font-weight: 520; }
+    .task-item { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,.06); border-radius: 0; background: transparent; }
+    .task-item:last-child { border-bottom: 0; }
+    .task-dot { width: 21px; height: 21px; border-radius: 999px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.18); color: #8f96a8; font-size: 12px; font-weight: 650; }
+    .task-dot.working { border-color: rgba(231,185,87,.55); color: #f4d89b; }
+    .task-dot.done { border-color: rgba(87,211,139,.45); background: rgba(87,211,139,.16); color: #baf3ce; }
+    .task-copy p { margin: 0; font-size: 14px; font-weight: 620; line-height: 1.15; }
+    .task-copy span { display: block; margin-top: 3px; color: #777f91; font-size: 11px; font-weight: 420; }
+    .task-line > p { margin: 0; font-size: 14px; font-weight: 620; line-height: 1.2; }
+    .last { margin: 10px 0 0; color: #a3a8b8; font-size: 12px; line-height: 1.35; }
+    .parts-line {
+      margin-top: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.045);
+      border: 1px solid rgba(255,255,255,.07);
+      padding: 5px 9px;
+      color: #c7ccd8;
+      font-size: 12px;
+      font-weight: 520;
+    }
+    .status-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .status-row:empty { display: none; }
+    .status-pill {
+      min-height: 28px; border-radius: 999px; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.06);
+      color: #cdd2df; padding: 0 10px; font-size: 12px; font-weight: 620;
+    }
+    .status-pill.active { background: rgba(100,162,255,.16); border-color: rgba(100,162,255,.45); color: #dbeafe; }
+    .status-pill.warn { background: rgba(231,185,87,.14); border-color: rgba(231,185,87,.38); color: #f4d89b; }
+    .standalone { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .standalone h3 { margin: 0; font-size: 14px; font-weight: 620; line-height: 1.25; }
+    .standalone p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .btn {
+      min-height: 38px; border-radius: 10px; border: 1px solid rgba(255,255,255,.1);
+      background: rgba(255,255,255,.055); color: #dce1ed; font-size: 13px; font-weight: 620;
+    }
+    .btn.warn { background: rgba(231,185,87,.12); border-color: rgba(231,185,87,.35); color: #f4d89b; }
+    .btn.active { background: rgba(100,162,255,.16); border-color: rgba(100,162,255,.55); color: #eef6ff; }
+    .drawer {
+      position: absolute; left: 10px; right: 10px; bottom: 84px; padding: 12px;
+      border: 1px solid var(--line); border-radius: 16px; background: rgba(18,20,27,.94);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 55px rgba(0,0,0,.55);
+      opacity: 0; transform: translateY(12px); pointer-events: none; transition: .16s ease;
+    }
+    .drawer.open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+    .drawer h3 { margin: 0; font-size: 14px; font-weight: 640; }
+    .drawer-close {
+      width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+      border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.06); color: #cfd6e6;
+    }
+    .drawer-close svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .drawer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .drawer-hint {
+      margin: 8px 0 0;
+      display: grid;
+      gap: 4px;
+      color: #8f96a6;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .bottom { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 14px 14px; background: linear-gradient(transparent, rgba(8,9,13,.9) 25%, var(--bg)); }
+    .mini-gib { display: flex; align-items: center; gap: 6px; border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.065); border-radius: 18px; padding: 5px; backdrop-filter: blur(14px); }
+    .mini-gib input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; font-weight: 420; }
+    .mini-icon {
+      width: 32px; height: 32px; display: grid; place-items: center; border-radius: 999px;
+      border: 0; background: transparent; color: #cfd6e6;
+    }
+    .mini-icon svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    @media (max-width: 460px) { .frame { width: 100vw; height: 100vh; border-radius: 0; border: 0; } }
+  </style>
+</head>
+<body>
+  <main class="frame">
+    <section class="screen">
+      <div class="topbar">
+        <div class="hello"><h1>Good morning, Gustavo</h1><p>Body technician · Friday, May 8</p></div>
+        <div class="avatar">GM</div>
+      </div>
+      <div class="stats">
+        <div class="stat"><b>3</b><span>Active</span></div>
+        <div class="stat"><b>2</b><span>Due soon</span></div>
+        <div class="stat"><b style="color:var(--amber)">1</b><span>Blocked</span></div>
+      </div>
+      <div class="chips">
+        <button class="chip active">Today</button><button class="chip">Due Soon</button><button class="chip">Waiting on Me</button><button class="chip">Done</button>
+      </div>
+      <div class="section-title"><h2>My ROs</h2></div>
+
+      <article class="card attention" data-ro-card="9560">
+        <div class="card-head">
+          <div><div class="ro">#9560</div><div class="vehicle">2025 Hyundai Ioniq 5</div><div class="sub">Atlas White · Aspire General</div></div>
+          <div class="badges"><span class="badge blue">Body Work</span><span class="badge amber">Due 5/15</span></div>
+        </div>
+        <div class="parts-line">Parts: 0/16 received</div>
+        <div class="task-line multi" data-task-group>
+          <div class="task-head"><div class="label">Tasks</div><span class="done-count">0/2 done</span></div>
+          <div class="task-item"><span class="task-dot">○</span><div class="task-copy"><p>Teardown</p><span>process repair</span></div><button class="task-state" data-task-state>Start</button></div>
+          <div class="task-item"><span class="task-dot">○</span><div class="task-copy"><p>Progress photos</p><span>repair update</span></div><button class="task-state" data-task-state>Start</button></div>
+        </div>
+        <div class="status-row" data-status-display="9560"></div>
+      </article>
+
+      <article class="card" data-ro-card="9556">
+        <div class="card-head">
+          <div><div class="ro">#9556</div><div class="vehicle">2019 MINI Cooper Convertible</div><div class="sub">Midnight Black · Progressive</div></div>
+          <div class="badges"><span class="badge cyan">QC / Detail</span><span class="badge red">Due 5/08</span></div>
+        </div>
+        <div class="parts-line">Parts: 1/1 received</div>
+        <div class="task-line multi" data-task-group>
+          <div class="task-head"><div class="label">Tasks</div><span class="done-count">0/2 done</span></div>
+          <div class="task-item"><span class="task-dot working">◐</span><div class="task-copy"><p>Fitment check</p><span>rear bumper gap</span></div><button class="task-state working" data-task-state>Working</button></div>
+          <div class="task-item"><span class="task-dot">○</span><div class="task-copy"><p>Gap photos</p><span>before detail</span></div><button class="task-state" data-task-state>Start</button></div>
+        </div>
+        <div class="status-row" data-status-display="9556"></div>
+      </article>
+
+      <article class="card" data-ro-card="9531">
+        <div class="card-head">
+          <div><div class="ro">#9531</div><div class="vehicle">2024 Tesla Model Y</div><div class="sub">Pearl White · Farmers</div></div>
+          <div class="badges"><span class="badge green">Ready</span><span class="badge amber">Due 5/08</span></div>
+        </div>
+        <div class="parts-line">Parts: all received</div>
+        <div class="task-line multi" data-task-group>
+          <div class="task-head"><div class="label">Tasks</div><span class="done-count">1/1 done</span></div>
+          <div class="task-item done"><span class="task-dot done">✓</span><div class="task-copy"><p>Final photos</p><span>before pickup</span></div><button class="task-state done" data-task-state>Done</button></div>
+        </div>
+        <div class="status-row" data-status-display="9531"></div>
+      </article>
+
+      <div class="section-title"><h2>Other Tasks</h2></div>
+      <article class="card standalone"><div><h3>Call SM Toyota on parts status</h3><p>By Aaron · Today · medium priority</p></div><button class="btn" style="width:70px">Done</button></article>
+    </section>
+
+    <aside class="drawer" id="quickDrawer">
+      <div class="drawer-head">
+        <h3>Quick action for #9560</h3>
+        <button class="drawer-close" id="drawerClose" aria-label="Collapse quick action">
+          <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+      </div>
+      <div class="drawer-grid">
+        <button class="btn warn" data-status="Needs parts">Needs parts</button>
+        <button class="btn warn" data-status="Supp damage">Supp Damage</button>
+      </div>
+      <div class="drawer-hint" id="drawerHint">
+        <div>Needs parts creates a Parts Manager task.</div>
+        <div>Supp Damage notifies the estimator / manager.</div>
+      </div>
+    </aside>
+
+    <div class="bottom">
+      <div class="mini-gib">
+        <button class="mini-icon" aria-label="Voice"><svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/></svg></button>
+        <input id="miniGibInput" placeholder="Update..." />
+        <button class="mini-icon" aria-label="Photo"><svg viewBox="0 0 24 24"><path d="M5 7h3l1.4-2h5.2L16 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
+      </div>
+    </div>
+  </main>
+  <script>
+    const drawer = document.getElementById('quickDrawer')
+    let selectedRo = '9560'
+
+    function renderStatuses(ro) {
+      const display = document.querySelector(`[data-status-display="${ro}"]`)
+      const miniInput = document.getElementById('miniGibInput')
+      if (!display) return
+      display.innerHTML = ''
+      drawer.querySelectorAll('[data-status].active').forEach((btn) => {
+        const pill = document.createElement('button')
+        pill.className = `status-pill active${btn.classList.contains('warn') ? ' warn' : ''}`
+        pill.textContent = btn.dataset.status === 'Needs parts'
+          ? 'Parts notified'
+          : 'Estimator notified'
+        display.appendChild(pill)
+      })
+      const activeStatuses = [...drawer.querySelectorAll('[data-status].active')].map(btn => btn.dataset.status)
+      if (activeStatuses.includes('Supp damage')) {
+        miniInput.placeholder = 'Describe supplement damage...'
+      } else if (activeStatuses.includes('Needs parts')) {
+        miniInput.placeholder = 'What parts issue?'
+      } else {
+        miniInput.placeholder = 'Update...'
+      }
+    }
+
+    document.querySelectorAll('[data-ro-card]').forEach((card) => {
+      card.addEventListener('click', () => {
+        selectedRo = card.dataset.roCard
+        document.querySelectorAll('[data-ro-card]').forEach(c => c.classList.remove('selected'))
+        card.classList.add('selected')
+        drawer.querySelector('h3').textContent = `Quick action for #${selectedRo}`
+        drawer.classList.add('open')
+      })
+    })
+
+    drawer.querySelectorAll('[data-status]').forEach((button) => {
+      button.addEventListener('click', () => {
+        button.classList.toggle('active')
+        renderStatuses(selectedRo)
+      })
+    })
+
+    document.querySelectorAll('[data-task-state]').forEach((button) => {
+      const states = ['Start', 'Working', 'Done']
+      button.addEventListener('click', (event) => {
+        event.stopPropagation()
+        const next = states[(states.indexOf(button.textContent) + 1) % states.length]
+        button.textContent = next
+        button.classList.toggle('working', next === 'Working')
+        button.classList.toggle('done', next === 'Done')
+        const item = button.closest('.task-item')
+        const dot = item?.querySelector('.task-dot')
+        item?.classList.toggle('done', next === 'Done')
+        dot?.classList.toggle('working', next === 'Working')
+        dot?.classList.toggle('done', next === 'Done')
+        if (dot) dot.textContent = next === 'Done' ? '✓' : next === 'Working' ? '◐' : '○'
+        const group = button.closest('[data-task-group]')
+        const total = group?.querySelectorAll('[data-task-state]').length ?? 0
+        const done = group?.querySelectorAll('[data-task-state].done').length ?? 0
+        const count = group?.querySelector('.done-count')
+        if (count) count.textContent = `${done}/${total} done`
+      })
+    })
+
+    document.getElementById('drawerClose').addEventListener('click', (event) => {
+      event.stopPropagation()
+      drawer.classList.remove('open')
+      document.querySelectorAll('[data-ro-card]').forEach(c => c.classList.remove('selected'))
+    })
+  </script>
+</body>
+</html>
+

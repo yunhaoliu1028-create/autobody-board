@@ -1,5 +1,30 @@
 const NOTE_HIGHLIGHTS = [
   {
+    label: 'Parts',
+    className: 'bg-orange-100 text-orange-800 dark:bg-orange-900/50 dark:text-orange-200',
+    pattern: /\b(parts?|parts? ordered|parts? received|all received|partially received|parts? arrived|parts? delayed|back ?ordered|ETA|eta|零件|料)\b/gi,
+  },
+  {
+    label: 'Paint',
+    className: 'bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-200',
+    pattern: /\b(paint|in paint|paint prep|paint booth|paint complete|paint done|entered (paint|booth)|喷漆|油漆)\b/gi,
+  },
+  {
+    label: 'Body Work',
+    className: 'bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200',
+    pattern: /\b(body|body work|body complete|body done|teardown|tear ?down|板金|拆解)\b/gi,
+  },
+  {
+    label: 'Reassembly',
+    className: 'bg-sky-100 text-sky-800 dark:bg-sky-900/50 dark:text-sky-200',
+    pattern: /\b(reassembly|reassembl[yi]|assembly|装配|复原)\b/gi,
+  },
+  {
+    label: 'Sublet',
+    className: 'bg-teal-100 text-teal-800 dark:bg-teal-900/50 dark:text-teal-200',
+    pattern: /\b(sublet|calibration|alignment|4WA|4-?wheel|AC recharge|窗膜|贴膜)\b/gi,
+  },
+  {
     label: 'Repair Authorization',
     className: 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200',
     pattern: /\b(repair authorization|repair authorized|authorization|authorized|auth(?:orization)? pending|approved repair|repair approved)\b/gi,
@@ -10,24 +35,19 @@ const NOTE_HIGHLIGHTS = [
     pattern: /\b(vehicle\s+)?(dropped off|drop-?off|drop off|d\/o)\b/gi,
   },
   {
-    label: 'Customer Concern',
+    label: 'Customer',
     className: 'bg-rose-100 text-rose-800 dark:bg-rose-900/50 dark:text-rose-200',
-    pattern: /\b(customer concern|customer concerned|concern|concerned)\b/gi,
+    pattern: /\b(customer concern|customer concerned|concern|concerned|called customer|customer called|customer notified|customer updated)\b/gi,
   },
   {
     label: 'Supplement',
     className: 'bg-violet-100 text-violet-800 dark:bg-violet-900/50 dark:text-violet-200',
-    pattern: /\b(supp|supplement|pending on supp)\b/gi,
+    pattern: /\b(supp|supplement|pending on supp|补项)\b/gi,
   },
   {
-    label: 'Release Vehicle',
+    label: 'Ready / Delivery',
     className: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200',
-    pattern: /\b(release vehicle|vehicle release|release to customer|released|ready for pickup|ready for pick up|customer pickup)\b/gi,
-  },
-  {
-    label: 'Repair Status',
-    className: 'bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200',
-    pattern: /\b(repair status|status update|repair update|in repair|repair complete|repairs? completed?|work in progress)\b/gi,
+    pattern: /\b(release vehicle|vehicle release|release to customer|released|ready for pickup|ready for pick-?up|customer pickup|delivery|delivered|交车)\b/gi,
   },
 ]
 

@@ -337,9 +337,6 @@ export default function AddEditRO() {
                 ))}
               </select>
             </Field>
-            <Field label="Parts Notes">
-              <input className={INPUT} value={form.partsNotes} onChange={set('partsNotes')} placeholder="Backordered items, ETA…" />
-            </Field>
           </div>
         </div>
 

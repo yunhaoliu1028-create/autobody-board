@@ -20,6 +20,7 @@ export const ROLE_LABELS = {
 
 export const MANAGER_ROLES = [ROLES.SHOP_MANAGER, ROLES.PRODUCTION_MANAGER]
 export const EDIT_RO_ROLES = [ROLES.SHOP_MANAGER, ROLES.PRODUCTION_MANAGER, ROLES.ESTIMATOR]
+export const WORKER_ROLES = [ROLES.BODY_MAN, ROLES.PAINTER, ROLES.PAINT_HELPER]
 
 export const RO_STATUSES = [
   {
@@ -77,8 +78,8 @@ export const RO_STATUSES = [
     dot:   'bg-sky-500 dark:bg-sky-400',
   },
   {
-    key: 'calibration',
-    label: 'Calibration',
+    key: 'sublet',
+    label: 'Calibration & Sublet',
     color: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200',
     dot:   'bg-emerald-500 dark:bg-emerald-400',
   },
@@ -105,11 +106,12 @@ export const RO_STATUSES = [
 export const STATUS_MAP = Object.fromEntries(RO_STATUSES.map(s => [s.key, s]))
 
 export const ROLE_STATUS_FILTER = {
-  body_man:      ['teardown', 'waiting_parts', 'body_work', 'body_complete', 'reassembly'],
+  body_man:      ['teardown', 'waiting_parts', 'body_work', 'body_complete', 'reassembly', 'detail'],
   painter:       ['paint_prep', 'in_paint', 'paint_complete'],
   paint_helper:  ['paint_prep', 'in_paint', 'paint_complete'],
-  parts_manager: ['checked_in', 'teardown', 'waiting_parts', 'body_work'],
-  estimator:     null,
+  // Parts manager tracks parts from check-in through body work; also sees reassembly for return parts
+  parts_manager: ['checked_in', 'teardown', 'waiting_parts', 'body_work', 'body_complete', 'reassembly'],
+  estimator:     null,  // estimator sees all ROs (writes estimates + orders parts)
 }
 
 export const PARTS_STATUSES = [
@@ -153,7 +155,7 @@ export const STATUS_GROUPS = [
   {
     key:      'REASSEM',
     label:    'Reassembly',
-    statuses: ['reassembly', 'calibration', 'detail'],
+    statuses: ['reassembly', 'sublet', 'detail'],
     color:    'bg-sky-50 dark:bg-sky-900/30',
     header:   'text-sky-700 dark:text-sky-300',
     accent:   'border-sky-300 dark:border-sky-700',

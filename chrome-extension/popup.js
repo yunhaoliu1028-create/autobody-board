@@ -18,6 +18,7 @@ let idToken      = null
 let refreshToken = null
 let scannedROs   = []           // all ROs from CCC
 let existingROs  = new Map()    // roNumber → { docName, totalAmount, cccColumn, status, vehicle, customerName }
+let users         = []           // { uid, name, role } for CCC estimator auto-assignment
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -375,6 +376,44 @@ async function loadExistingROs() {
   }
 }
 
+function normalizeName(value = '') {
+  return value.toString().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function findUserByName(rawName = '', roles = []) {
+  const target = normalizeName(rawName)
+  if (!target) return null
+  const targetParts = target.split(' ').filter(Boolean)
+  const candidates = users.filter(u => !roles.length || roles.includes(u.role))
+  return candidates.find(u => {
+    const name = normalizeName(u.name)
+    if (!name) return false
+    if (name === target) return true
+    const nameParts = name.split(' ').filter(Boolean)
+    return targetParts.every(part =>
+      nameParts.some(namePart => namePart === part || namePart.startsWith(part) || part.startsWith(namePart))
+    )
+  }) || null
+}
+
+async function loadUsers() {
+  users = []
+  try {
+    const fields = ['name','email','role']
+    const mask   = fields.map(f => `mask.fieldPaths=${encodeURIComponent(f)}`).join('&')
+    const res    = await authFetch(`${FIRESTORE_URL}/users?pageSize=200&${mask}`)
+    if (!res.ok) return
+    const data = await res.json()
+    users = (data.documents || []).map(doc => ({
+      uid:  doc.name.split('/').pop(),
+      name: doc.fields?.name?.stringValue || doc.fields?.email?.stringValue || '',
+      role: doc.fields?.role?.stringValue || '',
+    }))
+  } catch (e) {
+    console.warn('[AutoBody] Could not load users:', e)
+  }
+}
+
 // ── Render RO list ────────────────────────────────────────────────────────────
 function renderROList() {
   const list = $('ro-list')
@@ -458,6 +497,7 @@ async function handleSync() {
 
   const results   = []
   const timestamp = new Date().toISOString()
+  await loadUsers()
 
   for (const ro of selected) {
     try {
@@ -530,6 +570,7 @@ function changeLogEntry(type, value, timestamp) {
 //                  null if new RO → POST (create with neutral status)
 // oldData: previous snapshot from existingROs map (for change detection)
 async function writeRO(ro, timestamp, existingDocName, oldData) {
+  const estimatorUser = findUserByName(ro.estimatorName, ['estimator', 'shop_manager', 'production_manager'])
 
   if (existingDocName) {
     // ── COMMIT: update CCC data fields + append changeLog entries atomically ──
@@ -551,6 +592,7 @@ async function writeRO(ro, timestamp, existingDocName, oldData) {
       updatedAt:        strVal(timestamp),
       cccLastSync:      strVal(timestamp),
     }
+    if (estimatorUser?.uid) updateFields.assignedEstimator = strVal(estimatorUser.uid)
 
     // Build changeLog entries for detected field changes
     const logEntries = []
@@ -621,7 +663,7 @@ async function writeRO(ro, timestamp, existingDocName, oldData) {
         paintHrs:         strVal(ro.paintHrs),
         paintCode:        strVal(ro.paintCode),
         notes:            strVal(''),
-        assignedEstimator:    strVal(''),
+        assignedEstimator:    strVal(estimatorUser?.uid || ''),
         assignedBodyMan:      strVal(''),
         assignedPainter:      strVal(''),
         assignedPartsManager: strVal(''),

@@ -4,12 +4,13 @@ import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { ROLE_LABELS, MANAGER_ROLES } from '../constants/roles'
+import { ROLE_LABELS, MANAGER_ROLES, ROLES, WORKER_ROLES } from '../constants/roles'
 import FloatingAssistant from './FloatingAssistant'
 
 // ── SVG Icons ─────────────────────────────────────────────────────────────────
 function IconBoard()    { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="11" rx="1.5"/><rect x="14" y="17" width="7" height="4" rx="1.5"/></svg> }
 function IconTasks()    { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg> }
+function IconParts()    { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 7h16v10H4z"/><path strokeLinecap="round" strokeLinejoin="round" d="M8 7V5h8v2M8 17v2h8v-2M7 11h10M7 14h6"/></svg> }
 function IconMeeting()  { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg> }
 function IconSettings() { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path strokeLinecap="round" strokeLinejoin="round" d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg> }
 function IconTeam()     { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path strokeLinecap="round" strokeLinejoin="round" d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg> }
@@ -125,6 +126,9 @@ function TabIconTasks({ active }) {
 function TabIconChat({ active }) {
   return <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={active ? 2.25 : 1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
 }
+function TabIconSettings({ active }) {
+  return <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={active ? 2.25 : 1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path strokeLinecap="round" strokeLinejoin="round" d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+}
 
 const MOBILE_TABS = [
   { path: '/update', label: 'Update', Icon: TabIconUpdate },
@@ -133,14 +137,25 @@ const MOBILE_TABS = [
   { path: '/chat',   label: 'Chat',   Icon: TabIconChat   },
 ]
 
+const WORKER_MOBILE_TABS = [
+  { path: '/tasks',    label: 'My Work',  Icon: TabIconTasks },
+  { path: '/chat',     label: 'Chat',     Icon: TabIconChat },
+]
+
 // ── Nav items ──────────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { path: '/board',    label: 'RO Board', icon: <IconBoard />,    roles: null },
   { path: '/tasks',    label: 'Tasks',    icon: <IconTasks />,    roles: null },
+  { path: '/parts',    label: 'Parts',    icon: <IconParts />,    roles: [...MANAGER_ROLES, ROLES.PARTS_MANAGER] },
   { path: '/chat',     label: 'Chat',     icon: <IconChat />,     roles: null },
   { path: '/meeting',  label: 'Meeting',  icon: <IconMeeting />,  roles: MANAGER_ROLES },
   { path: '/settings', label: 'Settings', icon: <IconSettings />, roles: null },
   { path: '/admin',    label: 'Team',     icon: <IconTeam />,     roles: MANAGER_ROLES },
+]
+
+const WORKER_NAV_ITEMS = [
+  { path: '/tasks',    label: 'My Work',  icon: <IconTasks />,    roles: null },
+  { path: '/chat',     label: 'Chat',     icon: <IconChat />,     roles: null },
 ]
 
 export default function Layout({ children }) {
@@ -249,26 +264,38 @@ export default function Layout({ children }) {
   const clickNotif   = (notif) => { dismissNotif(notif.id); navigate('/chat', { state: { convoId: notif.convoId } }) }
 
   const handleLogout = async () => { await logout(); navigate('/login') }
-  const visibleNav   = NAV_ITEMS.filter(item => !item.roles || item.roles.includes(role))
+  const isWorkerRole = WORKER_ROLES.includes(role)
+  const navItems     = isWorkerRole ? WORKER_NAV_ITEMS : NAV_ITEMS
+  const mobileTabs   = isWorkerRole ? WORKER_MOBILE_TABS : MOBILE_TABS
+  const visibleNav   = navItems.filter(item => !item.roles || item.roles.includes(role))
+  const workerSwitch  = isWorkerRole ? WORKER_MOBILE_TABS : []
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-zinc-950 flex flex-col font-sans">
 
       {/* ── Top nav ───────────────────────────────────────────────────────── */}
       <header className="bg-white dark:bg-zinc-900 border-b border-gray-200 dark:border-zinc-800 sticky top-0 z-40 pt-safe">
-        <div className="max-w-[1440px] mx-auto px-4 h-14 flex items-center justify-between gap-4">
+        <div className="relative max-w-[1440px] mx-auto px-4 h-14 flex items-center justify-between gap-4">
 
           {/* Logo */}
           <div className="flex items-center gap-2 shrink-0">
-            <div className="w-7 h-7 bg-zinc-900 dark:bg-white rounded-lg flex items-center justify-center">
-              <IconCar />
-            </div>
-            <span className="hidden sm:block font-bold text-sm tracking-tight text-gray-900 dark:text-gray-100">
-              CS SCA Collision
-            </span>
-            <span className="sm:hidden font-bold text-sm tracking-tight text-gray-900 dark:text-gray-100">
-              AutoBody
-            </span>
+            {isWorkerRole ? (
+              <span className="font-semibold text-[13px] tracking-[-0.01em] text-gray-900 dark:text-gray-100">
+                CARSTAR SCA WALNUT
+              </span>
+            ) : (
+              <>
+                <div className="w-7 h-7 bg-zinc-900 dark:bg-white rounded-lg flex items-center justify-center">
+                  <IconCar />
+                </div>
+                <span className="hidden sm:block font-bold text-sm tracking-tight text-gray-900 dark:text-gray-100">
+                  CS SCA Collision
+                </span>
+                <span className="sm:hidden font-bold text-sm tracking-tight text-gray-900 dark:text-gray-100">
+                  AutoBody
+                </span>
+              </>
+            )}
           </div>
 
           {/* Desktop nav */}
@@ -299,6 +326,38 @@ export default function Layout({ children }) {
               )
             })}
           </nav>
+
+          {isWorkerRole && (
+            <nav className="md:hidden absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-zinc-200/70 bg-white/75 p-1 shadow-lg shadow-zinc-300/40 backdrop-blur-xl dark:border-white/10 dark:bg-zinc-800/70 dark:shadow-black/20">
+              <div className="flex items-center gap-1">
+                {workerSwitch.map(({ path, label, Icon }) => {
+                  const active = location.pathname.startsWith(path)
+                  const badge = path === '/chat' && chatUnread > 0 ? chatUnread : 0
+                  return (
+                    <Link
+                      key={path}
+                      to={path}
+                      className={`relative flex h-8 min-w-20 items-center justify-center gap-1.5 rounded-full px-3 text-xs font-semibold transition ${
+                        active
+                          ? 'bg-white text-zinc-950 shadow-sm dark:bg-zinc-100 dark:text-zinc-950'
+                          : 'text-gray-500 hover:text-gray-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+                      }`}
+                    >
+                      <span className="relative">
+                        <Icon active={active} />
+                        {badge > 0 && (
+                          <span className="absolute -top-2 -right-2 min-w-[15px] h-[15px] bg-red-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center px-0.5 leading-none">
+                            {badge > 9 ? '9+' : badge}
+                          </span>
+                        )}
+                      </span>
+                      {label === 'My Work' ? 'Work' : label}
+                    </Link>
+                  )
+                })}
+              </div>
+            </nav>
+          )}
 
           {/* Right side: dark toggle + user + sign out */}
           <div className="flex items-center gap-2 shrink-0">
@@ -364,7 +423,7 @@ export default function Layout({ children }) {
       </header>
 
       {/* ── Page content ──────────────────────────────────────────────────── */}
-      <main className={`flex-1 max-w-[1440px] mx-auto w-full px-4 py-4 md:py-6 md:pb-6 ${chatPanelOpen && location.pathname === '/chat' ? 'pb-safe' : 'pb-tab-safe'}`}>
+      <main className={`flex-1 max-w-[1440px] mx-auto w-full px-4 py-4 md:py-6 md:pb-6 ${chatPanelOpen && location.pathname === '/chat' ? 'pb-safe' : isWorkerRole ? 'pb-safe' : 'pb-tab-safe'}`}>
         {children}
       </main>
 
@@ -374,9 +433,10 @@ export default function Layout({ children }) {
       </div>
 
       {/* ── Mobile bottom tab bar ────────────────────────────────────────── */}
+      {!isWorkerRole && (
       <nav className={`md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 dark:bg-zinc-900/95 backdrop-blur border-t border-gray-200 dark:border-zinc-800 pb-safe transition-transform duration-200 ${chatPanelOpen && location.pathname === '/chat' ? 'translate-y-full' : 'translate-y-0'}`}>
-        <div className="grid grid-cols-4 h-14">
-          {MOBILE_TABS.map(({ path, label, Icon }) => {
+        <div className={`grid h-14 ${mobileTabs.length === 2 ? 'grid-cols-2' : mobileTabs.length === 3 ? 'grid-cols-3' : 'grid-cols-4'}`}>
+          {mobileTabs.map(({ path, label, Icon }) => {
             const isActive = location.pathname.startsWith(path)
             const badge = path === '/chat' && chatUnread > 0 ? chatUnread : 0
             return (
@@ -400,6 +460,7 @@ export default function Layout({ children }) {
           })}
         </div>
       </nav>
+      )}
 
       {/* ── Incoming message popups (above tab bar on mobile) ────────────── */}
       <div className="fixed bottom-20 md:bottom-6 left-4 md:left-6 z-[100] flex flex-col-reverse gap-3 pointer-events-none">

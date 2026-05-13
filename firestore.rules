@@ -57,7 +57,7 @@ service cloud.firestore {
         isManager() ||
         (request.auth.uid == resource.data.assignedTo &&
          request.resource.data.diff(resource.data).affectedKeys()
-           .hasOnly(['status', 'completedAt', 'updatedAt', 'taskNotes']))
+           .hasOnly(['status', 'startedAt', 'completedAt', 'updatedAt', 'taskNotes']))
       );
       allow delete: if isAuth() && isManager();
     }

@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { collection, onSnapshot, query, orderBy, doc, updateDoc, serverTimestamp, arrayUnion } from 'firebase/firestore'
+import { addDoc, collection, onSnapshot, query, orderBy, doc, updateDoc, serverTimestamp, arrayUnion } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
@@ -13,6 +13,7 @@ import {
   STATUS_GROUPS,
 } from '../constants/roles'
 import { parseISO, differenceInDays, isValid, format } from 'date-fns'
+import { getDownstreamTasks } from '../engine/taskRules'
 
 // ── Change detection ──────────────────────────────────────────────────────────
 const PARTS_LABEL = Object.fromEntries(
@@ -68,6 +69,27 @@ function shortInsurance(name) {
   return trimmed || name
 }
 
+function normalizePersonName(value = '') {
+  return value.toString().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function matchEmployeeByName(employees = [], rawName = '', roles = []) {
+  const target = normalizePersonName(rawName)
+  if (!target) return null
+  const targetParts = target.split(' ').filter(Boolean)
+  return employees
+    .filter(emp => !roles.length || roles.includes(emp.role))
+    .find(emp => {
+      const name = normalizePersonName(emp.name)
+      if (!name) return false
+      if (name === target) return true
+      const parts = name.split(' ').filter(Boolean)
+      return targetParts.every(part =>
+        parts.some(namePart => namePart === part || namePart.startsWith(part) || part.startsWith(namePart))
+      )
+    }) || null
+}
+
 function needsDropOffWarning(ro) {
   return !ro.dropOffDate && ro.status !== 'checked_in' && ro.carStatus !== 'pending_dropoff'
 }
@@ -76,6 +98,8 @@ function DropOffInfo({ ro, compact = false }) {
   if (ro.dropOffDate) {
     return <span className={compact ? 'text-xs text-gray-500 dark:text-zinc-300' : ''}>{compact ? `In: ${fmtDate(ro.dropOffDate)}` : fmtDate(ro.dropOffDate)}</span>
   }
+
+  if (!ro.status && !ro.carStatus) return null
 
   return (
     <span className={`inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-900/60 dark:text-amber-200 ${compact ? '' : 'whitespace-nowrap'}`}>
@@ -606,6 +630,22 @@ export default function ROBoard() {
     return unsub
   }, [])   // toast is stable, no need in deps
 
+  useEffect(() => {
+    if (!employeeList.length || !ros.length) return
+    const toAssign = ros
+      .filter(ro => ro.estimatorName && !ro.assignedEstimator)
+      .map(ro => ({ ro, emp: matchEmployeeByName(employeeList, ro.estimatorName, ['estimator', 'shop_manager', 'production_manager']) }))
+      .filter(item => item.emp?.uid)
+      .slice(0, 20)
+
+    toAssign.forEach(({ ro, emp }) => {
+      updateDoc(doc(db, 'ros', ro.id), {
+        assignedEstimator: emp.uid,
+        updatedAt: serverTimestamp(),
+      }).catch(err => console.warn('[ROBoard] estimator auto-assign failed', ro.roNumber, err))
+    })
+  }, [employeeList, ros])
+
   const filtered = useMemo(() => ros.filter(ro => {
     if (ro.status === 'delivered') return false
     const matchStatus = filterStatus === 'all' || ro.status === filterStatus
@@ -635,7 +675,7 @@ export default function ROBoard() {
   const kanbanGroups = useMemo(() => {
     return STATUS_GROUPS.map(group => ({
       ...group,
-      items: filtered.filter(ro => group.statuses.includes(ro.status)),
+      items: filtered.filter(ro => group.statuses.includes(ro.status) || (group.key === 'PENDING' && !ro.status)),
     }))
   }, [filtered])
 
@@ -683,6 +723,36 @@ export default function ROBoard() {
         source: 'drag',
       }),
     })
+    await createDownstreamTasks(newStatus, ro)
+  }
+
+  const createDownstreamTasks = async (newStatus, roData) => {
+    const templates = getDownstreamTasks(newStatus, roData)
+    for (const tmpl of templates) {
+      let assignTo = tmpl.assignedToUid
+      if (!assignTo && tmpl.assignedToRole) {
+        const emp = employeeList.find(e => e.role === tmpl.assignedToRole)
+        assignTo = emp?.uid ?? null
+      }
+      await addDoc(collection(db, 'tasks'), {
+        roId:          roData.id,
+        roNumber:      roData.roNumber,
+        vehicleInfo:   roData.vehicle || roData.vehicleInfo || '',
+        assignedTo:    assignTo,
+        assignedBy:    user.uid,
+        assignedByName: employees[user?.uid] ?? user?.email ?? 'Unknown',
+        assignedAt:    serverTimestamp(),
+        title:         tmpl.title,
+        phase:         tmpl.phase,
+        autoTriggered: true,
+        source:        'auto',
+        status:        'pending',
+        createdAt:     serverTimestamp(),
+        ...(tmpl.noAssigneeNote
+          ? { taskNotes: [{ text: tmpl.noAssigneeNote, by: 'System', at: new Date().toISOString() }] }
+          : {}),
+      })
+    }
   }
 
   const applyPendingToBody = async ({ bodyManUid, painterUid, authorized, dropOffDate, hasRental }) => {
@@ -712,6 +782,8 @@ export default function ROBoard() {
       }),
       notes: prevNotes ? `${noteLine}\n${prevNotes}` : noteLine,
     })
+    const updatedRo = { ...ro, assignedBodyMan: bodyManUid, assignedPainter: painterUid || null }
+    await createDownstreamTasks('teardown', updatedRo)
     setPendingToBody(null)
   }
 

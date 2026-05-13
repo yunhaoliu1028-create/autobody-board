@@ -5,14 +5,14 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  doc, updateDoc, addDoc, collection, onSnapshot,
-  query, where, orderBy, serverTimestamp,
+  doc, updateDoc, deleteDoc, addDoc, collection, onSnapshot,
+  query, where, orderBy, getDocs, deleteField, serverTimestamp,
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { StatusBadge, PartsStatusBadge } from './StatusBadge'
 import { MANAGER_ROLES, PARTS_STATUSES } from '../constants/roles'
-import HighlightedNote from './HighlightedNote'
+import DailyNotesLog from './DailyNotesLog'
 import { format } from 'date-fns'
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -28,76 +28,23 @@ const TASK_STATUS  = {
   completed:   'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300',
 }
 
-// ── Note deduplication ────────────────────────────────────────────────────────
-// Strip timestamp prefix [MM/dd HH:mm - Name] and normalize body for comparison.
-function noteBody(line = '') {
-  return line
-    .replace(/^\[[^\]]+\]\s*/, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase()
-}
-
-function toNoteLines(notes) {
-  if (Array.isArray(notes)) {
-    return notes
-      .map(item => {
-        if (typeof item === 'string') return item
-        const stamp = item.at ? format(new Date(item.at), 'MM/dd HH:mm') : ''
-        const author = item.by ? ` - ${item.by}` : ''
-        const prefix = stamp ? `[${stamp}${author}] ` : ''
-        return `${prefix}${item.text ?? ''}`.trim()
-      })
-      .filter(Boolean)
-      .reverse()
-  }
-  const entries = []
-  let current = ''
-  ;(notes ?? '').split('\n').forEach(line => {
-    if (/^\[[^\]]+\]/.test(line)) {
-      if (current.trim()) entries.push(current.trim())
-      current = line
-      return
-    }
-    if (!line.trim()) return
-    current = current ? `${current}\n${line}` : line
-  })
-  if (current.trim()) entries.push(current.trim())
-  return entries
-}
-
-function collapseDuplicateNoteLines(lines) {
-  const groups = []
-  const indexByBody = new Map()
-  lines.forEach(line => {
-    const body = noteBody(line)
-    if (!body) return
-    if (indexByBody.has(body)) {
-      groups[indexByBody.get(body)].lines.push(line)
-      return
-    }
-    indexByBody.set(body, groups.length)
-    groups.push({ line, lines: [line] })
-  })
-  return groups
-}
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 export default function RODrawer({ ro, employees, onClose }) {
   const { role, user } = useAuth()
   const isManager = MANAGER_ROLES.includes(role)
+  const isShopManager = role === 'shop_manager'
 
   const [tab,          setTab]          = useState('notes')
   const [tasks,        setTasks]        = useState([])
   const [note,         setNote]         = useState('')
   const [savingNote,   setSavingNote]   = useState(false)
-  const [showAllNotes, setShowAllNotes] = useState(false)
-  const [noteFilter,   setNoteFilter]   = useState('all')
   const [showTaskForm, setShowTaskForm] = useState(false)
   const [taskTo,       setTaskTo]       = useState('')
   const [taskTitle,    setTaskTitle]    = useState('')
   const [taskPriority, setTaskPriority] = useState('medium')
   const [savingTask,   setSavingTask]   = useState(false)
+  const [maintenanceBusy, setMaintenanceBusy] = useState('')
 
   // Load tasks for this RO
   useEffect(() => {
@@ -167,17 +114,73 @@ export default function RODrawer({ ro, employees, onClose }) {
     })
   }
 
+  const deleteTask = async (task) => {
+    if (!isShopManager) return
+    const ok = window.confirm(`Delete task "${task.title || 'Untitled task'}"? This cannot be undone.`)
+    if (!ok) return
+    await deleteDoc(doc(db, 'tasks', task.id))
+  }
+
+  const clearNotes = async () => {
+    if (!isShopManager) return
+    const ok = window.confirm(`Clear all notes for RO #${ro.roNumber}? Status and tasks will stay unchanged.`)
+    if (!ok) return
+    setMaintenanceBusy('notes')
+    try {
+      await updateDoc(doc(db, 'ros', ro.id), {
+        notes: '',
+        noteSummaries: [],
+        updatedAt: serverTimestamp(),
+      })
+    } finally {
+      setMaintenanceBusy('')
+    }
+  }
+
+  const resetWorkflow = async () => {
+    if (!isShopManager) return
+    const ok = window.confirm(
+      `Reset RO #${ro.roNumber} workflow?\n\nThis keeps vehicle/customer/CCC info, but clears notes, workflow status, assignments, parts tracking, and deletes all tasks for this RO. This cannot be undone.`
+    )
+    if (!ok) return
+    setMaintenanceBusy('reset')
+    try {
+      const taskSnap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', ro.id)))
+      await Promise.all(taskSnap.docs.map(taskDoc => deleteDoc(doc(db, 'tasks', taskDoc.id))))
+      await updateDoc(doc(db, 'ros', ro.id), {
+        status: deleteField(),
+        carStatus: deleteField(),
+        partsStatus: deleteField(),
+        dropOffDate: deleteField(),
+        eta: deleteField(),
+        cccDateOut: deleteField(),
+        promisedDate: deleteField(),
+        dateOut: deleteField(),
+        assignedBodyMan: deleteField(),
+        assignedPainter: deleteField(),
+        assignedPartsManager: deleteField(),
+        notes: '',
+        noteSummaries: [],
+        changeLog: [],
+        partsOrders: [],
+        partsReturns: [],
+        customerAuthorized: deleteField(),
+        partsSubtasks: deleteField(),
+        workerFlags: deleteField(),
+        partsDelay: deleteField(),
+        updatedAt: serverTimestamp(),
+        maintenanceResetBy: user.uid,
+        maintenanceResetAt: serverTimestamp(),
+      })
+    } finally {
+      setMaintenanceBusy('')
+    }
+  }
+
   if (!ro) return null
 
-  const noteLines    = toNoteLines(ro.notes)
-  const isCommNote   = line => /^\[Customer\s*-/i.test(line)
-  const filteredLines = noteFilter === 'customer'
-    ? noteLines.filter(isCommNote)
-    : noteLines
-  const noteGroups   = collapseDuplicateNoteLines(filteredLines)
-  const hasCommNotes = noteLines.some(isCommNote)
-  const hiddenDupes  = noteGroups.reduce((sum, item) => sum + Math.max(0, item.lines.length - 1), 0)
-  const openTasks    = tasks.filter(t => t.status !== 'completed').length
+  const noteCount = (ro.notes ?? '').split('\n').filter(l => /^\[[^\]]+\]/.test(l)).length
+  const openTasks = tasks.filter(t => t.status !== 'completed').length
   const empOptions   = Object.entries(employees)
 
   return (
@@ -238,7 +241,7 @@ export default function RODrawer({ ro, employees, onClose }) {
         {/* ── Tab bar ───────────────────────────────────────────────────── */}
         <div className="flex border-b border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900">
           {[
-            { key: 'notes', label: 'Notes',  badge: noteGroups.length },
+            { key: 'notes', label: 'Notes',  badge: noteCount },
             { key: 'tasks', label: 'Tasks',  badge: openTasks },
           ].map(t => (
             <button
@@ -265,25 +268,6 @@ export default function RODrawer({ ro, employees, onClose }) {
           {/* Notes tab */}
           {tab === 'notes' && (
             <>
-              {/* Filter chips — only show when there are customer notes */}
-              {hasCommNotes && (
-                <div className="flex gap-1.5 mb-1">
-                  {['all', 'customer'].map(f => (
-                    <button
-                      key={f}
-                      onClick={() => setNoteFilter(f)}
-                      className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${
-                        noteFilter === f
-                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300'
-                          : 'bg-gray-100 text-gray-500 dark:bg-zinc-800 dark:text-zinc-400 hover:bg-gray-200 dark:hover:bg-zinc-700'
-                      }`}
-                    >
-                      {f === 'all' ? 'All' : 'Customer'}
-                    </button>
-                  ))}
-                </div>
-              )}
-
               <form onSubmit={addNote} className="flex gap-2">
                 <input
                   value={note}
@@ -300,55 +284,39 @@ export default function RODrawer({ ro, employees, onClose }) {
                 </button>
               </form>
 
-              {noteGroups.length > 0 ? (() => {
-                const visible  = showAllNotes
-                  ? noteGroups.flatMap(item => item.lines.map(line => ({ line, count: 1 })))
-                  : noteGroups
-                return (
-                  <div className="space-y-2">
-                    {visible.map(({ line, lines }, i) => {
-                      const isCustomer = isCommNote(line)
-                      return (
-                      <div
-                        key={i}
-                        className={`px-3 py-2.5 rounded-xl border ${
-                          isCustomer
-                            ? 'bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800/50'
-                            : 'bg-gray-50 dark:bg-zinc-800/50 border-gray-100 dark:border-zinc-700/50'
-                        }`}
-                      >
-                        {isCustomer && (
-                          <span className="inline-block text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400 mb-1">
-                            Customer
-                          </span>
-                        )}
-                        <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                          <HighlightedNote text={line} />
-                        </p>
-                        {!showAllNotes && lines?.length > 1 && (
-                          <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-1">
-                            {lines.length - 1} similar note{lines.length > 2 ? 's' : ''} hidden
-                          </p>
-                        )}
-                      </div>
-                      )
-                    })}
-                    {hiddenDupes > 0 && (
-                      <button
-                        onClick={() => setShowAllNotes(v => !v)}
-                        className="w-full text-xs text-gray-400 dark:text-zinc-600 hover:text-blue-600 dark:hover:text-blue-400 py-1.5 text-center transition-colors"
-                      >
-                        {showAllNotes
-                          ? `↑ Collapse ${hiddenDupes} duplicate note${hiddenDupes !== 1 ? 's' : ''}`
-                          : `↓ Show ${hiddenDupes} duplicate note${hiddenDupes !== 1 ? 's' : ''}`}
-                      </button>
-                    )}
+              <DailyNotesLog
+                noteString={ro.notes ?? ''}
+                noteSummaries={ro.noteSummaries}
+                summarizingDates={null}
+              />
+
+              {isShopManager && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 dark:border-amber-900/60 dark:bg-amber-950/20">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                    Manager maintenance
+                  </p>
+                  <p className="mt-1 text-xs text-amber-700/80 dark:text-amber-300/70">
+                    Cleanup tools for test data. Reset keeps core RO details and removes workflow data.
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={clearNotes}
+                      disabled={Boolean(maintenanceBusy)}
+                      className="rounded-lg border border-amber-300 px-2.5 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:opacity-50 dark:border-amber-800 dark:text-amber-300 dark:hover:bg-amber-950/50"
+                    >
+                      {maintenanceBusy === 'notes' ? 'Clearing...' : 'Clear notes'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={resetWorkflow}
+                      disabled={Boolean(maintenanceBusy)}
+                      className="rounded-lg border border-red-300 px-2.5 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/40"
+                    >
+                      {maintenanceBusy === 'reset' ? 'Resetting...' : 'Reset RO workflow'}
+                    </button>
                   </div>
-                )
-              })() : (
-                <p className="text-xs text-gray-400 dark:text-zinc-600 italic text-center py-8">
-                  No notes yet
-                </p>
+                </div>
               )}
             </>
           )}
@@ -380,6 +348,14 @@ export default function RODrawer({ ro, employees, onClose }) {
                       className="text-xs text-blue-600 dark:text-blue-400 hover:underline shrink-0 mt-1 whitespace-nowrap"
                     >
                       {task.status === 'pending' ? 'Start' : 'Done ✓'}
+                    </button>
+                  )}
+                  {isShopManager && (
+                    <button
+                      onClick={() => deleteTask(task)}
+                      className="text-xs text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 hover:underline shrink-0 mt-1 whitespace-nowrap"
+                    >
+                      Delete
                     </button>
                   )}
                 </div>

@@ -1,14 +1,16 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
-  doc, onSnapshot, collection, addDoc, updateDoc, serverTimestamp,
+  doc, onSnapshot, collection, addDoc, updateDoc, deleteDoc, getDocs, deleteField, serverTimestamp,
   query, where, orderBy, arrayUnion,
 } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
+import { summarizeDayNotes, getApiKey } from '../hooks/useAI'
 import { StatusBadge, PartsStatusBadge, CCCFieldLabel } from '../components/StatusBadge'
 import HighlightedNote from '../components/HighlightedNote'
+import DailyNotesLog, { parseNoteLines } from '../components/DailyNotesLog'
 import {
   RO_STATUSES, PARTS_STATUSES, MANAGER_ROLES, EDIT_RO_ROLES,
 } from '../constants/roles'
@@ -85,6 +87,7 @@ function Section({ title, children, className = '' }) {
 function TaskList({ roId, employees }) {
   const { role, user } = useAuth()
   const isManager = MANAGER_ROLES.includes(role)
+  const isShopManager = role === 'shop_manager'
   const [tasks,    setTasks]    = useState([])
   const [showForm, setShowForm] = useState(false)
   const [assignTo, setAssignTo] = useState('')
@@ -134,6 +137,13 @@ function TaskList({ roId, employees }) {
     })
   }
 
+  const deleteTask = async (task) => {
+    if (!isShopManager) return
+    const ok = window.confirm(`Delete task "${task.title || 'Untitled task'}"? This cannot be undone.`)
+    if (!ok) return
+    await deleteDoc(doc(db, 'tasks', task.id))
+  }
+
   const priorityDot = { low: 'bg-gray-400', medium: 'bg-amber-400', high: 'bg-red-500' }
   const statusStyle = {
     pending:     'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400',
@@ -169,6 +179,14 @@ function TaskList({ roId, employees }) {
             </p>
           </div>
           <div className="flex flex-col gap-1 shrink-0">
+            {isShopManager && (
+              <button
+                onClick={() => deleteTask(task)}
+                className="text-xs text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 hover:underline whitespace-nowrap"
+              >
+                Delete
+              </button>
+            )}
             {task.status !== 'completed' && (task.assignedTo === user.uid || isManager) && (
               <>
                 {task.status === 'pending' && (
@@ -264,34 +282,98 @@ function TaskList({ roId, employees }) {
   )
 }
 
-// ── Notes list with dedup collapse ────────────────────────────────────────────
-function NotesList({ deduped, dupCount }) {
-  const [showAll, setShowAll] = useState(false)
-  const visible = showAll ? deduped : deduped.filter(n => !n.dup)
+// parseNoteLines and DailyNotesLog imported from src/components/DailyNotesLog.jsx
+
+// ── Attachments gallery ───────────────────────────────────────────────────────
+function ManagerMaintenance({ ro }) {
+  const { role, user } = useAuth()
+  const [busy, setBusy] = useState('')
+  if (role !== 'shop_manager') return null
+
+  const clearNotes = async () => {
+    const ok = window.confirm(`Clear all notes for RO #${ro.roNumber}? Status and tasks will stay unchanged.`)
+    if (!ok) return
+    setBusy('notes')
+    try {
+      await updateDoc(doc(db, 'ros', ro.id), {
+        notes: '',
+        noteSummaries: [],
+        updatedAt: serverTimestamp(),
+      })
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const resetWorkflow = async () => {
+    const ok = window.confirm(
+      `Reset RO #${ro.roNumber} workflow?\n\nThis keeps vehicle/customer/CCC info, but clears notes, workflow status, assignments, parts tracking, and deletes all tasks for this RO. This cannot be undone.`
+    )
+    if (!ok) return
+    setBusy('reset')
+    try {
+      const taskSnap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', ro.id)))
+      await Promise.all(taskSnap.docs.map(taskDoc => deleteDoc(doc(db, 'tasks', taskDoc.id))))
+      await updateDoc(doc(db, 'ros', ro.id), {
+        status: deleteField(),
+        carStatus: deleteField(),
+        partsStatus: deleteField(),
+        dropOffDate: deleteField(),
+        eta: deleteField(),
+        cccDateOut: deleteField(),
+        promisedDate: deleteField(),
+        dateOut: deleteField(),
+        assignedBodyMan: deleteField(),
+        assignedPainter: deleteField(),
+        assignedPartsManager: deleteField(),
+        notes: '',
+        noteSummaries: [],
+        changeLog: [],
+        partsOrders: [],
+        partsReturns: [],
+        customerAuthorized: deleteField(),
+        partsSubtasks: deleteField(),
+        workerFlags: deleteField(),
+        partsDelay: deleteField(),
+        updatedAt: serverTimestamp(),
+        maintenanceResetBy: user.uid,
+        maintenanceResetAt: serverTimestamp(),
+      })
+    } finally {
+      setBusy('')
+    }
+  }
+
   return (
-    <div className="space-y-1.5">
-      {visible.map(({ line }, i) => (
-        <div key={i} className="px-3 py-2.5 bg-gray-50 dark:bg-zinc-800/50 rounded-xl border border-gray-100 dark:border-zinc-700/50">
-          <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
-            <HighlightedNote text={line} />
+    <Section title="Manager Maintenance">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-medium text-gray-800 dark:text-gray-100">Cleanup tools</p>
+          <p className="mt-0.5 text-xs text-gray-500 dark:text-zinc-500">
+            Shop manager only. Use these for test data cleanup or resetting a workflow.
           </p>
         </div>
-      ))}
-      {dupCount > 0 && (
-        <button
-          onClick={() => setShowAll(v => !v)}
-          className="w-full text-xs text-gray-400 dark:text-zinc-600 hover:text-blue-600 dark:hover:text-blue-400 py-1.5 text-center transition-colors"
-        >
-          {showAll
-            ? `↑ Hide ${dupCount} duplicate${dupCount !== 1 ? 's' : ''}`
-            : `↓ Show ${dupCount} duplicate note${dupCount !== 1 ? 's' : ''}`}
-        </button>
-      )}
-    </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={clearNotes}
+            disabled={Boolean(busy)}
+            className="rounded-lg border border-amber-300 px-3 py-1.5 text-sm font-medium text-amber-700 transition-colors hover:bg-amber-50 disabled:opacity-50 dark:border-amber-900/70 dark:text-amber-300 dark:hover:bg-amber-950/30"
+          >
+            {busy === 'notes' ? 'Clearing...' : 'Clear notes'}
+          </button>
+          <button
+            onClick={resetWorkflow}
+            disabled={Boolean(busy)}
+            className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-900/70 dark:text-red-300 dark:hover:bg-red-950/30"
+          >
+            {busy === 'reset' ? 'Resetting...' : 'Reset RO workflow'}
+          </button>
+        </div>
+      </div>
+    </Section>
   )
 }
 
-// ── Attachments gallery ───────────────────────────────────────────────────────
 function AttachmentsSection({ roId, attachments = [] }) {
   const [uploading, setUploading] = useState(false)
   const [error,     setError]     = useState('')
@@ -390,12 +472,16 @@ export default function RODetail() {
   const isManager      = MANAGER_ROLES.includes(role)
   const canEdit        = EDIT_RO_ROLES.includes(role)
 
-  const [ro,             setRo]             = useState(null)
-  const [employees,      setEmployees]      = useState({})
-  const [loading,        setLoading]        = useState(true)
-  const [updatingStatus, setUpdatingStatus] = useState(false)
-  const [note,           setNote]           = useState('')
-  const [savingNote,     setSavingNote]     = useState(false)
+  const [ro,               setRo]               = useState(null)
+  const [employees,        setEmployees]        = useState({})
+  const [loading,          setLoading]          = useState(true)
+  const [updatingStatus,   setUpdatingStatus]   = useState(false)
+  const [note,             setNote]             = useState('')
+  const [savingNote,       setSavingNote]       = useState(false)
+  const [noteSummaries,    setNoteSummaries]    = useState([])
+  const [summarizingDates, setSummarizingDates] = useState(new Set())
+  const [changeHistOpen,   setChangeHistOpen]   = useState(false)
+  const didSummarize = useRef(false)
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'users'), snap => {
@@ -414,6 +500,75 @@ export default function RODetail() {
     })
     return unsub
   }, [id, navigate])
+
+  // Seed local noteSummaries from Firestore once when RO first loads
+  useEffect(() => {
+    if (ro?.noteSummaries) setNoteSummaries(ro.noteSummaries)
+  }, [ro?.id])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Lazy daily summarizer — runs once per RO load; finds past days without a summary
+  useEffect(() => {
+    if (!ro || didSummarize.current) return
+    didSummarize.current = true
+
+    const run = async () => {
+      const apiKey = await getApiKey().catch(() => null)
+      if (!apiKey) return
+
+      const todayMmdd = format(new Date(), 'MM/dd')
+      const todayYear = new Date().getFullYear()
+      const existing  = ro.noteSummaries ?? []
+      const existingDates = new Set(existing.map(s => s.date))
+
+      const lines = parseNoteLines(ro.notes ?? '')
+      const map   = new Map()
+      for (const line of lines) {
+        const m = line.match(/^\[(\d{2}\/\d{2})/)
+        const key = m ? m[1] : null
+        if (!key) continue
+        if (!map.has(key)) map.set(key, [])
+        map.get(key).push(line)
+      }
+
+      // Collect past days that haven't been summarized yet (newest first, max 5)
+      const toProcess = [...map.entries()]
+        .filter(([mmdd]) => {
+          if (mmdd === todayMmdd) return false
+          const [mm, dd] = mmdd.split('/')
+          const candidate = new Date(todayYear, parseInt(mm) - 1, parseInt(dd))
+          const year = candidate > new Date(Date.now() + 86400000) ? todayYear - 1 : todayYear
+          return !existingDates.has(`${year}-${mm}-${dd}`)
+        })
+        .slice(0, 5)
+
+      if (!toProcess.length) return
+
+      const accumulated = [...existing]
+      for (const [mmdd, dayLines] of toProcess) {
+        const [mm, dd] = mmdd.split('/')
+        const candidate = new Date(todayYear, parseInt(mm) - 1, parseInt(dd))
+        const year = candidate > new Date(Date.now() + 86400000) ? todayYear - 1 : todayYear
+        const isoDate = `${year}-${mm}-${dd}`
+
+        setSummarizingDates(prev => new Set([...prev, isoDate]))
+        try {
+          const result = await summarizeDayNotes({
+            vehicle:   ro.vehicle ?? `RO${ro.roNumber}`,
+            dateLabel: mmdd,
+            noteLines: dayLines,
+          })
+          const entry = { date: isoDate, bullets: result.bullets, generatedAt: new Date().toISOString() }
+          accumulated.push(entry)
+          setNoteSummaries([...accumulated])
+          await updateDoc(doc(db, 'ros', id), { noteSummaries: accumulated })
+        } catch { /* silent — raw notes still shown */ } finally {
+          setSummarizingDates(prev => { const s = new Set(prev); s.delete(isoDate); return s })
+        }
+      }
+    }
+
+    run()
+  }, [ro?.id])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleStatusChange = async (newStatus) => {
     setUpdatingStatus(true)
@@ -624,7 +779,7 @@ export default function RODetail() {
             <p className="text-xs text-gray-400 dark:text-zinc-500 mb-1.5">Parts Status</p>
             <div className="flex items-center gap-3 flex-wrap">
               <PartsStatusBadge status={ro.partsStatus} />
-              {(isManager || role === 'parts_manager') && (
+              {(isManager || role === 'parts_manager' || role === 'estimator') && (
                 <select
                   value={ro.partsStatus ?? 'not_ordered'}
                   onChange={e => handlePartsChange(e.target.value)}
@@ -635,15 +790,14 @@ export default function RODetail() {
                   ))}
                 </select>
               )}
-              {ro.partsNotes && (
-                <span className="text-xs text-gray-500 dark:text-zinc-400">{ro.partsNotes}</span>
-              )}
             </div>
           </div>
         </div>
       </Section>
 
       {/* ── Tasks ─────────────────────────────────────────────────────────── */}
+      <ManagerMaintenance ro={ro} />
+
       <Section title="Tasks">
         <TaskList roId={id} employees={employees} />
       </Section>
@@ -655,21 +809,34 @@ export default function RODetail() {
 
       {/* ── Change Log ────────────────────────────────────────────────────── */}
       {(ro.changeLog?.length ?? 0) > 0 && (
-        <Section title="Change History">
-          <div className="space-y-1.5">
-            {[...(ro.changeLog ?? [])].reverse().map((entry, i) => (
-              <div key={i} className="flex items-center gap-3 text-xs text-gray-600 dark:text-zinc-400">
-                <span className="text-gray-300 dark:text-zinc-700 shrink-0">
-                  {entry.at ? format(parseISO(entry.at), 'M/d HH:mm') : '—'}
-                </span>
-                <span className="font-medium text-gray-500 dark:text-zinc-500 shrink-0">
-                  {CHANGE_LABELS[entry.type] ?? entry.type}
-                </span>
-                <span className="flex-1 truncate">{entry.value}</span>
-                <span className="text-gray-300 dark:text-zinc-700 shrink-0">{entry.by}</span>
-              </div>
-            ))}
-          </div>
+        <Section>
+          <button
+            onClick={() => setChangeHistOpen(v => !v)}
+            className="w-full flex items-center justify-between gap-2"
+          >
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500">
+              Change History
+            </h3>
+            <span className="text-xs text-gray-400 dark:text-zinc-600 shrink-0">
+              {changeHistOpen ? '▲ collapse' : `▼ ${ro.changeLog.length} entries`}
+            </span>
+          </button>
+          {changeHistOpen && (
+            <div className="space-y-1.5 mt-4">
+              {[...(ro.changeLog ?? [])].reverse().map((entry, i) => (
+                <div key={i} className="flex items-center gap-3 text-xs text-gray-600 dark:text-zinc-400">
+                  <span className="text-gray-300 dark:text-zinc-700 shrink-0">
+                    {entry.at ? format(parseISO(entry.at), 'M/d HH:mm') : '—'}
+                  </span>
+                  <span className="font-medium text-gray-500 dark:text-zinc-500 shrink-0">
+                    {CHANGE_LABELS[entry.type] ?? entry.type}
+                  </span>
+                  <span className="flex-1 truncate">{entry.value}</span>
+                  <span className="text-gray-300 dark:text-zinc-700 shrink-0">{entry.by}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </Section>
       )}
 
@@ -689,27 +856,11 @@ export default function RODetail() {
             Add
           </button>
         </form>
-        {ro.notes && typeof ro.notes === 'string' ? (() => {
-          const lines = []
-          let current = ''
-          ro.notes.split('\n').forEach(line => {
-            if (/^\[[^\]]+\]/.test(line)) {
-              if (current.trim()) lines.push(current.trim())
-              current = line
-              return
-            }
-            if (!line.trim()) return
-            current = current ? `${current}\n${line}` : line
-          })
-          if (current.trim()) lines.push(current.trim())
-          const deduped = dedupeNoteLines(lines)
-          const dupCnt  = deduped.filter(n => n.dup).length
-          return (
-            <NotesList deduped={deduped} dupCount={dupCnt} />
-          )
-        })() : (
-          <p className="text-xs text-gray-400 dark:text-zinc-600 italic">No notes yet.</p>
-        )}
+        <DailyNotesLog
+          noteString={ro.notes ?? ''}
+          noteSummaries={noteSummaries}
+          summarizingDates={summarizingDates}
+        />
       </Section>
 
     </div>

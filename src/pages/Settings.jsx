@@ -1,9 +1,101 @@
-import { useState, useEffect } from 'react'
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore'
+import { useState, useEffect, useRef } from 'react'
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp, getDocs, collection } from 'firebase/firestore'
+import { format } from 'date-fns'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
-import { saveApiKey, getApiKey, clearKeyCache, saveOpenAIKey, getOpenAIKey, clearOpenAIKeyCache } from '../hooks/useAI'
+import { saveApiKey, getApiKey, clearKeyCache, saveOpenAIKey, getOpenAIKey, clearOpenAIKeyCache, summarizeDayNotes } from '../hooks/useAI'
+import { parseNoteLines } from '../components/DailyNotesLog'
 import { MANAGER_ROLES } from '../constants/roles'
+
+// ── Preset glossary ───────────────────────────────────────────────────────────
+// Chinese parts (中文零件)
+const PRESET_GLOSSARY = [
+  // —— 车身零件 Body Parts ——
+  '叶子板 / 翼子板 = fender',
+  '大灯 = headlight assembly',
+  '尾灯 / 后灯 = tail light assembly',
+  '转向灯 / 角灯 = turn signal / corner light',
+  '雾灯 = fog light',
+  '格栅 = grille',
+  '前包围 / 前保险杠 = front bumper cover',
+  '后包围 / 后保险杠 = rear bumper cover',
+  '引擎盖 / 机盖 = hood',
+  '尾箱盖 / 行李箱盖 = trunk lid / liftgate',
+  '车门 = door',
+  '门板 = door panel / door skin',
+  'A柱 = A pillar',
+  'B柱 = B pillar',
+  'C柱 = C pillar',
+  '侧裙 = rocker panel',
+  '轮眉 = wheel arch / fender flare',
+  '天窗 = sunroof / moonroof',
+  '前风挡 = windshield',
+  '后风挡 = rear windshield',
+  '侧玻璃 = side glass',
+  '水箱 / 散热器 = radiator',
+  '气囊 = airbag',
+  '安全带 = seatbelt',
+  '车架 = frame / unibody',
+  '底盘 = underbody / subframe',
+  // —— 工序流程 Repair Process ——
+  '钣金 = body work / metal repair',
+  '喷漆 = paint / paint job',
+  '调色 = color matching / blending',
+  '打磨 / 磨平 = sanding',
+  '上灰 / 打灰 = apply body filler',
+  '腻子 = body filler / Bondo',
+  '打底 = apply primer',
+  '底漆 = primer coat',
+  '面漆 = top coat',
+  '清漆 = clear coat',
+  '抛光 / 打蜡 = buffing / polishing',
+  '拆件 = teardown / disassembly',
+  '装件 = reassembly',
+  '校正 / 四轮定位 = wheel alignment (4WA)',
+  '标定 / 电脑标定 = ADAS calibration',
+  '框架校正 = frame straightening',
+  '拉伸 = frame pull',
+  '进漆房 = in paint booth / in paint',
+  '出漆房 = out of paint booth / paint complete',
+  // —— 状态更新 Status & Updates ——
+  '零件到了 / 料到了 = parts received / all received',
+  '等零件 = waiting on parts',
+  '零件已订 / 已下单 = parts ordered',
+  '收车 / 进店 = vehicle check-in / car in shop',
+  '交车 = vehicle delivery / customer pickup',
+  '客户已授权 = customer authorized',
+  '保险已授权 = insurance authorized',
+  '钣金完成 / 修好了 = body work complete',
+  '喷漆完成 = paint complete',
+  '已完成 / 做好了 = work complete / done',
+  // —— 常用缩写 Abbreviations ——
+  'PT / 料行 = Parts Trader (parts supplier)',
+  'SM = shop manager',
+  'PM = production manager',
+  'EST = estimator — writes estimates AND is responsible for ordering parts',
+  'estimator orders parts = estimator places parts order after teardown reveals damage',
+  'parts manager tracks parts = parts manager tracks ETA, confirms receipt, processes returns — does NOT order',
+  '退零件 / 退料 = return parts (handled by parts manager)',
+  '零件全收到 = all parts received (parts manager confirms)',
+  'supp / 补项 = supplement (additional insurance claim)',
+  'TL / 全损 = total loss',
+  'DRP = Direct Repair Program (insurance preferred)',
+  'adj / 定损员 = insurance adjuster',
+  // —— Español (Spanish) ——
+  'parachoques = bumper cover',
+  'guardafango = fender',
+  'capó = hood',
+  'cajuela = trunk lid',
+  'portezuela = door',
+  'parabrisas = windshield',
+  'carrocería = body work',
+  'pintura = paint',
+  'masilla = body filler',
+  'lijado = sanding',
+  'piezas llegaron = parts received',
+  'esperando piezas = waiting on parts',
+  'listo para entregar = ready for pickup',
+]
 
 const INPUT = 'w-full border border-gray-300 dark:border-zinc-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-950 text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono'
 const PLAIN_INPUT = 'w-full border border-gray-300 dark:border-zinc-700 rounded-lg px-3 py-2 text-sm bg-white dark:bg-zinc-950 text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500'
@@ -29,7 +121,6 @@ export default function Settings() {
   const [keyStatus,      setKeyStatus]      = useState(null)
   const [testLoading,    setTestLoading]    = useState(false)
   const [testResult,     setTestResult]     = useState(null)
-  // OpenAI key (for Whisper voice transcription)
   const [openaiKey,      setOpenaiKey]      = useState('')
   const [openaiMasked,   setOpenaiMasked]   = useState(false)
   const [openaiStatus,   setOpenaiStatus]   = useState(null)
@@ -38,6 +129,16 @@ export default function Settings() {
   const [nameMap,        setNameMap]        = useState('')
   const [vendorMap,      setVendorMap]      = useState('')
   const [mapSaved,       setMapSaved]       = useState(false)
+  // Glossary / AI Memory (all users)
+  const [memory,         setMemory]         = useState([])
+  const [memLoading,     setMemLoading]     = useState(true)
+  const [newFact,        setNewFact]        = useState('')
+  const [memFlash,       setMemFlash]       = useState('')
+  const [importPreview,  setImportPreview]  = useState(null) // { toAdd: string[] } | null
+  const [searchGlossary, setSearchGlossary] = useState('')
+  const newFactRef = useRef(null)
+  // Note summary regeneration
+  const [regenState,     setRegenState]     = useState(null) // null | { done, total, current, errors }
 
   useEffect(() => {
     setDisplayName(userProfile?.name ?? '')
@@ -46,8 +147,55 @@ export default function Settings() {
   }, [userProfile, user])
 
   useEffect(() => {
+    loadMemory()
     if (isManager) loadSettings()
   }, [isManager])
+
+  const loadMemory = async () => {
+    setMemLoading(true)
+    try {
+      const snap = await getDoc(doc(db, 'settings', 'assistantMemory'))
+      setMemory(snap.exists() ? (snap.data().facts ?? []) : [])
+    } finally {
+      setMemLoading(false)
+    }
+  }
+
+  const flash = (msg) => {
+    setMemFlash(msg)
+    setTimeout(() => setMemFlash(''), 2500)
+  }
+
+  const handleAddFact = async () => {
+    const trimmed = newFact.trim()
+    if (!trimmed || memory.includes(trimmed)) return
+    const updated = [...memory, trimmed]
+    await setDoc(doc(db, 'settings', 'assistantMemory'), { facts: updated }, { merge: true })
+    setMemory(updated)
+    setNewFact('')
+    flash('✓ Term added')
+    newFactRef.current?.focus()
+  }
+
+  const handleDeleteFact = async (fact) => {
+    const updated = memory.filter(f => f !== fact)
+    await setDoc(doc(db, 'settings', 'assistantMemory'), { facts: updated }, { merge: true })
+    setMemory(updated)
+  }
+
+  const handleImportPreset = () => {
+    const toAdd = PRESET_GLOSSARY.filter(t => !memory.includes(t))
+    if (toAdd.length === 0) { flash('All preset terms already imported'); return }
+    setImportPreview({ toAdd })
+  }
+
+  const confirmImport = async () => {
+    const updated = [...memory, ...importPreview.toAdd]
+    await setDoc(doc(db, 'settings', 'assistantMemory'), { facts: updated }, { merge: true })
+    setMemory(updated)
+    setImportPreview(null)
+    flash(`✓ ${importPreview.toAdd.length} terms imported`)
+  }
 
   const loadSettings = async () => {
     const snap = await getDoc(doc(db, 'settings', 'ai'))
@@ -155,6 +303,53 @@ export default function Settings() {
     }
   }
 
+  const handleRegenSummaries = async () => {
+    setRegenState({ done: 0, total: 0, current: '', errors: 0 })
+    try {
+      const snap = await getDocs(collection(db, 'ros'))
+      const ros  = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      const todayMmdd = format(new Date(), 'MM/dd')
+      const todayYear = new Date().getFullYear()
+      setRegenState(s => ({ ...s, total: ros.length }))
+
+      for (const ro of ros) {
+        if (!ro.notes) { setRegenState(s => ({ ...s, done: s.done + 1 })); continue }
+        setRegenState(s => ({ ...s, current: `RO${ro.roNumber}` }))
+
+        const lines = parseNoteLines(ro.notes)
+        const map   = new Map()
+        for (const line of lines) {
+          const m = line.match(/^\[(\d{2}\/\d{2})/)
+          if (!m) continue
+          const mmdd = m[1]
+          if (!map.has(mmdd)) map.set(mmdd, [])
+          map.get(mmdd).push(line)
+        }
+
+        const summaries = []
+        for (const [mmdd, dayLines] of map.entries()) {
+          if (mmdd === todayMmdd) continue
+          const [month, day] = mmdd.split('/')
+          const monthNum = parseInt(month, 10)
+          const year = monthNum > new Date().getMonth() + 1 ? todayYear - 1 : todayYear
+          const isoDate = `${year}-${month}-${day}`
+          try {
+            const result = await summarizeDayNotes({ vehicle: ro.vehicle, dateLabel: mmdd, noteLines: dayLines })
+            summaries.push({ date: isoDate, bullets: result.bullets, generatedAt: new Date().toISOString() })
+          } catch { setRegenState(s => ({ ...s, errors: s.errors + 1 })) }
+        }
+
+        if (summaries.length > 0) {
+          await updateDoc(doc(db, 'ros', ro.id), { noteSummaries: summaries })
+        }
+        setRegenState(s => ({ ...s, done: s.done + 1 }))
+      }
+      setRegenState(s => ({ ...s, current: '', done: s.total }))
+    } catch (err) {
+      setRegenState(s => ({ ...s, current: `Error: ${err.message}` }))
+    }
+  }
+
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div>
@@ -205,6 +400,102 @@ export default function Settings() {
             {profileSaved && <span className="text-xs text-green-600 dark:text-emerald-400">✓ Saved</span>}
           </div>
         </div>
+      </div>
+
+      {/* ── Shop Glossary / AI Memory (all users) ─────────────────────── */}
+      <div className={CARD}>
+        <div className="flex items-start justify-between gap-3 mb-1">
+          <div>
+            <h3 className={TITLE}>📖 Shop Glossary</h3>
+            <p className={`${MUTED} mt-0.5`}>
+              AI memory — slang, abbreviations, and common terms GIB uses to understand your shop's language.
+              Any update here takes effect on the next GIB input.
+            </p>
+          </div>
+          <button
+            onClick={handleImportPreset}
+            className="shrink-0 px-3 py-1.5 text-xs font-medium border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors whitespace-nowrap"
+          >
+            ⬇ Import Preset ({PRESET_GLOSSARY.length})
+          </button>
+        </div>
+
+        {/* Import confirmation */}
+        {importPreview && (
+          <div className="mb-3 p-3 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60 rounded-lg">
+            <p className="text-sm text-blue-800 dark:text-blue-200 font-medium mb-2">
+              Add {importPreview.toAdd.length} new terms to your glossary?
+            </p>
+            <div className="max-h-32 overflow-y-auto text-xs text-blue-700 dark:text-blue-300 space-y-0.5 mb-3">
+              {importPreview.toAdd.map(t => <div key={t} className="font-mono">{t}</div>)}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={confirmImport}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg"
+              >Confirm Import</button>
+              <button
+                onClick={() => setImportPreview(null)}
+                className="px-3 py-1.5 text-xs text-gray-600 dark:text-zinc-300 hover:bg-gray-100 dark:hover:bg-zinc-800 rounded-lg"
+              >Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {/* Flash feedback */}
+        {memFlash && (
+          <p className="text-xs text-green-600 dark:text-emerald-400 mb-2">{memFlash}</p>
+        )}
+
+        {/* Search */}
+        <div className="mb-2">
+          <input
+            value={searchGlossary}
+            onChange={e => setSearchGlossary(e.target.value)}
+            placeholder="Search terms…"
+            className={PLAIN_INPUT}
+          />
+        </div>
+
+        {/* Entry list */}
+        <div className="max-h-60 overflow-y-auto space-y-1 mb-3">
+          {memLoading ? (
+            <p className={MUTED}>Loading…</p>
+          ) : memory.length === 0 ? (
+            <p className={MUTED}>No terms yet. Import the preset or add your own below.</p>
+          ) : (
+            memory
+              .filter(f => !searchGlossary || f.toLowerCase().includes(searchGlossary.toLowerCase()))
+              .map(fact => (
+                <div key={fact} className="flex items-center gap-2 group px-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-zinc-800/60">
+                  <span className="flex-1 text-xs font-mono text-gray-700 dark:text-zinc-300 truncate">{fact}</span>
+                  <button
+                    onClick={() => handleDeleteFact(fact)}
+                    className="shrink-0 opacity-0 group-hover:opacity-100 text-xs text-red-500 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-opacity"
+                    title="Remove"
+                  >✕</button>
+                </div>
+              ))
+          )}
+        </div>
+
+        {/* Add new */}
+        <div className="flex gap-2">
+          <input
+            ref={newFactRef}
+            value={newFact}
+            onChange={e => setNewFact(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAddFact()}
+            placeholder="e.g.  小李 = Li Wei (body tech)  or  OEM = original parts only"
+            className={PLAIN_INPUT}
+          />
+          <button
+            onClick={handleAddFact}
+            disabled={!newFact.trim()}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap"
+          >Add</button>
+        </div>
+        <p className={`${MUTED} mt-1`}>{memory.length} terms · hover a term to remove it</p>
       </div>
 
       {isManager && (
@@ -326,6 +617,51 @@ export default function Settings() {
         Save Mappings
       </button>
       {mapSaved && <p className="text-xs text-green-600 dark:text-emerald-400 mt-1">✓ Mappings saved</p>}
+
+      {/* ── Regenerate Note Summaries ────────────────────────────────── */}
+      <div className={CARD}>
+        <h3 className={`${TITLE} mb-1`}>🔄 Regenerate Note Summaries</h3>
+        <p className={`${MUTED} mb-4`}>
+          Re-generates all AI daily note summaries across every active RO using the latest format (no vehicle name, keyword tags, compact bullets). Run this once after updating the summary style.
+        </p>
+        {regenState === null ? (
+          <button
+            onClick={handleRegenSummaries}
+            className="px-5 py-2 bg-zinc-800 hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            Regenerate All Summaries
+          </button>
+        ) : regenState.done >= regenState.total && regenState.total > 0 ? (
+          <div className="space-y-2">
+            <p className="text-sm text-green-600 dark:text-emerald-400 font-medium">
+              ✓ Done — {regenState.total} ROs processed{regenState.errors > 0 ? `, ${regenState.errors} day(s) skipped` : ''}
+            </p>
+            <button
+              onClick={() => setRegenState(null)}
+              className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Run again
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-1.5 bg-gray-200 dark:bg-zinc-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                  style={{ width: regenState.total ? `${(regenState.done / regenState.total) * 100}%` : '0%' }}
+                />
+              </div>
+              <span className="text-xs text-gray-500 dark:text-zinc-400 shrink-0 tabular-nums">
+                {regenState.done}/{regenState.total}
+              </span>
+            </div>
+            {regenState.current && (
+              <p className="text-xs text-gray-400 dark:text-zinc-500 animate-pulse">{regenState.current}</p>
+            )}
+          </div>
+        )}
+      </div>
         </>
       )}
     </div>

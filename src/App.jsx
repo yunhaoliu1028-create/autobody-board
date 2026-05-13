@@ -8,6 +8,8 @@ import ROBoard       from './pages/ROBoard'
 import RODetail      from './pages/RODetail'
 import AddEditRO     from './pages/AddEditRO'
 import TaskBoard     from './pages/TaskBoard'
+import MobileWorkerTaskView from './pages/MobileWorkerTaskView'
+import PartsManagerView from './pages/PartsManagerView'
 import Admin         from './pages/Admin'
 import MeetingImport from './pages/MeetingImport'
 import Settings      from './pages/Settings'
@@ -15,10 +17,10 @@ import Chat          from './pages/Chat'
 import UpdatePage    from './pages/UpdatePage'
 import MobileScreen  from './pages/MobileScreen'
 import { ToastProvider } from './components/Toast'
-import { MANAGER_ROLES } from './constants/roles'
+import { MANAGER_ROLES, ROLES, WORKER_ROLES } from './constants/roles'
 
 function AppRoutes() {
-  const { user } = useAuth()
+  const { user, role } = useAuth()
 
   return (
     <Routes>
@@ -29,7 +31,7 @@ function AppRoutes() {
       )}
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login />} />
 
-      <Route path="/" element={<Navigate to="/update" replace />} />
+      <Route path="/" element={<Navigate to={WORKER_ROLES.includes(role) ? '/tasks' : '/update'} replace />} />
       <Route path="/board" element={
         <ProtectedRoute><Layout><ROBoard /></Layout></ProtectedRoute>
       } />
@@ -43,7 +45,20 @@ function AppRoutes() {
         <ProtectedRoute><Layout><AddEditRO /></Layout></ProtectedRoute>
       } />
       <Route path="/tasks" element={
-        <ProtectedRoute><Layout><TaskBoard /></Layout></ProtectedRoute>
+        <ProtectedRoute>
+          <Layout>
+            {role === 'parts_manager'
+              ? <PartsManagerView />
+              : WORKER_ROLES.includes(role)
+              ? <MobileWorkerTaskView />
+              : <TaskBoard />}
+          </Layout>
+        </ProtectedRoute>
+      } />
+      <Route path="/parts" element={
+        <ProtectedRoute allowedRoles={[...MANAGER_ROLES, ROLES.PARTS_MANAGER]}>
+          <Layout><PartsManagerView /></Layout>
+        </ProtectedRoute>
       } />
       <Route path="/meeting" element={
         <ProtectedRoute allowedRoles={MANAGER_ROLES}>

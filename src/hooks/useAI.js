@@ -142,7 +142,7 @@ async function callClaude(systemPrompt, userMessage, apiKey, images = [], model 
     },
     body: JSON.stringify({
       model,
-      max_tokens: 2048,
+      max_tokens: 4096,
       system:     systemPrompt,
       messages:   [{ role: 'user', content }],
     }),
@@ -251,7 +251,7 @@ async function compressHistory(messages, key) {
 }
 
 // ── Shop Assistant (Opus + 4 cost-saving strategies) ─────────────────────────
-export async function askShopAssistant({ messages, ros, employees }) {
+export async function askShopAssistant({ messages, ros, employees, callerName = null, callerRole = null }) {
   const key = await getApiKey()
   if (!key) throw new Error('NO_API_KEY')
 
@@ -261,7 +261,7 @@ export async function askShopAssistant({ messages, ros, employees }) {
   // ── Strategy 2: Pick model based on query complexity ─────────────────────
   const lastMsg   = messages[messages.length - 1]?.content ?? ''
   const model     = pickModel(lastMsg)
-  const maxTokens = model === MODEL_OPUS ? 1500 : 900  // Strategy 2b: limit output too
+  const maxTokens = 8192  // API max — at Opus pricing ~$0.61/call max, well under $1.50 budget
 
   // ── Strategy 3: Compress RO context ──────────────────────────────────────
   // Only include active (non-delivered) ROs; truncate notes to 70 chars
@@ -287,21 +287,23 @@ export async function askShopAssistant({ messages, ros, employees }) {
   }).join('\n')
 
   const empList  = employees.map(e => `${e.name}(${e.role})`).join(', ')
-  const memBlock = memory.length ? `\nMEMORY:\n${memory.map(f => `- ${f}`).join('\n')}` : ''
+  const memBlock = memory.length ? `\nSHOP GLOSSARY (shop-specific terms — context reference only; always reason from the full message, don't apply mechanically):\n${memory.map(f => `- ${f}`).join('\n')}` : ''
 
   // ── Strategy 1: System prompt built as cacheable block ────────────────────
   // The static parts (persona, glossary, format) are at the TOP so Anthropic
   // can cache them across calls. Dynamic parts (RO data) come after.
   const systemText = `You are an elite auto body shop operations manager and insurance claim specialist with 25+ years of experience at CS SCA Collision Walnut. Expertise: collision repair workflow, supplement negotiations, total loss determinations, DRP programs, cycle time management, insurance carrier relationships.
 
-Be the manager's trusted operational right hand — sharp, data-driven, direct. You are a manager talking to another manager.
+Be the trusted operational right hand — sharp, data-driven, direct. Tailor every response to the person asking (see CALLER below).
 
 ${SHOP_GLOSSARY}
 ${memBlock}
 
 ─── RESPONSE FORMAT ─────────────────────────────────────────────
 Always return valid JSON:
-{"reply":"...","actions":[],"smsText":null,"memoryFacts":[]}
+{"reply":"<your full response text here — never empty, never '...'>","actions":[],"smsText":null,"memoryFacts":[]}
+
+IMPORTANT: "reply" MUST always contain your complete response. Never use "..." or leave it blank.
 
 ─── RESPONSE STYLE ──────────────────────────────────────────────
 Be concise. Lead with the most critical finding. Rules:
@@ -331,6 +333,14 @@ If asked for SMS/WeChat summary: populate "smsText" with Chinese text under 280 
 - Missing parts on near-due ROs = flag proactively
 - Insurance pressure, supplement flags, potential TL = note
 - Prioritize by: overdue > near due > parts issue > otherwise
+
+─── CALLER ──────────────────────────────────────────────────────
+${callerName ? `Name: ${callerName} | Role: ${callerRole ?? 'unknown'}` : 'Role: unknown'}
+- manager/production_manager: full production overview, all ROs, priorities, supplement flags, cycle time
+- estimator: their assigned ROs, estimate writing, supplement status, and parts ordering responsibility (estimator orders parts once teardown reveals damage)
+- parts_manager: parts tracking across all ROs — what's ordered, ETA, partially received, fully received; return parts processing; NOT responsible for ordering (that's estimator)
+- body_man/painter/technician: only their assigned ROs/tasks; short and actionable
+- unknown: assume manager-level access
 
 Today: ${today} | Team: ${empList}
 
@@ -371,25 +381,58 @@ ${roContext || '(none)'}`
   }
 
   const data = await res.json()
-  const text = data.content?.[0]?.text ?? ''
+  const text      = data.content?.[0]?.text ?? ''
+  const truncated = data.stop_reason === 'max_tokens'
 
+  // For truncated responses the closing } is missing; append it so JSON.parse has a chance
   const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/)
-  const jsonStr   = jsonMatch ? jsonMatch[1] || jsonMatch[0] : text
+  const rawJson   = jsonMatch ? (jsonMatch[1] ?? jsonMatch[0]) : text
+  const jsonStr   = truncated ? rawJson.trimEnd().replace(/,?\s*$/, '') + '}}' : rawJson
   try {
     return JSON.parse(jsonStr.trim())
   } catch {
-    return { reply: text, actions: [], smsText: null, memoryFacts: [] }
+    // Partial recovery: extract reply field via regex so the user sees the text
+    // even if the actions array was cut mid-stream.
+    const searchIn = rawJson || text
+    const m = searchIn.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/)
+    if (m) {
+      const extracted = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+      const suffix = truncated ? '\n\n⚠️ Response was cut short — please retry with a more specific question.' : ''
+      return { reply: extracted + suffix, actions: [], smsText: null, memoryFacts: [] }
+    }
+    // Last resort: if the model returned plain prose instead of JSON, show it directly
+    if (text && !text.startsWith('{')) {
+      return { reply: text, actions: [], smsText: null, memoryFacts: [] }
+    }
+    return { reply: '⚠️ Could not parse AI response. Please try again.', actions: [], smsText: null, memoryFacts: [] }
   }
 }
 
 // ── General Input Box parser ──────────────────────────────────────────────────
-export async function parseShopInput({ text, ros, employees, images = [] }) {
+export async function parseShopInput({ text, ros, employees, images = [], sourceRole = null }) {
   const today   = new Date().toISOString().split('T')[0]
-  const roList  = ros.map(r => `RO${r.roNumber}: ${r.vehicle} (${r.customerName}), status: ${r.status}`).join('\n')
+  const roList  = ros.map(r => {
+    const orders = Array.isArray(r.partsOrders) && r.partsOrders.length
+      ? `, partsOrders: ${r.partsOrders.map(o => `${o.vendor || '?'} ${o.qtyReceived ?? o.receivedQty ?? 0}/${o.qty ?? o.quantity ?? '?'} ${o.status || 'ordered'}${o.eta ? ` eta ${o.eta}` : ''}`).join('; ')}`
+      : ''
+    return `RO${r.roNumber}: ${r.vehicle} (${r.customerName}), status: ${r.status}, partsStatus: ${r.partsStatus || 'not_ordered'}${orders}`
+  }).join('\n')
   const empList = employees.map(e => `${e.name} (${e.role})`).join(', ')
   const memory  = await loadAssistantMemory()
   const memBlock = memory.length
-    ? `\nSHOP MEMORY (learned facts — apply these when parsing):\n${memory.map(f => `- ${f}`).join('\n')}\n`
+    ? `\nSHOP GLOSSARY (shop-specific terms — use as context clues when interpreting input; reason from context, not mechanically):\n${memory.map(f => `- ${f}`).join('\n')}\n`
+    : ''
+
+  const sourceContextBlock = sourceRole === 'parts_manager'
+    ? `
+INPUT CONTEXT:
+- Current surface: Parts Manager page.
+- Default speaker intent: the Parts Manager is updating vendor/parts information, not customer completion promises.
+- For short inputs containing an RO number plus a vendor, dealer, part name, quantity, received count, ETA, backorder, return, exchange, or wrong-part detail, prefer parts actions.
+- If the input contains RO + part/vendor text + ETA/date, emit update_parts_order with eta. Do NOT emit update_due_date.
+- Only emit update_due_date from this page when the text explicitly mentions vehicle/shop/customer completion ETA, target completion, delivery/pickup date, promised date, or customer update.
+- Part names such as bumper, fender, headlight, lamp, grille, hood, door, mirror, sensor, bracket, cover, reinforcement, absorber, molding, condenser, radiator, wheel, and blend should be treated as parts descriptions. If no vendor is clear, leave vendor blank and keep the part text in description.
+`
     : ''
 
   const system = `You are the AI production assistant for CS SCA Collision Walnut, an auto body shop.
@@ -404,6 +447,7 @@ ${roList || '(none yet)'}
 Employees: ${empList || '(none listed)'}
 ${SHOP_GLOSSARY}
 ${memBlock}
+${sourceContextBlock}
 
 FIELD NOTES:
 - "ETA" (shop's target completion date) is separate from "CCC Date-Out" (a locked CCC formula date). update_due_date sets the shop ETA — it does NOT touch CCC Date-Out.
@@ -413,13 +457,23 @@ RULES:
 - ALL output (notes, task titles, descriptions) MUST be written in English, regardless of the input language. The user may speak/type in Chinese, Spanish, or mixed — always produce English output.
 - Match RO numbers flexibly: "9448", "RO9448", "#9448" all work
 - For assignees, match partial names (e.g. "David" → the employee named David)
-- When a user updates ETA / completion date AND mentions calling the customer, create BOTH update_due_date AND an add_note saying who called and what was communicated
+- When a user updates the vehicle/shop ETA or completion date AND mentions calling the customer, create BOTH update_due_date AND an add_note saying who called and what was communicated.
+- When a user updates a parts vendor ETA (examples: "dealer eta change to 5-14", "K&P eta 5/15", "Puente Hills Hyundai ETA changed"), emit update_parts_order with that vendor/dealer and eta. Do NOT emit update_due_date for vendor ETA changes.
+- In Parts Manager context, bare "ETA" defaults to parts/vendor ETA. Use update_due_date only when the input clearly refers to vehicle/shop/customer completion timing.
 - When input contains drop-off keywords (dropped off, drop off, 放车, 送来, 已到, 进店), ALWAYS generate BOTH update_dropoff_date AND an add_note describing the drop-off event. Never emit update_dropoff_date without a paired add_note.
 - Write notes in professional, concise third-person shop format (not casual)
 - Dates without year: assume current year (${today.split('-')[0]}). Format as YYYY-MM-DD.
+- Parts workflow: ESTIMATOR is responsible for ordering parts. PARTS MANAGER tracks ETA, confirms receipt, and handles return parts.
+- If the user says "ordered parts", "下单", "订零件", or otherwise mentions a parts order/update, emit update_parts_order even when vendor, qty, or ETA is missing. Leave missing vendor blank, missing qty null, and missing eta null so the Parts Manager can fill it later. Use qty, qtyReceived, vendorFull when known, and status ordered/partial/received.
+- If the user says parts arrived/received, emit log_parts_received with vendor, qtyReceived, and totalQty when known. For received parts, prefer the existing vendor name already listed in that RO's partsOrders over creating a new spelling; treat labels like "(Dealer)", "OEM", or "Parts" as descriptive, not different vendors.
+- Treat "received 1 from PAC" as an incremental receipt of 1 additional usable part, not a final cumulative received count. Only treat a count as final when the user writes a fraction like "received 9/9" or says "received all".
+- If the user says wrong part/return/credit, emit log_parts_return with qty, reason (surplus/defective/wrong_part/exchange when clear), needsReplacement true when a replacement is needed, and status pending.
+- Rejected, wrong, or exchange-needed parts are NOT usable received parts. Do not count rejected qty in log_parts_received. Example: if PAC is 8/9 and the user says "PAC received 1 part, reject, need exchange", emit log_parts_return only for 1 pc with reason exchange and needsReplacement true, plus a note. The usable received count stays 8/9.
+- If the user gives a mixed count like "received 10, 1 wrong/exchange", log only the accepted usable quantity as received (9), and log the rejected quantity (1) as log_parts_return.
 - If parts vendor is mentioned, include it in the note
 - If truly ambiguous, set needsClarification instead of guessing
-- @mention usually means assign_task, but ONLY when @Name matches an employee in the Employees list. Multiple employee @mentions in one message each get their own assign_task. Always pair with the most recently mentioned RO. e.g. "RO9448 @David fix bumper, @Israel blend paint" → two assign_task actions on RO9448
+- @mention usually means assign_task, but ONLY when @Name matches an employee in the Employees list. Multiple employee @mentions in one message each get their own assign_task. If a recent RO is mentioned, attach the task to that RO. If no RO is mentioned, still create assign_task without roNumber as a standalone reminder/task. Users may @ themselves to create their own reminder.
+- For standalone @mention tasks, make the title the requested work/reminder, not the person's name. Example: "@Aaron call State Farm tomorrow" → assign_task with assigneeName "Aaron", title "Call State Farm tomorrow", no roNumber.
 - @mentions are restricted to shop employees and known sublet vendors. NEVER treat vehicle owner/customer names as task assignees. If @Name is a sublet vendor, write an add_note about the vendor/sublet work instead of creating an employee task.
 - If the user says "Aaron" in a body/bodyman/teardown/repair context and multiple Aarons exist, choose the employee whose role is body_man, not the manager/owner Aaron.
 - Use assign_body_man when setting the body technician. The app will create the simple body task "Teardown & process repair" automatically.
@@ -434,7 +488,7 @@ Output:
     { "type": "update_dropoff_date", "roNumber": "9448", "dropOffDate": "${today.split('-')[0]}-04-25", "confidence": "high" },
     { "type": "update_car_status",   "roNumber": "9448", "carStatus": "car_in_shop", "confidence": "high" },
     { "type": "update_due_date",     "roNumber": "9448", "dueDate": "${today.split('-')[0]}-05-05", "confidence": "high" },
-    { "type": "update_parts_status", "roNumber": "9448", "partsStatus": "ordered", "confidence": "high" },
+    { "type": "update_parts_order",  "roNumber": "9448", "vendor": "PT", "vendorFull": "Parts Trader", "description": "Parts order", "qty": 1, "qtyReceived": 0, "eta": "${today.split('-')[0]}-04-29", "status": "ordered", "confidence": "high" },
     { "type": "add_note", "roNumber": "9448", "note": "Vehicle dropped off on 4/25. Customer declined rental. Parts ordered via Parts Trader, ETA 4/29.", "confidence": "high" },
     { "type": "add_note", "roNumber": "9448", "note": "Called customer — updated shop ETA to 5/5.", "confidence": "high" }
   ],
@@ -447,21 +501,35 @@ Return ONLY valid JSON in this exact format:
   "actions": [
     { "type": "add_note",            "roNumber": "9448", "note": "text of note",                                      "confidence": "high" },
     { "type": "update_status",       "roNumber": "9531", "status": "body_work",                                       "confidence": "high" },
-    { "type": "update_parts_status", "roNumber": "9448", "partsStatus": "all_received",                               "confidence": "high" },
+    { "type": "update_parts_order",  "roNumber": "9448", "vendor": "PT", "vendorFull": "Parts Trader", "description": "Bumper cover, grille", "qty": 3, "qtyReceived": 0, "eta": "2026-05-10", "status": "ordered", "confidence": "high" },
+    { "type": "log_parts_received",  "roNumber": "9448", "vendor": "PT", "qtyReceived": 2, "totalQty": 3, "note": "Missing 1 pc, backorder", "confidence": "high" },
+    { "type": "log_parts_return",    "roNumber": "9448", "vendor": "LKQ", "qty": 1, "reason": "wrong_part", "needsReplacement": true, "status": "pending", "notes": "Wrong part sent", "confidence": "high" },
     { "type": "assign_task",         "roNumber": "9482", "assigneeName": "David", "title": "Start body work on rear quarter panel", "description": "optional details", "priority": "medium", "confidence": "high" },
+    { "type": "assign_task",         "assigneeName": "Aaron", "title": "Call State Farm tomorrow", "description": "", "priority": "medium", "confidence": "high" },
     { "type": "assign_body_man",     "roNumber": "9448", "assigneeName": "Aaron",                                     "confidence": "high" },
     { "type": "assign_painter",      "roNumber": "9448", "assigneeName": "Israel",                                    "confidence": "high" },
     { "type": "update_car_status",   "roNumber": "9448", "carStatus": "car_in_shop",                                  "confidence": "high" },
     { "type": "update_dropoff_date", "roNumber": "9448", "dropOffDate": "2026-04-25",                                 "confidence": "high" },
     { "type": "update_due_date",     "roNumber": "9448", "dueDate": "2026-05-05",                                     "confidence": "high" },
-    { "type": "update_rental",       "roNumber": "9448", "hasRental": false,                                           "confidence": "high" }
+    { "type": "update_rental",       "roNumber": "9448", "hasRental": false,                                           "confidence": "high" },
+    { "type": "complete_phase",      "roNumber": "9448", "phase": "body",                                              "confidence": "high" }
   ],
   "needsClarification": null
 }
 
 - Use assign_body_man when setting the body technician — auto-creates "Teardown & process repair" task.
 - Use assign_painter when setting the painter — auto-creates "Paint preparation & paint job" task.
-Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, calibration, detail, ready, delivered
+- Use complete_phase when a worker reports a repair stage is DONE (e.g. "body work complete", "paint done", "teardown done", "reassembly done"). This marks all tasks for that phase as completed AND advances the RO status automatically. Do NOT also emit update_status when using complete_phase — the system handles the transition.
+  Phase values: checkin | teardown | body | paint_prep | paint | reassembly | sublet | detail
+  Examples:
+    "RO9448 body work complete" → complete_phase phase:body + add_note
+    "RO9531 paint done" → complete_phase phase:paint + add_note
+    "teardown complete" → complete_phase phase:teardown + add_note
+    "paint prep done / ready for paint" → complete_phase phase:paint_prep + add_note
+    "reassembly done" → complete_phase phase:reassembly + add_note
+    "sublet complete / cal done" → complete_phase phase:sublet + add_note
+    "QC done / detail complete / vehicle ready" → complete_phase phase:detail + add_note
+Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, sublet, detail, ready, delivered
 Valid partsStatus: not_ordered, ordered, partially_received, all_received
 Valid carStatus: pending_dropoff, car_in_shop
 Valid priority: low, medium, high`
@@ -483,6 +551,31 @@ function parseMappingText(raw = '') {
     if (key && val) map[key] = val
   })
   return map
+}
+
+// ── Daily note summarizer ─────────────────────────────────────────────────────
+// Called once per past day per RO when first viewed after midnight.
+// Stores concise bullets so the Notes Log can collapse old days cleanly.
+export async function summarizeDayNotes({ vehicle, dateLabel, noteLines }) {
+  const key = await getApiKey()
+  if (!key) throw new Error('NO_API_KEY')
+
+  const system = `You are a concise auto body shop daily-note summarizer.
+Given raw shop notes for ONE repair order on ONE day, return ultra-compact bullet summaries.
+Rules:
+- 1-3 bullets only; add a bullet only for a truly distinct event
+- NO vehicle make/model/name — the reader already knows the car
+- Format: [keyword] date if relevant — very short description
+  Keywords to use: paint | body | teardown | parts | reassembly | sublet | delivery | customer | supplement | status | task
+  Examples: "paint 05/06 — entered booth" | "parts — ordered via PT, ETA 05/10" | "customer — called, ETA updated 05/15" | "reassembly — Israel assigned 05/07"
+- Omit timestamps, author names, RO numbers
+- English only, terse fragments (not full sentences)
+Return ONLY valid JSON: {"bullets":["bullet 1","bullet 2"]}`
+
+  const text = `${dateLabel}:\n\n${noteLines.join('\n')}`
+  const result = await callClaude(system, text, key, [], MODEL_FAST)
+  if (Array.isArray(result?.bullets) && result.bullets.length) return result
+  throw new Error('unexpected response')
 }
 
 // ── DingTalk / Meeting notes parser ──────────────────────────────────────────
@@ -565,7 +658,7 @@ Return ONLY valid JSON (no extra text):
   "unrecognized": ["phrases that mentioned vehicles/tasks but couldn't be matched to an RO"]
 }
 
-Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, calibration, detail, ready, delivered
+Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, sublet, detail, ready, delivered
 Valid partsStatus: not_ordered, ordered, partially_received, all_received
 Valid carStatus: pending_dropoff, car_in_shop
 Valid priority: low, medium, high`

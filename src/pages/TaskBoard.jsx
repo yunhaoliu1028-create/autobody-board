@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  arrayUnion, collection, doc, onSnapshot, serverTimestamp, updateDoc, writeBatch,
+  addDoc, arrayUnion, collection, deleteDoc, doc, onSnapshot, serverTimestamp, updateDoc, writeBatch,
 } from 'firebase/firestore'
 import { differenceInCalendarDays, format, isValid, parseISO, subDays } from 'date-fns'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
 import { MANAGER_ROLES, PARTS_STATUSES, STATUS_MAP } from '../constants/roles'
+import { getSuggestedNextStatus, getDownstreamTasks, STATUS_PHASE_TRIGGER } from '../engine/taskRules'
 
 function etaOf(ro) {
   return ro?.eta || ro?.cccDateOut || ro?.promisedDate || null
@@ -33,6 +34,16 @@ function fmtDate(s) {
     return isValid(d) ? format(d, 'M/dd') : s
   } catch {
     return s
+  }
+}
+
+function fmtTaskNoteTime(value) {
+  if (!value) return ''
+  try {
+    const d = value?.toDate ? value.toDate() : new Date(value)
+    return isValid(d) ? format(d, 'M/dd h:mm a') : ''
+  } catch {
+    return ''
   }
 }
 
@@ -93,6 +104,19 @@ function rentalClass(ro) {
   if (ro.hasRental === true) return 'bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300'
   if (ro.hasRental === false) return 'bg-gray-100 text-gray-500 dark:bg-zinc-700 dark:text-zinc-400'
   return 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
+}
+
+function isNewTask(task) {
+  if (!task.assignedAt) return false
+  const millis = task.assignedAt?.toMillis?.() ?? (task.assignedAt?.seconds != null ? task.assignedAt.seconds * 1000 : null)
+  if (millis == null) return false
+  return Date.now() - millis < 86_400_000
+}
+
+function newTaskDate(task) {
+  const millis = task.assignedAt?.toMillis?.() ?? (task.assignedAt?.seconds != null ? task.assignedAt.seconds * 1000 : null)
+  if (millis == null) return ''
+  return format(new Date(millis), 'M/d')
 }
 
 function groupTasksByRO(list) {
@@ -282,14 +306,62 @@ function MobileAssignedROCard({ ro }) {
   )
 }
 
+function StatusPromotionCard({ promotion, onConfirm, onDismiss }) {
+  const [extraNote, setExtraNote] = useState('')
+  const nextLabel = STATUS_MAP[promotion.nextStatus]?.label ?? promotion.nextStatus.replace(/_/g, ' ')
+
+  return (
+    <div className="mt-3 rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800 dark:bg-green-950/30">
+      <div className="mb-2 flex items-start gap-2">
+        <span className="text-base">✅</span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-green-800 dark:text-green-300">Phase complete</p>
+          <p className="mt-0.5 text-xs text-green-700 dark:text-green-400">
+            Advance RO → <span className="font-semibold">{nextLabel}</span>
+          </p>
+        </div>
+      </div>
+      <input
+        type="text"
+        value={extraNote}
+        onChange={e => setExtraNote(e.target.value)}
+        placeholder="Optional note..."
+        className="mb-2 w-full rounded-lg border border-green-300 bg-white px-2.5 py-1.5 text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500 dark:border-green-700 dark:bg-zinc-900 dark:text-gray-200"
+      />
+      <div className="flex gap-2">
+        <button
+          onClick={() => onConfirm(promotion.roId, promotion.nextStatus, promotion.noteText, extraNote)}
+          className="flex-1 rounded-lg bg-green-600 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-green-700"
+        >
+          Confirm
+        </button>
+        <button
+          onClick={() => onDismiss(promotion.roId)}
+          className="rounded-lg border border-green-300 px-3 py-1.5 text-xs text-green-700 transition-colors hover:bg-green-100 dark:border-green-700 dark:text-green-400 dark:hover:bg-green-900/40"
+        >
+          Later
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function DailyTaskRow({
   task,
-  onStatusChange, onNote,
+  onStatusChange, onNote, onDelete, canDelete = false,
 }) {
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteText, setNoteText] = useState('')
   const inputRef = useRef(null)
   const isDone = task.status === 'completed'
+  const sourceLabel = task.autoTriggered
+    ? 'Auto'
+    : task.assignedByName
+    ? `By ${task.assignedByName}`
+    : task.assignedBy
+    ? 'Assigned'
+    : 'Manual'
+  const notes = Array.isArray(task.taskNotes) ? task.taskNotes : []
 
   const handleNoteSubmit = async () => {
     const txt = noteText.trim()
@@ -306,20 +378,41 @@ function DailyTaskRow({
 
   return (
     <div
-      className={`rounded-lg border bg-white dark:bg-zinc-800/90 transition-all
+      className={`rounded-lg border bg-white/90 dark:bg-zinc-950/40 transition-all
         ${isDone ? 'opacity-50' : ''}
-        border-gray-100 dark:border-zinc-700
+        border-gray-100 dark:border-zinc-700/80
       `}
     >
-      <div className="flex items-start gap-2.5 px-3 py-2.5">
+      <div className="flex items-start gap-3 px-3 py-3">
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-gray-800 dark:text-gray-100 leading-snug">
-            {displayTaskTitle(task)}
-          </p>
-          {task.taskNotes?.length > 0 && (
-            <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1 italic leading-snug">
-              "{task.taskNotes[task.taskNotes.length - 1].text}"
+          <div className="flex items-start gap-2">
+            <p className="min-w-0 flex-1 text-sm font-semibold text-gray-900 dark:text-zinc-100 leading-snug">
+              {displayTaskTitle(task)}
             </p>
+            <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+              task.autoTriggered
+                ? 'bg-purple-100 text-purple-700 dark:bg-purple-950/50 dark:text-purple-300'
+                : 'bg-gray-100 text-gray-500 dark:bg-zinc-700 dark:text-zinc-300'
+            }`}>
+              {sourceLabel}
+            </span>
+            {isNewTask(task) && (
+              <span className="shrink-0 rounded-full bg-blue-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                NEW · {newTaskDate(task)}
+              </span>
+            )}
+          </div>
+          {notes.length > 0 && (
+            <div className="mt-1.5 space-y-0.5">
+              {notes.map((note, idx) => (
+                <p
+                  key={`${note.at || idx}-${idx}`}
+                  className="truncate text-xs leading-snug text-gray-500 dark:text-zinc-400"
+                >
+                  - [{fmtTaskNoteTime(note.at) || 'No date'}] {note.text}{note.by ? ` by ${note.by}` : ''}
+                </p>
+              ))}
+            </div>
           )}
           {noteOpen && (
             <div className="mt-2 flex gap-2">
@@ -355,6 +448,9 @@ function DailyTaskRow({
           {task.status === 'completed' && (
             <button onClick={() => onStatusChange(task.id, 'pending')} className="text-xs px-2 py-1 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 hover:bg-gray-100 dark:hover:bg-zinc-700 transition-colors">Reopen</button>
           )}
+          {canDelete && (
+            <button onClick={() => onDelete(task)} className="text-xs px-2 py-1 rounded-lg text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors">Delete</button>
+          )}
         </div>
       </div>
       {task.status === 'in_progress' && (
@@ -369,10 +465,13 @@ function DailyTaskRow({
 function DailyTaskGroupCard({
   group, isManager, dragId, overId, setDragId, setOverId,
   onDrop, onStatusChange, onNote, draggable = true,
+  pendingPromotion, onConfirmPromotion, onDismissPromotion, onDeleteTask, canDeleteTasks = false,
 }) {
   const canDrag = isManager && draggable
   const isDragging = dragId === group.id
   const isOver = overId === group.id
+  const promotion = pendingPromotion?.[group.roId]
+  const hasNewTask = group.tasks.some(isNewTask)
 
   return (
     <div
@@ -381,40 +480,58 @@ function DailyTaskGroupCard({
       onDragEnd={canDrag ? () => { setDragId(null); setOverId(null) } : undefined}
       onDragOver={canDrag ? e => { e.preventDefault(); setOverId(group.id) } : undefined}
       onDrop={canDrag ? onDrop : undefined}
-      className={`rounded-xl border bg-white p-3 shadow-sm transition-all dark:bg-zinc-800/90
+      className={`rounded-xl border bg-white shadow-sm transition-all dark:bg-zinc-800/90
         ${canDrag ? 'cursor-grab active:cursor-grabbing' : ''}
         ${isDragging ? 'opacity-50 scale-[0.99]' : ''}
         ${isOver ? 'border-blue-400 shadow-md dark:border-blue-500' : 'border-gray-200 dark:border-zinc-700'}
       `}
     >
-      <div className="mb-2 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            {canDrag && (
-              <span className="shrink-0 select-none text-xs font-bold text-gray-300 dark:text-zinc-600" title="Drag to reorder">::</span>
-            )}
-            <Link to={`/ro/${group.roId}`} className="font-mono text-xs font-bold text-blue-600 hover:underline dark:text-blue-400">
-              RO#{group.roNumber}
-            </Link>
-          </div>
-          {group.vehicleInfo && (
-            <p className="mt-0.5 truncate text-xs text-gray-400 dark:text-zinc-500">{group.vehicleInfo}</p>
+      <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-3 py-2.5 dark:border-zinc-700/70">
+        <div className="flex min-w-0 items-start gap-2">
+          {canDrag && (
+            <span className="mt-0.5 shrink-0 select-none text-xs font-bold text-gray-300 dark:text-zinc-600" title="Drag to reorder">::</span>
           )}
+          <div className="min-w-0">
+            {group.roId ? (
+              <Link to={`/ro/${group.roId}`} className="text-xs font-semibold text-blue-600 hover:underline dark:text-blue-400">
+                RO#{group.roNumber}
+              </Link>
+            ) : (
+              <span className="text-xs font-bold text-gray-500 dark:text-zinc-400">Standalone</span>
+            )}
+            {group.vehicleInfo && (
+              <p className="mt-0.5 truncate text-xs font-medium text-gray-500 dark:text-zinc-400">{group.vehicleInfo}</p>
+            )}
+          </div>
         </div>
-        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-500 dark:bg-zinc-700 dark:text-zinc-300">
-          {group.tasks.length} task{group.tasks.length === 1 ? '' : 's'}
-        </span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {hasNewTask && (
+            <span className="rounded-full bg-blue-500 px-1.5 py-0.5 text-[10px] font-bold text-white">NEW</span>
+          )}
+          <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-500 dark:bg-zinc-700 dark:text-zinc-300">
+            {group.tasks.length} task{group.tasks.length === 1 ? '' : 's'}
+          </span>
+        </div>
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-2 p-3">
         {group.tasks.map(task => (
           <DailyTaskRow
             key={task.id}
             task={task}
             onStatusChange={onStatusChange}
             onNote={onNote}
+            onDelete={onDeleteTask}
+            canDelete={canDeleteTasks}
           />
         ))}
       </div>
+      {promotion && (
+        <StatusPromotionCard
+          promotion={promotion}
+          onConfirm={onConfirmPromotion}
+          onDismiss={onDismissPromotion}
+        />
+      )}
     </div>
   )
 }
@@ -423,6 +540,7 @@ export default function TaskBoard() {
   const { user, role } = useAuth()
   const toast = useToast()
   const isManager = MANAGER_ROLES.includes(role)
+  const isShopManager = role === 'shop_manager'
 
   const [ros, setRos] = useState([])
   const [tasks, setTasks] = useState([])
@@ -433,6 +551,7 @@ export default function TaskBoard() {
   const [dragId, setDragId] = useState(null)
   const [overId, setOverId] = useState(null)
   const [showDone, setShowDone] = useState(false)
+  const [pendingPromotion, setPendingPromotion] = useState({})
 
   useEffect(() => {
     const unsub = onSnapshot(collection(db, 'users'), snap => {
@@ -495,7 +614,12 @@ export default function TaskBoard() {
       })
   }, [ros, viewUid])
 
-  const visibleTasks = useMemo(() => tasks.filter(t => t.assignedTo === viewUid), [tasks, viewUid])
+  const activeRoIds = useMemo(() => new Set(ros.filter(r => r.status !== 'delivered').map(r => r.id)), [ros])
+
+  const visibleTasks = useMemo(
+    () => tasks.filter(t => t.assignedTo === viewUid && (!t.roId || activeRoIds.has(t.roId))),
+    [tasks, viewUid, activeRoIds],
+  )
 
   const activeTasks = useMemo(() => {
     return visibleTasks
@@ -525,9 +649,76 @@ export default function TaskBoard() {
         completedAt: newStatus === 'completed' ? serverTimestamp() : null,
         updatedAt: serverTimestamp(),
       })
+
+      if (newStatus === 'completed') {
+        const task = tasks.find(t => t.id === taskId)
+        if (!task?.roId || !task.phase) return
+        const roData = ros.find(r => r.id === task.roId)
+        if (!roData) return
+        const requiredPhase = STATUS_PHASE_TRIGGER[roData.status]
+        if (!requiredPhase || requiredPhase !== task.phase) return
+        const phaseTasks = tasks.filter(t => t.roId === task.roId && t.phase === requiredPhase)
+        const allDone = phaseTasks.length > 0 && phaseTasks.every(t => t.id === taskId || t.status === 'completed')
+        if (allDone) {
+          const suggestion = getSuggestedNextStatus(requiredPhase, roData)
+          if (suggestion) {
+            setPendingPromotion(prev => ({ ...prev, [task.roId]: { ...suggestion, roId: task.roId } }))
+          }
+        }
+      }
     } catch (err) {
       toast.error('Update failed: ' + err.message)
     }
+  }
+
+  const handlePromotion = async (roId, nextStatus, noteText, extraNote = '') => {
+    const roData = ros.find(r => r.id === roId)
+    if (!roData) return
+    const stamp = format(new Date(), 'MM/dd HH:mm')
+    const extra = extraNote.trim()
+    const note = extra
+      ? `[${stamp} - ${authorName}] ${noteText} ${extra}`
+      : `[${stamp} - ${authorName}] ${noteText}`
+    const prevNotes = typeof roData.notes === 'string' ? roData.notes : ''
+    try {
+      await updateDoc(doc(db, 'ros', roId), {
+        status: nextStatus,
+        notes: prevNotes ? `${note}\n${prevNotes}` : note,
+        updatedAt: serverTimestamp(),
+      })
+      const templates = getDownstreamTasks(nextStatus, roData)
+      for (const tmpl of templates) {
+        let assignTo = tmpl.assignedToUid
+        if (!assignTo && tmpl.assignedToRole) {
+          const emp = employeeRows.find(e => e.role === tmpl.assignedToRole)
+          assignTo = emp?.uid ?? null
+        }
+        await addDoc(collection(db, 'tasks'), {
+          roId,
+          roNumber: roData.roNumber,
+          vehicleInfo: roData.vehicle || roData.vehicleInfo || '',
+          assignedTo: assignTo,
+          assignedBy: user.uid,
+          assignedByName: authorName,
+          assignedAt: serverTimestamp(),
+          title: tmpl.title,
+          phase: tmpl.phase,
+          autoTriggered: true,
+          source: 'auto',
+          status: 'pending',
+          createdAt: serverTimestamp(),
+          ...(tmpl.noAssigneeNote ? { taskNotes: [{ text: tmpl.noAssigneeNote, by: 'System', at: new Date().toISOString() }] } : {}),
+        })
+      }
+      setPendingPromotion(prev => { const n = { ...prev }; delete n[roId]; return n })
+      toast.success(`RO#${roData.roNumber} → ${STATUS_MAP[nextStatus]?.label ?? nextStatus}`)
+    } catch (err) {
+      toast.error('Promotion failed: ' + err.message)
+    }
+  }
+
+  const handleDismissPromotion = (roId) => {
+    setPendingPromotion(prev => { const n = { ...prev }; delete n[roId]; return n })
   }
 
   const handleTaskNote = async (task, noteText) => {
@@ -553,6 +744,18 @@ export default function TaskBoard() {
       toast.success('Note saved')
     } catch (err) {
       toast.error('Note failed: ' + err.message)
+    }
+  }
+
+  const handleDeleteTask = async (task) => {
+    if (!isShopManager) return
+    const ok = window.confirm(`Delete task "${task.title || 'Untitled task'}"? This cannot be undone.`)
+    if (!ok) return
+    try {
+      await deleteDoc(doc(db, 'tasks', task.id))
+      toast.success('Task deleted')
+    } catch (err) {
+      toast.error('Delete failed: ' + err.message)
     }
   }
 
@@ -671,6 +874,11 @@ export default function TaskBoard() {
               onDrop={handleDrop}
               onStatusChange={handleStatusChange}
               onNote={handleTaskNote}
+              onDeleteTask={handleDeleteTask}
+              canDeleteTasks={isShopManager}
+              pendingPromotion={pendingPromotion}
+              onConfirmPromotion={handlePromotion}
+              onDismissPromotion={handleDismissPromotion}
             />
           ))}
         </div>
@@ -698,6 +906,8 @@ export default function TaskBoard() {
                     onDrop={() => {}}
                     onStatusChange={handleStatusChange}
                     onNote={handleTaskNote}
+                    onDeleteTask={handleDeleteTask}
+                    canDeleteTasks={isShopManager}
                     draggable={false}
                   />
                 ))}
