@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:parts-parser": "node --test src/utils/partsOrderParsing.test.js",
-    "test:gib-scope": "node --test src/utils/actionIdentity.test.js src/utils/dateParsing.test.js src/utils/gibInputScope.test.js src/utils/aiActionInference.test.js"
+    "test:gib-scope": "node --test src/utils/actionIdentity.test.js src/utils/dateParsing.test.js src/utils/gibAtomicApplySource.test.js src/utils/gibInputScope.test.js src/utils/gibTaskPlanning.test.js src/utils/aiActionInference.test.js"
   },
   "dependencies": {
     "date-fns": "^3.6.0",

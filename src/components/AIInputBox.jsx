@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { doc, updateDoc, addDoc, deleteDoc, deleteField, getDocs, query, where, collection, serverTimestamp, arrayUnion, arrayRemove } from 'firebase/firestore'
+import { doc, updateDoc, deleteField, getDocs, query, where, collection, serverTimestamp, arrayUnion, arrayRemove, writeBatch } from 'firebase/firestore'
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
@@ -20,6 +20,7 @@ import {
   reconcileEditedActionIdentity,
   resolveRoForAction,
 } from '../utils/actionIdentity'
+import { selectPendingPhaseTaskItems, taskMatchesOpenTemplate } from '../utils/gibTaskPlanning'
 import {
   extractPartsOrderCandidates,
   mergePreferredPartsOrderActions,
@@ -104,13 +105,13 @@ function orderMatchesVendor(order, rawVendor = '', rawVendorFull = '') {
   return false
 }
 
-function withApplyTimeout(promise, timeoutMs = 20000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Apply is taking too long. Please refresh and check whether the update already went through before applying again.')), timeoutMs)
-    }),
-  ])
+async function awaitAtomicCommit(promise, onSlow, slowMs = 20000) {
+  const timeoutId = setTimeout(() => onSlow?.(), slowMs)
+  try {
+    return await promise
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 function vendorGroupKey(order = {}) {
@@ -510,21 +511,57 @@ function releaseHasBodyTech(roDoc, pendingFields = {}, actions = [], employees =
     || actions.some(action => actionAssignsBodyTech(action, roDoc, employees))
 }
 
-function isPaintPrimaryTemplate(tmpl = {}) {
-  return tmpl.category === 'paint' && tmpl.taskKind === 'primary'
+function effectiveTaskData(item, taskUpdates) {
+  if (item.isNew) return item.data
+  return { ...item.data, ...(taskUpdates.get(item.ref.path)?.fields || {}) }
 }
 
-async function hasOpenTaskForTemplate(roId, tmpl) {
+function hasOpenTaskForTemplate(taskCatalog, taskUpdates, roId, tmpl) {
   if (!roId || !tmpl?.phase) return false
-  const snap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roId), where('phase', '==', tmpl.phase)))
-  return snap.docs.some(d => {
-    const task = d.data()
-    if (isPaintPrimaryTemplate(tmpl)) {
-      return task.taskKind !== 'secondary' && (tmpl.statusBackfill || task.status !== 'completed')
+  return (taskCatalog.get(roId) || []).some(item => (
+    taskMatchesOpenTemplate(effectiveTaskData(item, taskUpdates), tmpl)
+  ))
+}
+
+async function loadTaskCatalog(roIds = []) {
+  const uniqueRoIds = [...new Set(roIds.filter(Boolean))]
+  const entries = await Promise.all(uniqueRoIds.map(async roId => {
+    const snap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roId)))
+    return [roId, snap.docs.map(taskDoc => ({ ref: taskDoc.ref, data: taskDoc.data(), isNew: false }))]
+  }))
+  return new Map(entries)
+}
+
+function planTaskUpdate(item, fields, taskUpdates) {
+  if (item.isNew) {
+    item.data = { ...item.data, ...fields }
+    return
+  }
+  const key = item.ref.path
+  const planned = taskUpdates.get(key) || { ref: item.ref, fields: {}, restoreFields: {} }
+  for (const field of Object.keys(fields)) {
+    if (!Object.prototype.hasOwnProperty.call(planned.restoreFields, field)) {
+      planned.restoreFields[field] = Object.prototype.hasOwnProperty.call(item.data, field)
+        ? item.data[field]
+        : deleteField()
     }
-    if (task.status === 'completed') return false
-    return task.title === tmpl.title
-  })
+  }
+  planned.fields = { ...planned.fields, ...fields }
+  taskUpdates.set(key, planned)
+}
+
+function planPhaseTaskCompletion({ taskCatalog, taskUpdates, roId, phase }) {
+  const items = taskCatalog.get(roId) || []
+  const pending = selectPendingPhaseTaskItems(
+    items,
+    phase,
+    item => effectiveTaskData(item, taskUpdates),
+  )
+  pending.forEach(item => planTaskUpdate(item, {
+    status: 'completed',
+    completedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }, taskUpdates))
 }
 
 function taskFieldsFromTemplate({ roDoc, tmpl, assignTo, user, author, employees }) {
@@ -558,10 +595,10 @@ function taskFieldsFromTemplate({ roDoc, tmpl, assignTo, user, author, employees
   return fields
 }
 
-async function addDownstreamTasksForEntry({ entry, status, roDoc, employees, user, author, addTask }) {
+function addDownstreamTasksForEntry({ entry, status, roDoc, employees, user, author, addTask, taskCatalog, taskUpdates }) {
   const downstreamTemplates = getDownstreamTasks(status, { ...roDoc, ...entry.fields })
   for (const tmpl of downstreamTemplates) {
-    if (await hasOpenTaskForTemplate(roDoc.id, tmpl)) continue
+    if (hasOpenTaskForTemplate(taskCatalog, taskUpdates, roDoc.id, tmpl)) continue
     let assignTo = tmpl.assignedToUid
     if (!assignTo && tmpl.assignedToRole) {
       const emp = employees.find(e => e.role === tmpl.assignedToRole)
@@ -569,7 +606,7 @@ async function addDownstreamTasksForEntry({ entry, status, roDoc, employees, use
     }
     if (tmpl.setRoField && assignTo) entry.fields[tmpl.setRoField] = assignTo
     if (assignTo) {
-      entry.taskPromises.push(addTask(taskFieldsFromTemplate({ roDoc, tmpl, assignTo, user, author, employees })))
+      addTask(taskFieldsFromTemplate({ roDoc, tmpl, assignTo, user, author, employees }))
     }
   }
 }
@@ -1432,31 +1469,6 @@ function impliedCompletedPhasesForStatus(status) {
     reassembly: ['body', 'paint_prep', 'paint'],
   }
   return map[status] || []
-}
-
-function completePhaseTasksPromise(roId, phase) {
-  const PHASE_CATEGORY = { teardown: 'body', body: 'body', paint_prep: 'paint', paint: 'paint', reassembly: 'body', sublet: 'sublet', detail: 'detail' }
-  const PHASE_TITLE_RE = { teardown: /teardown/i, body: /body work|repair/i, paint_prep: /paint.?prep|prep/i, paint: /paint/i, reassembly: /reassembl/i, sublet: /sublet/i, detail: /detail|qc/i }
-  return getDocs(query(collection(db, 'tasks'), where('roId', '==', roId), where('phase', '==', phase)))
-    .then(async snap => {
-      let pending = snap.docs.filter(d => d.data().status !== 'completed')
-      if (pending.length === 0) {
-        const cat = PHASE_CATEGORY[phase]
-        const re = PHASE_TITLE_RE[phase]
-        if (cat) {
-          const fallback = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roId), where('category', '==', cat)))
-          pending = fallback.docs.filter(d => {
-            const data = d.data()
-            return data.status !== 'completed' && (!re || re.test(data.title ?? ''))
-          })
-        }
-      }
-      return Promise.all(pending.map(d => updateDoc(doc(db, 'tasks', d.id), {
-        status: 'completed',
-        completedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })))
-    })
 }
 
 function mentionsAuthorization(text = '') {
@@ -2714,26 +2726,42 @@ export default function AIInputBox({
     const now    = new Date().toISOString()
     const submittedInput = submittedText.current || text
 
-    // ── Step 1: bucket all actions by RO, building one merged update per doc ──
-    // This cuts N sequential Firestore writes down to 1 per RO.
+    // Read task state before planning. No Firestore write is started until every
+    // action has been resolved and the complete mutation plan has been validated.
+    const targetedRoIds = actions
+      .map(action => resolveRoForAction(ros, action)?.id)
+      .filter(Boolean)
+    const taskCatalog = await loadTaskCatalog(targetedRoIds)
+
+    // ── Step 1: build an in-memory mutation plan ─────────────────────────────
     const roMap = new Map() // roId → { roDoc, fields, changeLogEntries }
-    const standaloneTaskPromises = []
-    const createdTaskRefs = []
+    const plannedTaskCreates = []
+    const taskUpdates = new Map()
+    const phaseCompletionIntents = new Map()
+    const requestPhaseCompletion = (roId, phase) => {
+      if (!roId || !phase) return
+      phaseCompletionIntents.set(`${roId}:${phase}`, { roId, phase })
+    }
     const addTask = (data) => {
       // Firestore rejects `undefined` field values — strip them defensively.
       const clean = {}
       for (const k of Object.keys(data)) {
         if (data[k] !== undefined) clean[k] = data[k]
       }
-      return addDoc(collection(db, 'tasks'), clean).then(ref => {
-        createdTaskRefs.push(ref)
-        return ref
-      })
+      const taskRef = doc(collection(db, 'tasks'))
+      const planned = { ref: taskRef, data: clean, isNew: true }
+      plannedTaskCreates.push(planned)
+      if (clean.roId) {
+        const tasksForRo = taskCatalog.get(clean.roId) || []
+        tasksForRo.push(planned)
+        taskCatalog.set(clean.roId, tasksForRo)
+      }
+      return taskRef
     }
 
     const getEntry = (roDoc) => {
       if (!roMap.has(roDoc.id)) {
-        roMap.set(roDoc.id, { roDoc, fields: { updatedAt: serverTimestamp() }, changeLogEntries: [], taskPromises: [] })
+        roMap.set(roDoc.id, { roDoc, fields: { updatedAt: serverTimestamp() }, changeLogEntries: [] })
       }
       return roMap.get(roDoc.id)
     }
@@ -2742,19 +2770,25 @@ export default function AIInputBox({
       const roDoc = resolveRoForAction(ros, action)
       if (!roDoc) {
         if (action.type === 'assign_task') {
-          const assignee = findEmployeeByName(employees, action.assigneeName)
+          const assignee = resolveActionAssignee(employees, action)
           if (!assignee) {
-            setError(`Could not match task assignee "${action.assigneeName}". Edit the suggested action and choose a valid employee name.`)
+            setError(`Could not match task assignee "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid employee name.`)
             setApplying(false)
             return
           }
-          standaloneTaskPromises.push(addTask({
+          const taskTitle = taskTitleFromAction(action, '').trim()
+          if (!taskTitle) {
+            setError('A standalone task is missing its title. Edit or remove that action before applying.')
+            setApplying(false)
+            return
+          }
+          addTask({
             assignedTo: assignee.uid,
             assignedBy: user.uid,
             assignedByName: author,
             assignedToName: assignee.name ?? '',
             assignedAt: serverTimestamp(),
-            title: taskTitleFromAction(action),
+            title: taskTitle,
             description: action.description ?? '',
             category: 'standalone',
             priority: action.priority || 'medium',
@@ -2762,7 +2796,11 @@ export default function AIInputBox({
             source: 'gib',
             autoTriggered: false,
             createdAt: serverTimestamp(),
-          }))
+          })
+        } else {
+          setError(`Could not match RO #${action.roNumber || action.roId || 'Unknown'}. Edit or remove that action before applying.`)
+          setApplying(false)
+          return
         }
         continue
       }
@@ -2787,9 +2825,9 @@ export default function AIInputBox({
           entry.fields.status = action.status
           entry.changeLogEntries.push({ type: 'update_status', value: action.status, by: author, at: now, source: 'gib' })
           impliedCompletedPhasesForStatus(action.status).forEach(phase => {
-            entry.taskPromises.push(completePhaseTasksPromise(roDoc.id, phase))
+            requestPhaseCompletion(roDoc.id, phase)
           })
-          await addDownstreamTasksForEntry({ entry, status: action.status, roDoc, employees, user, author, addTask })
+          addDownstreamTasksForEntry({ entry, status: action.status, roDoc, employees, user, author, addTask, taskCatalog, taskUpdates })
           break
         }
         case 'update_parts_status':
@@ -3040,7 +3078,7 @@ export default function AIInputBox({
           )
           if (phase && !hasExplicitPrimaryBodyTask) {
             const roDueDate = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
-            entry.taskPromises.push(addTask({
+            addTask({
               roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
               assignedTo: assignee.uid, assignedBy: user.uid, assignedByName: author,
               assignedToName: assignee.name ?? '',
@@ -3056,7 +3094,7 @@ export default function AIInputBox({
               autoTriggered: true,
               taskKind: 'primary',
               createdAt: serverTimestamp(),
-            }))
+            })
           }
           break
         }
@@ -3117,8 +3155,8 @@ export default function AIInputBox({
               category: 'paint',
               taskKind: 'primary',
             }
-            if (!(await hasOpenTaskForTemplate(roDoc.id, tmpl))) {
-              entry.taskPromises.push(addTask({
+            if (!hasOpenTaskForTemplate(taskCatalog, taskUpdates, roDoc.id, tmpl)) {
+              addTask({
                 ...taskBase,
                 title: tmpl.title,
                 description: '',
@@ -3126,7 +3164,7 @@ export default function AIInputBox({
                 category: 'paint',
                 taskKind: 'primary',
                 autoTriggered: true,
-              }))
+              })
             }
             break
           }
@@ -3135,44 +3173,44 @@ export default function AIInputBox({
             const phase = action.phase === 'paint_prep' || action.phase === 'paint'
               ? action.phase
               : paintSecondaryPhase(action, roActionText)
-            entry.taskPromises.push(addTask({
+            addTask({
               ...taskBase,
               title: detail || action.title || 'Paint reminder',
               description: action.description || '',
               phase,
               taskKind: 'secondary',
               parentPhase: phase,
-            }))
+            })
             break
           }
           if (isSecondaryBodyTask) {
             const detail = taskTitleFromAction(action, '').trim()
-            entry.taskPromises.push(addTask({
+            addTask({
               ...taskBase,
               title: inferSecondaryBodyTaskTitle(detail),
               description: action.description || detail,
               phase: contextPhase,
               taskKind: 'secondary',
               parentPhase: contextPhase,
-            }))
+            })
             break
           }
-          entry.taskPromises.push(addTask({
+          addTask({
             ...taskBase,
             title: bodyCore?.title ?? normalizedTaskTitle(action, isBodyTask),
             description: '',
             phase: bodyCore?.phase ?? null,
             taskKind: isBodyTask ? 'primary' : 'standard',
-          }))
+          })
           if (bodyCore?.secondaryTask) {
-            entry.taskPromises.push(addTask({
+            addTask({
               ...taskBase,
               title: bodyCore.secondaryTask.title,
               description: bodyCore.secondaryTask.description,
               phase: bodyCore.phase,
               taskKind: 'secondary',
               parentPhase: bodyCore.phase,
-            }))
+            })
           }
           break
         }
@@ -3187,34 +3225,9 @@ export default function AIInputBox({
               ? `${noteLine}\n${entry.fields.notes}`
               : `${noteLine}\n${roDoc.notes ?? ''}`
             entry.changeLogEntries.push({ type: 'complete_phase', value: phase, label: `${phase} phase complete`, by: author, at: now, source: 'gib' })
-            await addDownstreamTasksForEntry({ entry, status: suggestion.nextStatus, roDoc, employees, user, author, addTask })
+            addDownstreamTasksForEntry({ entry, status: suggestion.nextStatus, roDoc, employees, user, author, addTask, taskCatalog, taskUpdates })
           }
-          // Mark all tasks for this RO + phase as completed.
-          // Primary query: tasks with the phase field (new tasks created after this fix).
-          // Fallback: tasks without phase field (legacy) — query by category + title keyword.
-          const PHASE_CATEGORY = { teardown: 'body', body: 'body', paint_prep: 'paint', paint: 'paint', reassembly: 'body', sublet: 'sublet', detail: 'detail' }
-          const PHASE_TITLE_RE = { teardown: /teardown/i, body: /body work/i, paint_prep: /paint.?prep/i, paint: /paint/i, reassembly: /reassembl/i, sublet: /sublet/i, detail: /detail|qc/i }
-          entry.taskPromises.push(
-            getDocs(query(collection(db, 'tasks'), where('roId', '==', roDoc.id), where('phase', '==', phase)))
-              .then(async snap => {
-                let pending = snap.docs.filter(d => d.data().status !== 'completed')
-                // Fallback for legacy tasks that have no phase field
-                if (pending.length === 0) {
-                  const cat = PHASE_CATEGORY[phase]
-                  const re  = PHASE_TITLE_RE[phase]
-                  if (cat) {
-                    const fallback = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roDoc.id), where('category', '==', cat)))
-                    pending = fallback.docs.filter(d => {
-                      const data = d.data()
-                      return data.status !== 'completed' && (!re || re.test(data.title ?? ''))
-                    })
-                  }
-                }
-                return Promise.all(pending.map(d => updateDoc(doc(db, 'tasks', d.id), {
-                  status: 'completed', completedAt: serverTimestamp(), updatedAt: serverTimestamp(),
-                })))
-              })
-          )
+          requestPhaseCompletion(roDoc.id, phase)
           break
         }
       }
@@ -3242,12 +3255,19 @@ export default function AIInputBox({
         entry.fields.status = 'body_work'
         prependRoNote(entry, roDoc, `[${stamp} - ${author}] Authorization and parts status confirmed. Repair task released to body technician.`)
         entry.changeLogEntries.push({ type: 'auto_release_repair', value: 'body_work', label: 'Repair task released', by: author, at: now, source: 'auto' })
-        await addDownstreamTasksForEntry({ entry, status: 'body_work', roDoc, employees, user, author, addTask })
+        addDownstreamTasksForEntry({ entry, status: 'body_work', roDoc, employees, user, author, addTask, taskCatalog, taskUpdates })
       }
     }
 
-    // ── Step 2: fire all Firestore doc writes + task creates in parallel ───────
-    // (Images are now handled in handleDirectImageUpload — never reach here with images)
+    // Completion is intentionally finalized after every task create has been
+    // planned, so action order cannot leave a task pending in an already
+    // completed phase.
+    phaseCompletionIntents.forEach(intent => {
+      planPhaseTaskCompletion({ taskCatalog, taskUpdates, ...intent })
+    })
+
+    // ── Step 2: finalize restores, then commit every write atomically ─────────
+    // (Images are handled in handleDirectImageUpload and never enter this batch.)
     const roRestores = [...roMap.values()].map(({ roDoc, fields, changeLogEntries }) => {
       const restoreFields = {}
       Object.keys(fields).forEach(key => {
@@ -3258,19 +3278,28 @@ export default function AIInputBox({
       return { roId: roDoc.id, fields: restoreFields, changeLogEntries }
     })
 
-    const firestorePromises = [...roMap.values()].map(({ roDoc, fields, changeLogEntries, taskPromises }) => {
+    const taskRestores = [...taskUpdates.values()].map(({ ref, restoreFields }) => ({ ref, fields: restoreFields }))
+    const createdTaskRefs = plannedTaskCreates.map(item => item.ref)
+    const writeCount = roMap.size + plannedTaskCreates.length + taskUpdates.size
+    if (writeCount > 450) {
+      throw new Error(`This update needs ${writeCount} database writes, which is too large for one safe Apply. Split it into smaller updates.`)
+    }
+
+    const batch = writeBatch(db)
+    for (const { roDoc, fields, changeLogEntries } of roMap.values()) {
       const updates = { ...fields }
       if (changeLogEntries.length) updates.changeLog = arrayUnion(...changeLogEntries)
-      return Promise.all([
-        updateDoc(doc(db, 'ros', roDoc.id), updates),
-        ...taskPromises,
-      ])
-    })
-    firestorePromises.push(...standaloneTaskPromises)
+      batch.update(doc(db, 'ros', roDoc.id), updates)
+    }
+    plannedTaskCreates.forEach(item => batch.set(item.ref, item.data))
+    taskUpdates.forEach(item => batch.update(item.ref, item.fields))
 
-    // ── Step 3: await everything ───────────────────────────────────────────────
+    // ── Step 3: one commit — either every mutation succeeds or none do ────────
     try {
-      await withApplyTimeout(Promise.all(firestorePromises))
+      await awaitAtomicCommit(batch.commit(), () => {
+        setError('Apply is still being committed. Do not retry or refresh until it finishes.')
+      })
+      setError('')
 
       // ── Toasts ──────────────────────────────────────────────────────────────
       if (actions.length > 0) {
@@ -3285,6 +3314,7 @@ export default function AIInputBox({
         actionCount: actions.length,
         roRestores,
         taskRefs: createdTaskRefs,
+        taskRestores,
       })
       setResult(null)
       setActions([])
@@ -3318,13 +3348,19 @@ export default function AIInputBox({
     setUndoing(true)
     setError('')
     try {
-      const roRestores = recentApplied.roRestores.map(item => updateDoc(doc(db, 'ros', item.roId), {
+      const batch = writeBatch(db)
+      recentApplied.roRestores.forEach(item => batch.update(doc(db, 'ros', item.roId), {
         ...item.fields,
         ...(item.changeLogEntries?.length ? { changeLog: arrayRemove(...item.changeLogEntries) } : {}),
         updatedAt: serverTimestamp(),
       }))
-      const taskDeletes = recentApplied.taskRefs.map(ref => deleteDoc(ref))
-      await Promise.all([...roRestores, ...taskDeletes])
+      recentApplied.taskRefs.forEach(ref => batch.delete(ref))
+      const taskRestores = recentApplied.taskRestores || []
+      taskRestores.forEach(item => batch.update(item.ref, item.fields))
+      await awaitAtomicCommit(batch.commit(), () => {
+        setError('Undo is still being committed. Do not retry or refresh until it finishes.')
+      })
+      setError('')
       toast.success('Last GIB update undone')
       setRecentApplied(null)
     } catch (err) {

@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-19 - Codex** Made GIB Apply and Undo validate-first atomic Firestore batches so failures cannot leave partial RO or task changes. → [session below](#session-august-19-2026-codex--gib-atomic-apply-and-undo)
 - **2026-08-19 - Codex** Made visible GIB action RO and assignee fields authoritative so stale hidden IDs cannot redirect writes or assignments. → [session below](#session-august-19-2026-codex--gib-action-identity-safety)
 - **2026-08-19 - Codex** Added strict, vendor-scoped GIB calendar validation and blocked invalid target, drop-off, and parts dates before Apply. → [session below](#session-august-19-2026-codex--gib-strict-date-validation)
 - **2026-08-19 - Codex** Isolated GIB inference, workflow normalization, and parts fallback parsing by RO scope to prevent multi-RO context leakage. → [session below](#session-august-19-2026-codex--gib-per-ro-scope-isolation)
@@ -135,6 +136,37 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 19, 2026 (Codex) — GIB Atomic Apply and Undo
+
+**Status:** Implemented and independently reviewed on the isolated Draft PR branch. Not deployed to production.
+
+Database checked:
+- The project has one Firestore database: `(default)`, `STANDARD`, `FIRESTORE_NATIVE`, region `us-west2`.
+
+Changed:
+- Replaced eager `addDoc` / `updateDoc` task writes with a read-only task catalog and an in-memory mutation plan.
+- Delayed every RO update, new task, and existing task completion until all actions, assignees, releases, queries, and write-count checks pass.
+- Committed the complete plan with one Firestore `writeBatch`, capped at 450 writes; a permission or write failure now leaves the full batch unchanged.
+- Finalized phase-completion intents after all task creation planning so opposite action orders produce the same task state.
+- Replaced the cancel-unsafe 20-second rejection race with a slow-commit warning that keeps Apply locked until the real commit resolves or rejects.
+- Made Undo one atomic batch and added restoration of existing tasks changed by `complete_phase`, in addition to RO restoration and new-task deletion.
+- Added source-contract tests plus task-selection and opposite-action-order regressions.
+
+Verification:
+- `npm.cmd run test:gib-scope` — 47/47 passing.
+- `npm.cmd run test:parts-parser` — 24/24 passing.
+- `npm.cmd run build` — production build succeeded; only the existing large-chunk warning remains.
+- Local Vite preview — `/` and `/assets/index-DPB5g5lN.js` both returned HTTP 200.
+- Two independent sub-agent reviews — PASS for Step 5, with no in-scope P0/P1 findings.
+
+Deferred to the next isolated step:
+- Concurrent stale-snapshot protection, cross-client duplicate prevention, refresh/retry idempotency, an operation ledger, and Undo revision/authorization checks.
+
+Deployment:
+- No Firebase deploy was run; the live site remained unchanged while staff were using it.
 
 ---
 
