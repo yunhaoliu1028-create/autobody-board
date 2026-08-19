@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore'
 import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
 import AIInputBox from '../components/AIInputBox'
-import { PARTS_STATUSES, STATUS_MAP } from '../constants/roles'
+import RODrawer from '../components/RODrawer'
+import { PARTS_PAGE_ROLES, PARTS_STATUSES, STATUS_MAP } from '../constants/roles'
 
 const FILTERS = [
   { key: 'all', label: 'ALL' },
@@ -16,10 +16,22 @@ const FILTERS = [
 ]
 
 const SORTS = [
-  { key: 'due', label: 'Due Date' },
-  { key: 'parts', label: 'Parts Status' },
+  { key: 'repair_due', label: 'Repair Due Date' },
+  { key: 'parts_eta', label: 'Parts ETA' },
   { key: 'ro', label: 'RO Number' },
 ]
+const SORT_STORAGE_KEY = 'autobody.parts.sortBy.v1'
+const DEFAULT_SORT = 'repair_due'
+const SORT_KEYS = new Set(SORTS.map(item => item.key))
+
+function readSavedSort() {
+  try {
+    const saved = localStorage.getItem(SORT_STORAGE_KEY)
+    return SORT_KEYS.has(saved) ? saved : DEFAULT_SORT
+  } catch {
+    return DEFAULT_SORT
+  }
+}
 
 const PARTS_LABEL = Object.fromEntries(PARTS_STATUSES.map(s => [s.key, s.label]))
 
@@ -49,7 +61,7 @@ function qty(value, fallback = 0) {
 }
 
 function normalizeVendorName(value = '') {
-  return value
+  const normalized = value
     .toString()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
@@ -58,6 +70,8 @@ function normalizeVendorName(value = '') {
     .filter(part => !['dealer', 'dealership', 'oem', 'parts', 'part'].includes(part))
     .join(' ')
     .trim()
+  if (['sm toyota', 's m toyota', 'smt'].includes(normalized)) return 'santa margarita toyota'
+  return normalized
 }
 
 function vendorGroupKey(order) {
@@ -128,8 +142,18 @@ function earliestOrderEta(orders = []) {
     .sort()[0] ?? null
 }
 
+function activeOrders(orders = []) {
+  return orders.filter(order => !isOrderReceived(order))
+}
+
+function earliestActiveOrderEta(orders = []) {
+  return earliestOrderEta(activeOrders(orders))
+}
+
 function etaSortValue(ro, orders) {
-  return earliestOrderEta(orders) || ro.eta || ro.cccDateOut || ro.promisedDate || '9999-12-31'
+  const active = activeOrders(orders)
+  if (!active.length) return '9999-12-31'
+  return earliestActiveOrderEta(active) || '9999-12-30'
 }
 
 function statusText(status) {
@@ -233,6 +257,11 @@ function progressText(group) {
   return `${group.received}/${group.quantity} rcvd`
 }
 
+function statusNoticeText(previousStatus, nextStatus) {
+  if (!previousStatus || previousStatus === nextStatus) return ''
+  return `Status changed: ${displayPartsStatus(previousStatus)} -> ${displayPartsStatus(nextStatus)}`
+}
+
 function receivedText(group) {
   if (!group.quantity) return `Received ${group.received}/Missing`
   return `Received ${group.received}/${group.quantity}`
@@ -276,9 +305,14 @@ function hasManualPartsSignal(ro) {
   return ro.partsStatus && ro.partsStatus !== 'not_ordered'
 }
 
+function hasNoReplacementPartsNeeded(ro) {
+  return Boolean(ro.noReplacementPartsNeeded) && ro.partsStatus === 'all_received'
+}
+
 function displayOrdersFor(ro) {
   const orders = Array.isArray(ro.partsOrders) ? ro.partsOrders : []
   if (orders.length) return orders
+  if (hasNoReplacementPartsNeeded(ro)) return []
   if (hasManualPartsSignal(ro) || ro.status === 'waiting_parts') {
     return [{
       id: 'missing-parts-order',
@@ -320,20 +354,22 @@ function roFlags(ro, orders, status) {
 }
 
 function partsSummary(vendors) {
+  if (!vendors.length) return 'No parts order'
+  const activeVendors = vendors.filter(group => !groupIsFullyReceived(group))
   const totalVendors = vendors.length
   const totalQty = vendors.reduce((sum, group) => sum + (group.quantity || 0), 0)
   const totalReceived = vendors.reduce((sum, group) => sum + (group.received || 0), 0)
-  const overdueCount = vendors.filter(group => {
+  const overdueCount = activeVendors.filter(group => {
     const days = daysUntil(group.eta)
-    return days != null && days < 0 && !groupIsFullyReceived(group)
+    return days != null && days < 0
   }).length
-  const earliestEta = vendors.map(group => group.eta).filter(Boolean).sort()[0]
+  const earliestEta = activeVendors.map(group => group.eta).filter(Boolean).sort()[0]
   const pieces = [
     `${totalVendors} vendor${totalVendors === 1 ? '' : 's'}`,
     `${totalReceived}/${totalQty || '?'} received`,
   ]
   if (overdueCount > 0) pieces.push(`${overdueCount} overdue`)
-  pieces.push(`earliest ETA ${fmtDate(earliestEta)}`)
+  pieces.push(earliestEta ? `next ETA ${fmtDate(earliestEta)}` : 'all received')
   return pieces.join(' · ')
 }
 
@@ -385,14 +421,14 @@ function derivedNextAction(ro, orders, returns, partsStatus) {
   return null
 }
 
-function VendorProgress({ group, returns = [], onEdit, canEdit = false }) {
+function VendorProgress({ group, returns = [], onEdit, onDelete, canEdit = false }) {
   const etaDays = daysUntil(group.eta)
   const fullyReceived = group.quantity > 0 && group.received >= group.quantity
   const urgentEta = etaDays != null && etaDays <= 0 && !fullyReceived
   const exception = vendorException(group, returns)
 
   return (
-    <div className={`grid ${canEdit ? 'grid-cols-[minmax(96px,1fr)_86px_62px_74px_34px]' : 'grid-cols-[minmax(96px,1fr)_86px_62px_74px]'} items-center gap-2 rounded-md border px-2.5 py-2 dark:bg-zinc-950 ${
+    <div className={`grid ${canEdit ? 'grid-cols-[minmax(96px,1fr)_86px_62px_74px_92px]' : 'grid-cols-[minmax(96px,1fr)_86px_62px_74px]'} items-center gap-2 rounded-md border px-2.5 py-2 dark:bg-zinc-950 ${
       urgentEta ? 'border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/25' : 'border-gray-200 bg-white dark:border-zinc-700'
     }`}>
       <div className="min-w-0">
@@ -425,28 +461,151 @@ function VendorProgress({ group, returns = [], onEdit, canEdit = false }) {
         {progressText(group)}
       </p>
       {canEdit && (
-        <button
-          type="button"
-          onClick={() => onEdit(group)}
-          className="rounded-md border border-gray-200 px-2 py-1 text-[11px] font-bold text-gray-500 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-blue-700 dark:hover:text-blue-300"
-        >
-          Edit
-        </button>
+        <div className="flex justify-end gap-1">
+          <button
+            type="button"
+            onClick={() => onEdit(group)}
+            className="rounded-md border border-gray-200 px-2 py-1 text-[11px] font-bold text-gray-500 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-blue-700 dark:hover:text-blue-300"
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            onClick={() => onDelete(group)}
+            className="rounded-md border border-gray-200 px-2 py-1 text-[11px] font-bold text-gray-500 hover:border-red-300 hover:text-red-600 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-red-800 dark:hover:text-red-300"
+          >
+            Delete
+          </button>
+        </div>
       )}
     </div>
   )
 }
 
-function ROCard({ ro, authorName }) {
+function VendorDraftRow({ draft, returns = [], onChange, onDelete }) {
+  const [renaming, setRenaming] = useState(draft.mode === 'add')
+  const etaDays = daysUntil(draft.eta)
+  const quantity = qty(draft.qty, 0)
+  const received = qty(draft.qtyReceived, 0)
+  const fullyReceived = quantity > 0 && received >= quantity
+  const urgentEta = etaDays != null && etaDays <= 0 && !fullyReceived
+  const exception = vendorException({
+    key: draft.key,
+    vendor: draft.vendor,
+    vendorFull: draft.vendorFull,
+  }, returns)
+  const inputClass = 'w-full rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[13px] font-medium text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100'
+  const dateInputClass = `${inputClass} [color-scheme:light] dark:[color-scheme:dark]`
+
+  return (
+    <div className={`rounded-md border border-l-2 px-2 py-1.5 dark:bg-zinc-950/40 ${
+      urgentEta ? 'border-red-200 border-l-red-500 bg-red-50 dark:border-red-900 dark:border-l-red-500 dark:bg-red-950/15' : 'border-gray-200 border-l-blue-400 bg-white dark:border-zinc-800 dark:border-l-blue-500'
+    }`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <p className="truncate text-[13px] font-semibold text-gray-900 dark:text-zinc-100">
+              {vendorLabel(draft) || 'New vendor'}
+            </p>
+            {exception && (
+              <span className={`inline-flex max-w-full items-center truncate rounded px-1.5 py-0.5 text-[10px] font-extrabold ${exception.color}`}>
+                {exception.label}
+              </span>
+            )}
+            {!renaming && (
+              <button
+                type="button"
+                onClick={() => setRenaming(true)}
+                className="shrink-0 px-1 py-0.5 text-[10px] font-bold text-gray-400 hover:text-blue-600 dark:text-zinc-500 dark:hover:text-blue-300"
+              >
+                Rename
+              </button>
+            )}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => onDelete(draft)}
+          className="shrink-0 px-1 py-0.5 text-[10px] font-bold text-gray-400 hover:text-red-600 dark:text-zinc-500 dark:hover:text-red-300"
+        >
+          Delete
+        </button>
+      </div>
+
+      {renaming && (
+        <div className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+          <input
+            value={draft.vendor}
+            onChange={e => onChange(draft.key, 'vendor', e.target.value)}
+            className={inputClass}
+            placeholder="Vendor"
+          />
+          <div className="flex gap-1.5">
+            <input
+              value={draft.vendorFull}
+              onChange={e => onChange(draft.key, 'vendorFull', e.target.value)}
+              className={inputClass}
+              placeholder="Full name optional"
+            />
+            {draft.mode !== 'add' && (
+              <button
+                type="button"
+                onClick={() => setRenaming(false)}
+                className="shrink-0 rounded-md border border-gray-200 px-2 text-[11px] font-bold text-gray-500 hover:border-gray-300 dark:border-zinc-700 dark:text-zinc-400"
+              >
+                Done
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+        <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 dark:text-zinc-500">
+          ETA
+          <input
+            type="date"
+            value={draft.eta}
+            onChange={e => onChange(draft.key, 'eta', e.target.value)}
+            className={`${dateInputClass} mt-0.5`}
+          />
+        </label>
+        <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 dark:text-zinc-500">
+          Ordered
+          <input
+            type="number"
+            min="0"
+            value={draft.qty}
+            onChange={e => onChange(draft.key, 'qty', e.target.value)}
+            className={`${inputClass} mt-0.5 text-right`}
+          />
+        </label>
+        <label className="text-[9px] font-bold uppercase tracking-wide text-gray-400 dark:text-zinc-500">
+          Received
+          <input
+            type="number"
+            min="0"
+            value={draft.qtyReceived}
+            onChange={e => onChange(draft.key, 'qtyReceived', e.target.value)}
+            className={`${inputClass} mt-0.5 text-right`}
+          />
+        </label>
+      </div>
+    </div>
+  )
+}
+
+function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
   const orders = displayOrdersFor(ro)
   const returns = Array.isArray(ro.partsReturns) ? ro.partsReturns : []
   const pendingReturns = returns.filter(item => returnStatus(item) === 'pending')
   const partsStatus = calculatedPartsStatus(orders, ro.partsStatus)
   const flags = roFlags(ro, orders, partsStatus)
-  const eta = earliestOrderEta(orders) || ro.eta || ro.cccDateOut || ro.promisedDate
+  const eta = ro.eta || ro.cccDateOut || ro.promisedDate
   const etaDays = daysUntil(eta)
   const statusMeta = STATUS_MAP[ro.status]
   const vendors = mergeOrdersByVendor(orders)
+  const noReplacementPartsNeeded = hasNoReplacementPartsNeeded(ro) && !orders.length
   const duplicateCleanup = useMemo(() => mergeDuplicatePartsOrders(orders), [orders])
   const nextAction = derivedNextAction(ro, orders, returns, partsStatus)
   const activeVendors = vendors.filter(group => !groupIsFullyReceived(group))
@@ -455,9 +614,24 @@ function ROCard({ ro, authorName }) {
   const [manualEdit, setManualEdit] = useState(false)
   const visibleVendors = manualEdit || showReceivedVendors ? vendors : activeVendors
   const [warning, setWarning] = useState('')
+  const [notice, setNotice] = useState('')
   const [cleaning, setCleaning] = useState(false)
+  const [draftOrders, setDraftOrders] = useState([])
+  const [showReceivedDrafts, setShowReceivedDrafts] = useState(false)
   const [editingOrder, setEditingOrder] = useState(null)
   const toast = useToast()
+
+  const activeDraftOrders = useMemo(() => (
+    draftOrders.filter(draft => draft.mode === 'add' || !draft.initialFullyReceived)
+  ), [draftOrders])
+
+  const receivedDraftOrders = useMemo(() => (
+    draftOrders.filter(draft => draft.mode !== 'add' && draft.initialFullyReceived)
+  ), [draftOrders])
+
+  const visibleDraftOrders = showReceivedDrafts
+    ? draftOrders
+    : activeDraftOrders
 
   const noteLine = (text) => {
     const stamp = format(new Date(), 'MM/dd HH:mm')
@@ -592,10 +766,136 @@ function ROCard({ ro, authorName }) {
     }
   }
 
-  const startEditOrder = (group) => {
+  const draftFromGroup = (group) => ({
+    key: group.key,
+    mode: 'edit',
+    initialFullyReceived: groupIsFullyReceived(group),
+    vendor: group.vendor === 'Missing vendor' ? '' : group.vendor,
+    vendorFull: group.vendorFull || '',
+    qty: group.quantity || '',
+    qtyReceived: group.quantity ? Math.min(group.received || 0, group.quantity) : (group.received || ''),
+    eta: group.eta || '',
+  })
+
+  const startUpdateMode = () => {
+    if (!canEditParts) return
     setWarning('')
+    setNotice('')
+    setEditingOrder(null)
+    setManualEdit(true)
+    setShowReceivedVendors(false)
+    setShowReceivedDrafts(false)
+    setDraftOrders(vendors.map(draftFromGroup))
+  }
+
+  const cancelUpdateMode = () => {
+    setManualEdit(false)
+    setDraftOrders([])
+    setShowReceivedDrafts(false)
+    setEditingOrder(null)
+    setWarning('')
+  }
+
+  const addDraftVendor = () => {
+    if (!canEditParts) return
+    setWarning('')
+    setNotice('')
+    setManualEdit(true)
+    setShowReceivedVendors(false)
+    setShowReceivedDrafts(false)
+    setDraftOrders(prev => [
+      ...prev,
+      {
+        key: `new-${Date.now()}`,
+        mode: 'add',
+        vendor: '',
+        vendorFull: '',
+        qty: '',
+        qtyReceived: 0,
+        eta: '',
+        initialFullyReceived: false,
+      },
+    ])
+  }
+
+  const setDraftField = (key, field, value) => {
+    setDraftOrders(prev => prev.map(item => item.key === key ? { ...item, [field]: value } : item))
+  }
+
+  const removeDraftVendor = (draft) => {
+    const label = vendorLabel(draft) || 'this vendor'
+    if (!window.confirm(`Delete ${label} from RO#${ro.roNumber}? Save changes will apply it.`)) return
+    setDraftOrders(prev => prev.filter(item => item.key !== draft.key))
+  }
+
+  const saveDraftChanges = async () => {
+    if (!canEditParts || !manualEdit) return
+    const previousStatus = partsStatus
+    const nextOrders = []
+
+    for (const draft of draftOrders) {
+      const nextVendor = draft.vendor.trim()
+      if (!nextVendor) {
+        setWarning('Vendor is required before saving.')
+        return
+      }
+      const nextQty = qty(draft.qty, 0)
+      const rawReceived = qty(draft.qtyReceived, 0)
+      const nextReceived = nextQty ? Math.min(rawReceived, nextQty) : rawReceived
+      const status = nextQty && nextReceived >= nextQty
+        ? 'received'
+        : nextReceived > 0
+        ? 'partial'
+        : 'ordered'
+      const existing = orders.find(order => vendorGroupKey(order) === draft.key)
+      nextOrders.push({
+        vendor: nextVendor,
+        vendorFull: draft.vendorFull.trim(),
+        qty: nextQty || null,
+        qtyReceived: nextReceived,
+        eta: draft.eta || null,
+        status,
+        orderedAt: existing?.orderedAt || new Date().toISOString(),
+        manuallyAdjustedAt: new Date().toISOString(),
+      })
+    }
+
+    const nextStatus = calculatedPartsStatus(nextOrders, nextOrders.length ? ro.partsStatus : 'not_ordered')
+    const removedCount = Math.max(0, vendors.length - draftOrders.filter(item => item.mode !== 'add').length)
+    const addedCount = draftOrders.filter(item => item.mode === 'add').length
+    const changedCount = draftOrders.length + removedCount
+    const summaryPieces = []
+    if (addedCount) summaryPieces.push(`${addedCount} added`)
+    if (removedCount) summaryPieces.push(`${removedCount} deleted`)
+    summaryPieces.push(`${draftOrders.length} saved`)
+
+    try {
+      await updateDoc(doc(db, 'ros', ro.id), {
+        partsOrders: nextOrders,
+        partsStatus: nextStatus,
+        noReplacementPartsNeeded: false,
+        'partsSubtasks.verifiedAllReceived': false,
+        notes: noteLine(`Parts vendors updated: ${summaryPieces.join(', ')}.`),
+        updatedAt: serverTimestamp(),
+      })
+      setManualEdit(false)
+      setDraftOrders([])
+      setShowReceivedDrafts(false)
+      const statusNote = statusNoticeText(previousStatus, nextStatus)
+      setNotice(statusNote || `Saved ${changedCount} vendor update${changedCount === 1 ? '' : 's'}`)
+      toast.success(`RO#${ro.roNumber} parts updates saved`)
+    } catch (err) {
+      setWarning(`Could not save parts updates: ${err.message}`)
+    }
+  }
+
+  const startEditOrder = (group) => {
+    if (!canEditParts) return
+    setWarning('')
+    setNotice('')
     setEditingOrder({
       key: group.key,
+      mode: 'edit',
       vendor: group.vendor === 'Missing vendor' ? '' : group.vendor,
       vendorFull: group.vendorFull || '',
       qty: group.quantity || '',
@@ -604,14 +904,31 @@ function ROCard({ ro, authorName }) {
     })
   }
 
-  const toggleManualEdit = () => {
-    if (manualEdit) {
-      setManualEdit(false)
-      setEditingOrder(null)
-      return
-    }
+  const startAddOrder = () => {
+    if (!canEditParts) return
+    setWarning('')
+    setNotice('')
+    setEditingOrder(null)
     setManualEdit(true)
-    setShowReceivedVendors(true)
+    setShowReceivedVendors(false)
+    setShowReceivedDrafts(false)
+    const nextDraft = {
+      key: `new-${Date.now()}`,
+      mode: 'add',
+      vendor: '',
+      vendorFull: '',
+      qty: '',
+      qtyReceived: 0,
+      eta: '',
+      initialFullyReceived: false,
+    }
+    setDraftOrders(prev => manualEdit ? [...prev, nextDraft] : [...vendors.map(draftFromGroup), nextDraft])
+  }
+
+  const toggleManualEdit = () => {
+    if (!canEditParts) return
+    if (manualEdit) cancelUpdateMode()
+    else startUpdateMode()
   }
 
   const setEditingField = (field, value) => {
@@ -620,7 +937,8 @@ function ROCard({ ro, authorName }) {
 
   const saveOrderEdit = async (event) => {
     event.preventDefault()
-    if (!editingOrder) return
+    if (!editingOrder || !canEditParts) return
+    const previousStatus = partsStatus
     const nextQty = qty(editingOrder.qty, 0)
     const rawReceived = qty(editingOrder.qtyReceived, 0)
     const nextReceived = nextQty ? Math.min(rawReceived, nextQty) : rawReceived
@@ -633,7 +951,14 @@ function ROCard({ ro, authorName }) {
       ? 'partial'
       : 'ordered'
 
-    const otherOrders = orders.filter(order => vendorGroupKey(order) !== editingOrder.key)
+    if (!nextVendor || nextVendor === 'Missing vendor') {
+      setWarning('Vendor is required before saving.')
+      return
+    }
+
+    const otherOrders = editingOrder.mode === 'add'
+      ? orders
+      : orders.filter(order => vendorGroupKey(order) !== editingOrder.key)
     const canonicalOrder = {
       vendor: nextVendor,
       vendorFull: nextVendorFull,
@@ -646,18 +971,45 @@ function ROCard({ ro, authorName }) {
     }
     const nextOrders = [...otherOrders, canonicalOrder]
     const nextStatus = calculatedPartsStatus(nextOrders, ro.partsStatus)
+    const actionLabel = editingOrder.mode === 'add' ? 'added' : 'updated'
 
     try {
       await updateDoc(doc(db, 'ros', ro.id), {
         partsOrders: nextOrders,
         partsStatus: nextStatus,
-        notes: noteLine(`Parts order corrected: ${vendorLabel({ vendor: nextVendor, vendorFull: nextVendorFull })} ${nextReceived}/${nextQty || '?'} received, ETA ${nextEta ? fmtDate(nextEta) : 'missing'}.`),
+        noReplacementPartsNeeded: false,
+        'partsSubtasks.verifiedAllReceived': false,
+        notes: noteLine(`Parts vendor ${actionLabel}: ${vendorLabel({ vendor: nextVendor, vendorFull: nextVendorFull })} ${nextReceived}/${nextQty || '?'} received, ETA ${nextEta ? fmtDate(nextEta) : 'missing'}.`),
         updatedAt: serverTimestamp(),
       })
       setEditingOrder(null)
-      toast.success(`RO#${ro.roNumber} parts order updated`)
+      const statusNote = statusNoticeText(previousStatus, nextStatus)
+      setNotice(statusNote || `${vendorLabel({ vendor: nextVendor, vendorFull: nextVendorFull })} ${actionLabel}: ${nextReceived}/${nextQty || '?'} received`)
+      toast.success(`RO#${ro.roNumber} parts vendor ${actionLabel}`)
     } catch (err) {
       setWarning(`Could not update parts order: ${err.message}`)
+    }
+  }
+
+  const deleteOrderGroup = async (group) => {
+    if (!canEditParts || !group) return
+    const label = vendorLabel(group)
+    if (!window.confirm(`Delete ${label} from RO#${ro.roNumber}?`)) return
+    const nextOrders = orders.filter(order => vendorGroupKey(order) !== group.key)
+    const nextStatus = calculatedPartsStatus(nextOrders, ro.partsStatus)
+    const previousStatus = partsStatus
+    try {
+      await updateDoc(doc(db, 'ros', ro.id), {
+        partsOrders: nextOrders,
+        partsStatus: nextStatus,
+        notes: noteLine(`Parts vendor removed: ${label}.`),
+        updatedAt: serverTimestamp(),
+      })
+      setEditingOrder(prev => prev?.key === group.key ? null : prev)
+      setNotice(statusNoticeText(previousStatus, nextStatus) || `${label} deleted`)
+      toast.success(`RO#${ro.roNumber} parts vendor deleted`)
+    } catch (err) {
+      setWarning(`Could not delete parts vendor: ${err.message}`)
     }
   }
 
@@ -667,11 +1019,16 @@ function ROCard({ ro, authorName }) {
     }`}>
       <div className="border-b border-gray-100 px-3 py-2.5 dark:border-zinc-800">
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
+          <button
+            type="button"
+            onClick={() => onOpenDrawer?.(ro.id)}
+            className="min-w-0 text-left"
+            title="Open RO notes and photos"
+          >
             <div className="flex flex-wrap items-center gap-2">
-              <Link to={`/ro/${ro.id}`} className="font-mono text-base font-extrabold text-blue-600 hover:underline dark:text-blue-400">
+              <span className="font-mono text-base font-extrabold text-blue-600 hover:underline dark:text-blue-400">
                 #{ro.roNumber}
-              </Link>
+              </span>
               <p className="min-w-0 truncate text-sm font-bold text-gray-900 dark:text-zinc-100">
                 {ro.vehicle || 'Vehicle missing'}
               </p>
@@ -679,9 +1036,9 @@ function ROCard({ ro, authorName }) {
             <p className="mt-1 break-all text-xs font-medium text-gray-900 dark:text-zinc-100">
               {ro.vin || '-'}
             </p>
-          </div>
+          </button>
           <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
-            <span className={etaDays != null && etaDays < 0 ? 'rounded px-2 py-0.5 text-[11px] font-bold bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300' : 'rounded px-2 py-0.5 text-[11px] font-bold bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-200'}>
+            <span className={etaDays != null && etaDays <= 0 ? 'rounded px-2 py-0.5 text-[11px] font-bold bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300' : 'rounded px-2 py-0.5 text-[11px] font-bold bg-gray-100 text-gray-700 dark:bg-zinc-800 dark:text-zinc-200'}>
               Due {fmtDate(eta)}
             </span>
             {statusMeta && (
@@ -698,27 +1055,41 @@ function ROCard({ ro, authorName }) {
         </div>
         <div className="mt-2 flex items-start justify-between gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-zinc-400">
-            <span className={flags.overdue ? 'font-bold text-red-600 dark:text-red-400' : ''}>
-              {partsSummary(vendors)}
-            </span>
+            {noReplacementPartsNeeded ? (
+              <span className="font-bold text-emerald-600 dark:text-emerald-300">No Repl Parts Needed</span>
+            ) : (
+              <span className={flags.overdue ? 'font-bold text-red-600 dark:text-red-400' : ''}>
+                {partsSummary(vendors)}
+              </span>
+            )}
             {flags.delivery && <span className="font-semibold text-blue-600 dark:text-blue-300">Ready to deliver to tech</span>}
             {pendingReturns.length > 0 && <span className="font-semibold text-red-600 dark:text-red-400">{pendingReturns.length} pending return{pendingReturns.length === 1 ? '' : 's'}</span>}
           </div>
-          {vendors.length > 0 && (
+          {canEditParts && !manualEdit && (
             <button
               type="button"
-              onClick={toggleManualEdit}
+              onClick={vendors.length > 0 ? startUpdateMode : startAddOrder}
               className={`shrink-0 rounded-md border px-2 py-1 text-[11px] font-bold transition-colors ${
-                manualEdit
-                  ? 'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300'
-                  : 'border-gray-200 bg-white text-gray-500 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:border-blue-700 dark:hover:text-blue-300'
+                'border-gray-200 bg-white text-gray-500 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:border-blue-700 dark:hover:text-blue-300'
               }`}
               title="Manually edit parts order details"
             >
-              {manualEdit ? 'Done' : 'Edit parts'}
+              Update
             </button>
           )}
         </div>
+        {notice && (
+          <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-bold text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-300">
+            <span>{notice}</span>
+            <button
+              type="button"
+              onClick={() => setNotice('')}
+              className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-100"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {duplicateCleanup.mergedCount > 0 && (
           <button
             type="button"
@@ -731,39 +1102,109 @@ function ROCard({ ro, authorName }) {
         )}
       </div>
 
-      {vendors.length > 0 && (
+      {(vendors.length > 0 || manualEdit) && (
         <div className="space-y-1.5 px-3 py-2.5">
           {manualEdit && (
-            <p className="rounded-md border border-blue-100 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700 dark:border-blue-900 dark:bg-blue-950/25 dark:text-blue-300">
-              Manual correction mode. Use this when GIB-AI parsed a vendor, qty, received count, or ETA incorrectly.
-            </p>
+            <div className="flex items-center justify-between gap-2 rounded-md border border-gray-200 border-l-2 border-l-blue-500 bg-gray-50 px-2 py-1 dark:border-zinc-800 dark:border-l-blue-500 dark:bg-zinc-950/40">
+              <p className="text-[11px] font-medium text-gray-500 dark:text-zinc-400">
+                Edit ETA, ordered, and received. Save when done.
+              </p>
+              <button
+                type="button"
+                onClick={addDraftVendor}
+                className="shrink-0 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-bold text-blue-600 hover:border-blue-300 dark:border-zinc-700 dark:bg-zinc-950 dark:text-blue-300"
+              >
+                Add vendor
+              </button>
+            </div>
           )}
-          {visibleVendors.map(group => (
-            <VendorProgress
-              key={group.key}
-              group={group}
-              returns={returns}
-              onEdit={startEditOrder}
-              canEdit={manualEdit}
-            />
-          ))}
-          {receivedVendors.length > 0 && !showReceivedVendors && !manualEdit && (
-            <button
-              type="button"
-              onClick={() => setShowReceivedVendors(true)}
-              className="w-full rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-left text-xs font-bold text-emerald-700 hover:border-emerald-300 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-300"
-            >
-              {receivedVendors.length} received vendor{receivedVendors.length === 1 ? '' : 's'} hidden
-            </button>
-          )}
-          {receivedVendors.length > 0 && showReceivedVendors && !manualEdit && (
-            <button
-              type="button"
-              onClick={() => setShowReceivedVendors(false)}
-              className="w-full rounded-md border border-gray-200 px-2.5 py-1.5 text-left text-xs font-bold text-gray-500 hover:border-gray-300 dark:border-zinc-700 dark:text-zinc-400"
-            >
-              Hide received vendor{receivedVendors.length === 1 ? '' : 's'}
-            </button>
+          {manualEdit ? (
+            <>
+              {visibleDraftOrders.map(draft => (
+                <VendorDraftRow
+                  key={draft.key}
+                  draft={draft}
+                  returns={returns}
+                  onChange={setDraftField}
+                  onDelete={removeDraftVendor}
+                />
+              ))}
+              {receivedDraftOrders.length > 0 && !showReceivedDrafts && (
+                <button
+                  type="button"
+                  onClick={() => setShowReceivedDrafts(true)}
+                  className="w-full rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-left text-xs font-bold text-emerald-700 hover:border-emerald-300 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-300"
+                >
+                  {receivedDraftOrders.length} received vendor{receivedDraftOrders.length === 1 ? '' : 's'} hidden
+                </button>
+              )}
+              {receivedDraftOrders.length > 0 && showReceivedDrafts && (
+                <button
+                  type="button"
+                  onClick={() => setShowReceivedDrafts(false)}
+                  className="w-full rounded-md border border-gray-200 px-2.5 py-1.5 text-left text-xs font-bold text-gray-500 hover:border-gray-300 dark:border-zinc-700 dark:text-zinc-400"
+                >
+                  Hide received vendor{receivedDraftOrders.length === 1 ? '' : 's'}
+                </button>
+              )}
+              {!visibleDraftOrders.length && !receivedDraftOrders.length && (
+                <p className="rounded-md border border-dashed border-gray-200 px-2.5 py-4 text-center text-xs font-medium text-gray-400 dark:border-zinc-700 dark:text-zinc-500">
+                  No vendors in this update.
+                </p>
+              )}
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <p className="text-[11px] font-medium text-gray-400 dark:text-zinc-500">
+                  {draftOrders.length} vendor{draftOrders.length === 1 ? '' : 's'} editing
+                </p>
+                <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={cancelUpdateMode}
+                  className="rounded-md border border-gray-200 px-2 py-1 text-[11px] font-bold text-gray-500 hover:border-gray-300 dark:border-zinc-700 dark:text-zinc-400"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveDraftChanges}
+                  className="rounded-md bg-blue-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-blue-700"
+                >
+                  Save
+                </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {visibleVendors.map(group => (
+                <VendorProgress
+                  key={group.key}
+                  group={group}
+                  returns={returns}
+                  onEdit={startEditOrder}
+                  onDelete={deleteOrderGroup}
+                  canEdit={false}
+                />
+              ))}
+              {receivedVendors.length > 0 && !showReceivedVendors && (
+                <button
+                  type="button"
+                  onClick={() => setShowReceivedVendors(true)}
+                  className="w-full rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-left text-xs font-bold text-emerald-700 hover:border-emerald-300 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-300"
+                >
+                  {receivedVendors.length} received vendor{receivedVendors.length === 1 ? '' : 's'} hidden
+                </button>
+              )}
+              {receivedVendors.length > 0 && showReceivedVendors && (
+                <button
+                  type="button"
+                  onClick={() => setShowReceivedVendors(false)}
+                  className="w-full rounded-md border border-gray-200 px-2.5 py-1.5 text-left text-xs font-bold text-gray-500 hover:border-gray-300 dark:border-zinc-700 dark:text-zinc-400"
+                >
+                  Hide received vendor{receivedVendors.length === 1 ? '' : 's'}
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
@@ -772,7 +1213,9 @@ function ROCard({ ro, authorName }) {
         <form onSubmit={saveOrderEdit} className="border-t border-gray-100 px-3 py-3 dark:border-zinc-800">
           <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-900 dark:bg-blue-950/25">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <p className="text-xs font-bold uppercase tracking-wide text-blue-700 dark:text-blue-300">Edit parts order</p>
+              <p className="text-xs font-bold uppercase tracking-wide text-blue-700 dark:text-blue-300">
+                {editingOrder.mode === 'add' ? 'Add vendor' : 'Edit vendor'}
+              </p>
               <button
                 type="button"
                 onClick={() => setEditingOrder(null)}
@@ -826,7 +1269,7 @@ function ROCard({ ro, authorName }) {
                   type="date"
                   value={editingOrder.eta}
                   onChange={e => setEditingField('eta', e.target.value)}
-                  className="mt-1 w-full rounded-md border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                  className="mt-1 w-full rounded-md border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-900 [color-scheme:light] focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:[color-scheme:dark]"
                 />
               </label>
             </div>
@@ -834,7 +1277,7 @@ function ROCard({ ro, authorName }) {
               type="submit"
               className="mt-3 w-full rounded-md bg-blue-600 px-3 py-2 text-sm font-bold text-white hover:bg-blue-700"
             >
-              Save correction
+              {editingOrder.mode === 'add' ? 'Add vendor' : 'Save update'}
             </button>
           </div>
         </form>
@@ -873,12 +1316,15 @@ function ROCard({ ro, authorName }) {
 }
 
 export default function PartsManagerView() {
-  const { user } = useAuth()
+  const { user, role } = useAuth()
   const [ros, setRos] = useState([])
   const [employees, setEmployees] = useState([])
   const [filter, setFilter] = useState('all')
-  const [sortBy, setSortBy] = useState('due')
+  const [sortBy, setSortBy] = useState(readSavedSort)
   const [loading, setLoading] = useState(true)
+  const [drawerRoId, setDrawerRoId] = useState(null)
+  const [showStickyGib, setShowStickyGib] = useState(false)
+  const quickUpdateRef = useRef(null)
 
   useEffect(() => {
     const rosQuery = query(collection(db, 'ros'), orderBy('roNumber', 'asc'))
@@ -890,6 +1336,29 @@ export default function PartsManagerView() {
       setEmployees(snap.docs.map(d => ({ uid: d.id, ...d.data() })))
     })
     return () => { unsubRos(); unsubUsers() }
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SORT_STORAGE_KEY, sortBy)
+    } catch {
+      // Sorting still works if localStorage is unavailable.
+    }
+  }, [sortBy])
+
+  useEffect(() => {
+    const onScroll = () => {
+      const box = quickUpdateRef.current
+      if (!box) return
+      setShowStickyGib(window.scrollY > box.offsetTop - 68)
+    }
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', onScroll)
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onScroll)
+    }
   }, [])
 
   const candidates = useMemo(() => {
@@ -930,13 +1399,15 @@ export default function PartsManagerView() {
       })
       .sort((a, b) => {
         if (sortBy === 'ro') return String(a.ro.roNumber || '').localeCompare(String(b.ro.roNumber || ''), undefined, { numeric: true })
-        if (sortBy === 'parts') {
-          const rank = { partially_received: 0, ordered: 1, not_ordered: 2, all_received: 3 }
-          const diff = (rank[a.partsStatus] ?? 9) - (rank[b.partsStatus] ?? 9)
-          if (diff) return diff
+        if (sortBy === 'parts_eta') {
+          const ea = a.eta || '9999-12-31'
+          const eb = b.eta || '9999-12-31'
+          if (ea !== eb) return ea.localeCompare(eb)
         }
-        if (a.flags.overdue !== b.flags.overdue) return a.flags.overdue ? -1 : 1
-        return a.eta.localeCompare(b.eta)
+        // repair_due (default): sort by vehicle completion due date
+        const ra = a.ro.eta || a.ro.cccDateOut || a.ro.promisedDate || '9999-12-31'
+        const rb = b.ro.eta || b.ro.cccDateOut || b.ro.promisedDate || '9999-12-31'
+        return ra.localeCompare(rb)
       })
       .map(item => item.ro)
   }, [candidates, filter, sortBy])
@@ -945,6 +1416,13 @@ export default function PartsManagerView() {
     const employee = employees.find(emp => emp.uid === user?.uid)
     return employee?.name || user?.email || 'Parts Manager'
   }, [employees, user])
+  const employeesMap = useMemo(() => Object.fromEntries(employees.map(e => [e.uid, e.name || e.email || ''])), [employees])
+  const drawerRo = useMemo(() => ros.find(r => r.id === drawerRoId) ?? null, [ros, drawerRoId])
+
+  const canEditParts = useMemo(() => {
+    const effectiveRole = role || user?.role
+    return PARTS_PAGE_ROLES.includes(effectiveRole)
+  }, [role, user])
 
   if (loading) {
     return <div className="flex h-64 items-center justify-center text-gray-400 dark:text-zinc-600">Loading...</div>
@@ -952,6 +1430,9 @@ export default function PartsManagerView() {
 
   return (
     <div className="space-y-4 pb-8">
+      {drawerRo && (
+        <RODrawer ro={drawerRo} employees={employeesMap} onClose={() => setDrawerRoId(null)} />
+      )}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-lg font-bold text-gray-950 dark:text-zinc-100">Parts Manager</h1>
@@ -965,7 +1446,9 @@ export default function PartsManagerView() {
         </div>
       </div>
 
-      <AIInputBox ros={ros} employees={employees} sourceRole="parts_manager" />
+      <div ref={quickUpdateRef} className="sticky top-[64px] z-40 transition-all duration-200 ease-out">
+        <AIInputBox ros={ros} employees={employees} sourceRole="parts_manager" compact={showStickyGib} sharedDraftKey="parts-gib-draft" />
+      </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-2 overflow-x-auto pb-1">
@@ -1005,7 +1488,7 @@ export default function PartsManagerView() {
         </p>
       ) : (
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-          {visible.map(ro => <ROCard key={ro.id} ro={ro} authorName={authorName} />)}
+          {visible.map(ro => <ROCard key={ro.id} ro={ro} authorName={authorName} canEditParts={canEditParts} onOpenDrawer={setDrawerRoId} />)}
         </div>
       )}
     </div>

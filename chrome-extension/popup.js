@@ -41,6 +41,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('desel-all-link').addEventListener('click', () => setAllChecked(false))
   $('dt-btn').addEventListener('click',      handleDingTalkImport)
   $('save-url-btn').addEventListener('click', handleSaveUrl)
+  $('manual-sync-btn').addEventListener('click', handleManualAutoSync)
 
   // Enter key on password field
   $('login-password').addEventListener('keydown', e => {
@@ -353,7 +354,7 @@ async function handleMarkDelivered(roNum, docName, btn) {
 async function loadExistingROs() {
   existingROs = new Map()
   try {
-    const fields = ['roNumber','totalAmount','cccColumn','status','vehicle','customerName']
+    const fields = ['roNumber','totalAmount','cccColumn','status','vehicle','customerName','paintHrs','needsPaint','assignedPainter','assignedPaintHelper']
     const mask   = fields.map(f => `mask.fieldPaths=${encodeURIComponent(f)}`).join('&')
     const url    = `${FIRESTORE_URL}/ros?pageSize=500&${mask}`
     const res    = await authFetch(url)
@@ -363,12 +364,16 @@ async function loadExistingROs() {
       const roNum = doc.fields?.roNumber?.stringValue
       if (!roNum) continue
       existingROs.set(roNum, {
-        docName:      doc.name,
-        totalAmount:  doc.fields?.totalAmount?.stringValue  || '',
-        cccColumn:    doc.fields?.cccColumn?.stringValue    || '',
-        status:       doc.fields?.status?.stringValue       || '',
-        vehicle:      doc.fields?.vehicle?.stringValue      || '',
-        customerName: doc.fields?.customerName?.stringValue || '',
+        docName:             doc.name,
+        totalAmount:         doc.fields?.totalAmount?.stringValue         || '',
+        cccColumn:           doc.fields?.cccColumn?.stringValue           || '',
+        status:              doc.fields?.status?.stringValue              || '',
+        vehicle:             doc.fields?.vehicle?.stringValue             || '',
+        customerName:        doc.fields?.customerName?.stringValue        || '',
+        paintHrs:            doc.fields?.paintHrs?.stringValue            || '',
+        needsPaint:          doc.fields?.needsPaint?.booleanValue,
+        assignedPainter:     doc.fields?.assignedPainter?.stringValue     || '',
+        assignedPaintHelper: doc.fields?.assignedPaintHelper?.stringValue || '',
       })
     }
   } catch (e) {
@@ -378,6 +383,21 @@ async function loadExistingROs() {
 
 function normalizeName(value = '') {
   return value.toString().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+// Parse CCC paint hours string ('--', '', '0', '1.5') → number; non-numeric → 0
+function parsePaintHrs(v) {
+  if (v == null) return 0
+  const s = String(v).trim()
+  if (!s || s === '--') return 0
+  const n = parseFloat(s)
+  return Number.isFinite(n) ? n : 0
+}
+
+// Returns the single user with the given role, or null if 0 or 2+ exist
+function findUniqueUserByRole(role) {
+  const matches = users.filter(u => u.role === role)
+  return matches.length === 1 ? matches[0] : null
 }
 
 function findUserByName(rawName = '', roles = []) {
@@ -571,6 +591,9 @@ function changeLogEntry(type, value, timestamp) {
 // oldData: previous snapshot from existingROs map (for change detection)
 async function writeRO(ro, timestamp, existingDocName, oldData) {
   const estimatorUser = findUserByName(ro.estimatorName, ['estimator', 'shop_manager', 'production_manager'])
+  const wantsPaint    = parsePaintHrs(ro.paintHrs) > 0
+  const painterUser   = wantsPaint ? findUniqueUserByRole('painter')      : null
+  const helperUser    = wantsPaint ? findUniqueUserByRole('paint_helper') : null
 
   if (existingDocName) {
     // ── COMMIT: update CCC data fields + append changeLog entries atomically ──
@@ -593,6 +616,16 @@ async function writeRO(ro, timestamp, existingDocName, oldData) {
       cccLastSync:      strVal(timestamp),
     }
     if (estimatorUser?.uid) updateFields.assignedEstimator = strVal(estimatorUser.uid)
+    // Auto-upgrade to needsPaint=true when CCC reports paint hours; never downgrade
+    if (wantsPaint && oldData?.needsPaint !== true) {
+      updateFields.needsPaint = { booleanValue: true }
+    }
+    if (wantsPaint && painterUser?.uid && !oldData?.assignedPainter) {
+      updateFields.assignedPainter = strVal(painterUser.uid)
+    }
+    if (wantsPaint && helperUser?.uid && !oldData?.assignedPaintHelper) {
+      updateFields.assignedPaintHelper = strVal(helperUser.uid)
+    }
 
     // Build changeLog entries for detected field changes
     const logEntries = []
@@ -663,9 +696,11 @@ async function writeRO(ro, timestamp, existingDocName, oldData) {
         paintHrs:         strVal(ro.paintHrs),
         paintCode:        strVal(ro.paintCode),
         notes:            strVal(''),
+        needsPaint:           { booleanValue: wantsPaint },
         assignedEstimator:    strVal(estimatorUser?.uid || ''),
         assignedBodyMan:      strVal(''),
-        assignedPainter:      strVal(''),
+        assignedPainter:      strVal((wantsPaint && painterUser?.uid) || ''),
+        assignedPaintHelper:  strVal((wantsPaint && helperUser?.uid) || ''),
         assignedPartsManager: strVal(''),
         createdAt:        strVal(timestamp),
         updatedAt:        strVal(timestamp),
@@ -817,6 +852,69 @@ function showMain(displayName) {
   $('header-user').style.display = 'flex'
   $('header-name').textContent   = displayName || 'Signed In'
   checkCurrentPage()
+  loadAutoSyncStatus()
+}
+
+// ── Auto-sync status display ──────────────────────────────────────────────────
+async function loadAutoSyncStatus() {
+  // Show next scheduled time
+  chrome.alarms.get('daily-ccc-sync', alarm => {
+    const el = $('auto-sync-next')
+    if (alarm?.scheduledTime) {
+      const next = new Date(alarm.scheduledTime)
+      el.textContent = `下次: ${next.toLocaleDateString('zh-CN')} ${next.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+    } else {
+      el.textContent = '未找到定时任务 — 请重启 Chrome'
+    }
+  })
+
+  // Show last sync result
+  const logs = await chromeGet('autoSyncLogs')
+  const last  = logs?.[0]
+  const el    = $('auto-sync-last')
+  if (!last) {
+    el.innerHTML = '<span style="color:#94a3b8">尚未运行过自动同步</span>'
+    return
+  }
+
+  const when  = new Date(last.startedAt)
+  const label = when.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const ok    = last.syncResults?.filter(r => r.ok).length ?? 0
+  const fail  = last.syncResults?.filter(r => !r.ok).length ?? 0
+
+  if (last.error) {
+    el.innerHTML = `<div class="auto-sync-error">${label} — ❌ ${last.error}</div>`
+  } else {
+    el.innerHTML = `<div class="auto-sync-steps">${label} — ✅ ${ok} 个 RO 同步成功${fail ? `，${fail} 失败` : ''}</div>`
+  }
+}
+
+async function handleManualAutoSync() {
+  const btn = $('manual-sync-btn')
+  btn.textContent = '⏳ 同步中…'
+  btn.disabled    = true
+  $('auto-sync-last').innerHTML = '<span style="color:#94a3b8">正在扫描 CCC 并同步，请稍候…</span>'
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'MANUAL_SYNC' })
+    if (response?.ok) {
+      const log  = response.log
+      const ok   = log.syncResults?.filter(r => r.ok).length ?? 0
+      const fail = log.syncResults?.filter(r => !r.ok).length ?? 0
+      if (log.error) {
+        $('auto-sync-last').innerHTML = `<div class="auto-sync-error">❌ ${log.error}</div>`
+      } else {
+        $('auto-sync-last').innerHTML = `<div class="auto-sync-steps">✅ ${ok} 个 RO 同步成功${fail ? `，${fail} 失败` : ''}</div>`
+      }
+    } else {
+      $('auto-sync-last').innerHTML = `<div class="auto-sync-error">❌ ${response?.error || '未知错误'}</div>`
+    }
+  } catch (err) {
+    $('auto-sync-last').innerHTML = `<div class="auto-sync-error">❌ ${err.message}</div>`
+  } finally {
+    btn.textContent = '▶ 立即运行'
+    btn.disabled    = false
+  }
 }
 
 async function checkCurrentPage() {

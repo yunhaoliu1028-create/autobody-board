@@ -4,8 +4,9 @@ import { collection, onSnapshot, query, where } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { ROLE_LABELS, MANAGER_ROLES, ROLES, WORKER_ROLES } from '../constants/roles'
+import { ROLE_LABELS, MANAGER_ROLES, PARTS_PAGE_ROLES, ROLES, WORKER_ROLES } from '../constants/roles'
 import FloatingAssistant from './FloatingAssistant'
+import { t } from '../utils/mobileI18n'
 
 // ── SVG Icons ─────────────────────────────────────────────────────────────────
 function IconBoard()    { return <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="11" rx="1.5"/><rect x="14" y="17" width="7" height="4" rx="1.5"/></svg> }
@@ -113,6 +114,25 @@ function avatarInitials(name = '') {
   return name.split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2) || '?'
 }
 
+function timestampMillis(value) {
+  return value?.toMillis?.()
+    ?? (value?.seconds != null ? value.seconds * 1000 : null)
+    ?? null
+}
+
+function taskNotifyMillis(task) {
+  return timestampMillis(task.assignedAt)
+    ?? timestampMillis(task.createdAt)
+    ?? timestampMillis(task.updatedAt)
+    ?? 0
+}
+
+function navBadgeCount(path, { chatUnread = 0, taskUnread = 0 } = {}) {
+  if (path === '/chat') return chatUnread
+  if (path === '/tasks') return taskUnread
+  return 0
+}
+
 // ── Mobile tab bar items ──────────────────────────────────────────────────────
 function TabIconUpdate({ active }) {
   return <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={active ? 2.25 : 1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/></svg>
@@ -146,7 +166,7 @@ const WORKER_MOBILE_TABS = [
 const NAV_ITEMS = [
   { path: '/board',    label: 'RO Board', icon: <IconBoard />,    roles: null },
   { path: '/tasks',    label: 'Tasks',    icon: <IconTasks />,    roles: null },
-  { path: '/parts',    label: 'Parts',    icon: <IconParts />,    roles: [...MANAGER_ROLES, ROLES.PARTS_MANAGER] },
+  { path: '/parts',    label: 'Parts',    icon: <IconParts />,    roles: PARTS_PAGE_ROLES },
   { path: '/chat',     label: 'Chat',     icon: <IconChat />,     roles: null },
   { path: '/meeting',  label: 'Meeting',  icon: <IconMeeting />,  roles: MANAGER_ROLES },
   { path: '/settings', label: 'Settings', icon: <IconSettings />, roles: null },
@@ -159,7 +179,8 @@ const WORKER_NAV_ITEMS = [
 ]
 
 export default function Layout({ children }) {
-  const { displayName, role, logout, user } = useAuth()
+  const { displayName, role, logout, user, userProfile } = useAuth()
+  const language = userProfile?.language || 'english'
   const { dark, toggle }                    = useTheme()
   const location  = useLocation()
   const navigate  = useNavigate()
@@ -168,12 +189,21 @@ export default function Layout({ children }) {
   const [profileOpen,    setProfileOpen]    = useState(false)
   const [notifications,  setNotifications]  = useState([])
   const [chatUnread,     setChatUnread]      = useState(0)
+  const [taskUnread,     setTaskUnread]      = useState(0)
+  const [taskSeenAt,     setTaskSeenAt]      = useState(0)
   const [chatPanelOpen,  setChatPanelOpen]   = useState(false)
   const profileRef = useRef(null)
 
   const prevConvosRef        = useRef({})   // convoId -> lastAt millis
   const initializedRef       = useRef(false)
   const activeChatConvoIdRef = useRef(null)
+
+  useEffect(() => {
+    if (!user?.uid) return
+    const key = `autobody.tasks.lastSeen.${user.uid}`
+    const saved = Number(localStorage.getItem(key) || 0)
+    setTaskSeenAt(saved || Date.now() - 86_400_000)
+  }, [user?.uid])
 
   // Track which convo is open in Chat page
   useEffect(() => {
@@ -192,6 +222,14 @@ export default function Layout({ children }) {
       setChatPanelOpen(false)
     }
   }, [location.pathname])
+
+  useEffect(() => {
+    if (!user?.uid || !location.pathname.startsWith('/tasks')) return
+    const now = Date.now()
+    localStorage.setItem(`autobody.tasks.lastSeen.${user.uid}`, String(now))
+    setTaskSeenAt(now)
+    setTaskUnread(0)
+  }, [location.pathname, user?.uid])
 
   // Global subscription: conversations → unread count + popup notifications
   useEffect(() => {
@@ -250,6 +288,26 @@ export default function Layout({ children }) {
     })
   }, [user?.uid])
 
+  useEffect(() => {
+    if (!user?.uid || !taskSeenAt) return
+    const q = query(collection(db, 'tasks'), where('assignedTo', '==', user.uid))
+    return onSnapshot(q, snap => {
+      if (location.pathname.startsWith('/tasks')) {
+        setTaskUnread(0)
+        return
+      }
+      let unread = 0
+      snap.docs.forEach(d => {
+        const task = d.data()
+        if (task.status === 'completed') return
+        if (taskNotifyMillis(task) > taskSeenAt) unread++
+      })
+      setTaskUnread(unread)
+    }, err => {
+      console.error('[Layout] task notification listener failed:', err)
+    })
+  }, [user?.uid, taskSeenAt, location.pathname])
+
   // Close profile dropdown on outside click
   useEffect(() => {
     const handler = (e) => {
@@ -302,7 +360,7 @@ export default function Layout({ children }) {
           <nav className="hidden md:flex items-center gap-0.5 flex-1 justify-center">
             {visibleNav.map(item => {
               const active = location.pathname === item.path
-              const badge  = item.path === '/chat' && chatUnread > 0 ? chatUnread : 0
+              const badge  = navBadgeCount(item.path, { chatUnread, taskUnread })
               return (
                 <Link
                   key={item.path}
@@ -332,7 +390,7 @@ export default function Layout({ children }) {
               <div className="flex items-center gap-1">
                 {workerSwitch.map(({ path, label, Icon }) => {
                   const active = location.pathname.startsWith(path)
-                  const badge = path === '/chat' && chatUnread > 0 ? chatUnread : 0
+                  const badge = navBadgeCount(path, { chatUnread, taskUnread })
                   return (
                     <Link
                       key={path}
@@ -351,7 +409,7 @@ export default function Layout({ children }) {
                           </span>
                         )}
                       </span>
-                      {label === 'My Work' ? 'Work' : label}
+                      {label === 'My Work' ? t(language, 'work', 'Work') : t(language, label.toLowerCase(), label)}
                     </Link>
                   )
                 })}
@@ -379,7 +437,7 @@ export default function Layout({ children }) {
               className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-zinc-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
             >
               <IconSignOut />
-              Sign Out
+              {t(language, 'signOut', 'Sign Out')}
             </button>
 
             {/* Mobile: profile avatar button */}
@@ -406,13 +464,13 @@ export default function Layout({ children }) {
                     onClick={() => setProfileOpen(false)}
                     className="flex items-center gap-2.5 px-4 py-3 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-zinc-800 transition-colors"
                   >
-                    <IconSettings /> Settings
+                    <IconSettings /> {t(language, 'settings', 'Settings')}
                   </Link>
                   <button
                     onClick={() => { setProfileOpen(false); handleLogout() }}
                     className="w-full flex items-center gap-2.5 px-4 py-3 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors border-t border-gray-100 dark:border-zinc-800"
                   >
-                    <IconSignOut /> Sign Out
+                    <IconSignOut /> {t(language, 'signOut', 'Sign Out')}
                   </button>
                 </div>
               )}
@@ -438,7 +496,7 @@ export default function Layout({ children }) {
         <div className={`grid h-14 ${mobileTabs.length === 2 ? 'grid-cols-2' : mobileTabs.length === 3 ? 'grid-cols-3' : 'grid-cols-4'}`}>
           {mobileTabs.map(({ path, label, Icon }) => {
             const isActive = location.pathname.startsWith(path)
-            const badge = path === '/chat' && chatUnread > 0 ? chatUnread : 0
+            const badge = navBadgeCount(path, { chatUnread, taskUnread })
             return (
               <Link
                 key={path}

@@ -1,0 +1,11 @@
+[
+  {
+    "origin": [
+      "https://bodyshop-board.web.app",
+      "http://localhost:5173"
+    ],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Disposition"],
+    "maxAgeSeconds": 3600
+  }
+]

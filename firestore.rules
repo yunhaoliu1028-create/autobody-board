@@ -14,7 +14,7 @@ service cloud.firestore {
     }
 
     function isManager() {
-      return myRole() in ['shop_manager', 'production_manager'];
+      return myRole() in ['shop_manager', 'production_manager', 'estimator'];
     }
 
     function canEditRO() {

@@ -7,7 +7,6 @@ import {
   getDoc,
   onSnapshot,
   serverTimestamp,
-  setDoc,
   updateDoc,
 } from 'firebase/firestore'
 import { getDownloadURL, ref as storageRef, uploadBytesResumable } from 'firebase/storage'
@@ -15,8 +14,9 @@ import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
-import { MANAGER_ROLES, PARTS_STATUSES, ROLES, STATUS_MAP } from '../constants/roles'
+import { PARTS_STATUSES, ROLES, STATUS_MAP } from '../constants/roles'
 import { transcribeWithWhisper } from '../hooks/useAI'
+import { getDownstreamTasks, getSuggestedNextStatus, STATUS_PHASE_TRIGGER } from '../engine/taskRules'
 import MobileROSheet from '../components/MobileROSheet'
 import { partsLabel, statusLabel, t } from '../utils/mobileI18n'
 import { compressImageFile, compressVideoFrame } from '../utils/imageCompression'
@@ -36,14 +36,6 @@ function IconCamera() {
     <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.8l1.2-1.8h5L15.7 6h1.8A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-8Z" />
       <circle cx="12" cy="12.5" r="3.2" />
-    </svg>
-  )
-}
-
-function IconChevron() {
-  return (
-    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" d="m6 9 6 6 6-6" />
     </svg>
   )
 }
@@ -216,6 +208,15 @@ function etaOf(ro) {
   return ro?.eta || ro?.cccDateOut || ro?.promisedDate || null
 }
 
+function parsePaintHrs(value) {
+  const n = Number.parseFloat(String(value ?? '').replace(/[^\d.]/g, ''))
+  return Number.isFinite(n) ? n : 0
+}
+
+function roNeedsPaint(ro) {
+  return ro?.needsPaint === true || parsePaintHrs(ro?.paintHrs ?? ro?.refinishTime ?? ro?.refinishHrs) > 0
+}
+
 function fmtDate(s) {
   if (!s) return '-'
   try {
@@ -259,46 +260,11 @@ function taskSortKey(task) {
   return status * 1_000_000_000 + v
 }
 
-function assignedToWorker(ro, uid, role) {
-  if (!ro || !uid) return false
-  if (role === ROLES.BODY_MAN) return ro.assignedBodyMan === uid
-  if (role === ROLES.PAINTER || role === ROLES.PAINT_HELPER) return ro.assignedPainter === uid
-  return ro.assignedBodyMan === uid || ro.assignedPainter === uid
-}
-
-const BODY_MAIN_PHASES = ['teardown', 'body', 'reassembly']
-const BODY_TASK_BY_STATUS = {
-  teardown:   { title: 'Teardown',   phase: 'teardown' },
-  body_work:  { title: 'Repair',     phase: 'body' },
-  reassembly: { title: 'Reassembly', phase: 'reassembly' },
-}
-
-function bodyMainTasksComplete(tasks) {
-  const completed = new Set()
-  for (const task of tasks) {
-    if (task.status !== 'completed') continue
-    const phase = inferredTaskPhase(task)
-    if (BODY_MAIN_PHASES.includes(phase)) completed.add(phase)
-  }
-  return BODY_MAIN_PHASES.every(phase => completed.has(phase))
-}
-
-function isBodyWorkerRo(ro, uid, role) {
-  return role === ROLES.BODY_MAN && ro?.assignedBodyMan === uid
-}
-
-function bodyTaskForStatus(status) {
-  return BODY_TASK_BY_STATUS[status] || null
-}
-
-function hasBodyMainTaskForStatus(ro, tasks) {
-  const tmpl = bodyTaskForStatus(ro?.status)
-  if (!ro || !tmpl) return true
-  return tasks.some(task => {
-    const sameRo = task.roId === ro.id || String(task.roNumber || '') === String(ro.roNumber || '')
-    if (!sameRo || task.assignedTo !== ro.assignedBodyMan || task.taskKind === 'secondary') return false
-    return inferredTaskPhase(task) === tmpl.phase
-  })
+function paintTaskSortKey(task) {
+  const phaseOrder = { paint_prep: 0, paint: 1 }
+  const primaryRank = isPrimaryPaintTask(task) ? 0 : 1
+  const phaseRank = phaseOrder[inferredTaskPhase(task)] ?? 2
+  return primaryRank * 10_000_000_000 + phaseRank * 1_000_000_000 + taskSortKey(task)
 }
 
 function vehicleLine(ro) {
@@ -337,44 +303,37 @@ function taskText(task) {
 }
 
 function inferredTaskPhase(task) {
-  if (task.phase === 'teardown') return 'teardown'
-  if (task.phase === 'body' || task.phase === 'body_work') return 'body'
-  if (task.phase === 'reassembly') return 'reassembly'
+  if (task.phase === 'paint_prep') return 'paint_prep'
+  if (task.phase === 'paint') return 'paint'
   const text = taskText(task)
-  if (text.includes('teardown') || text.includes('tear down')) return 'teardown'
-  if (text.includes('reassembly') || text.includes('reassemble')) return 'reassembly'
-  if (/\brepair|body work|process repair\b/i.test(text)) return 'body'
+  if (text.includes('paint prep') || text.includes('prep')) return 'paint_prep'
+  if (text.includes('paint')) return 'paint'
   return ''
 }
 
-function isPrimaryBodyTask(task) {
+function isPrimaryPaintTask(task) {
   if (task.taskKind === 'secondary') return false
-  return task.taskKind === 'primary' || ['teardown', 'body', 'reassembly'].includes(inferredTaskPhase(task))
+  return task.taskKind === 'primary' || ['paint_prep', 'paint'].includes(inferredTaskPhase(task))
 }
 
 function compactTaskTitle(task) {
   if (task.displayTitle) return task.displayTitle
   if (task.taskKind !== 'secondary') {
     const phase = inferredTaskPhase(task)
-    if (phase === 'teardown') return 'Teardown'
-    if (phase === 'body') return 'Repair'
-    if (phase === 'reassembly') return 'Reassembly'
+    if (phase === 'paint_prep') return 'Paint Prep'
+    if (phase === 'paint') return 'Paint'
   }
   const text = taskText(task)
-  if (text.includes('tire') || text.includes('tyre') || text.includes('pressure') || text.includes('tpms')) return 'Tire pressure check'
-  if (text.includes('process repair')) return 'Process repair'
-  if (text.includes('progress') && text.includes('photo')) return 'Progress photos'
-  if (text.includes('photo')) return 'Photos'
-  if (text.includes('fitment')) return 'Fitment check'
-  if (text.includes('supplement')) return 'Supplement review'
-  if (text.includes('paint prep')) return 'Paint prep'
+  if (text.includes('photo') || text.includes('picture') || text.includes('image')) return 'Photos'
+  if (text.includes('color') || text.includes('colour')) return 'Color match'
+  if (text.includes('blend')) return 'Blend'
+  if (text.includes('mask') || text.includes('masking')) return 'Masking'
   return task.title || 'Task'
 }
 
 function taskDedupeKey(task) {
-  if (isPrimaryBodyTask(task)) return `primary:${inferredTaskPhase(task)}`
+  if (isPrimaryPaintTask(task)) return `primary:${inferredTaskPhase(task)}`
   const title = compactTaskTitle(task).toLowerCase()
-  if (title === 'teardown') return 'teardown'
   return `${title}:${(task.description || '').toLowerCase()}`
 }
 
@@ -398,11 +357,11 @@ function dedupeTasks(list) {
       map.set(key, task)
     }
   }
-  return [...map.values()].sort((a, b) => taskSortKey(a) - taskSortKey(b))
+  return [...map.values()].sort((a, b) => paintTaskSortKey(a) - paintTaskSortKey(b))
 }
 
 function compactTaskHint(task) {
-  if (isPrimaryBodyTask(task)) return ''
+  if (isPrimaryPaintTask(task)) return ''
   const coreTitle = compactTaskTitle(task)
   const subTasks = Array.isArray(task.subTasks) ? task.subTasks : []
   const taskNotes = Array.isArray(task.taskNotes) ? task.taskNotes : []
@@ -443,11 +402,10 @@ function taskButtonTone(status) {
 
 function taskMatchesWorkerCommand(task, command) {
   const haystack = `${compactTaskTitle(task)} ${task.title || ''} ${task.description || ''} ${task.phase || ''}`.toLowerCase()
-  if (/\btear\s*down|teardown\b/i.test(command)) return /teardown|tear down/.test(haystack)
-  if (/\breassembly|reassemble|assemble\b/i.test(command)) return /reassembly|reassemble|assemble/.test(haystack)
-  if (/\brepair|body\b/i.test(command)) return /repair|body|process/.test(haystack)
+  if (/\bpaint\s*prep|prep\b/i.test(command)) return /paint.prep|prep/.test(haystack)
+  if (/\bpaint|painting\b/i.test(command)) return /paint/.test(haystack)
   if (/\bphoto|picture|image\b/i.test(command)) return /photo|picture|image/.test(haystack)
-  if (/\bpaint|prep\b/i.test(command)) return /paint|prep/.test(haystack)
+  if (/\bblend\b/i.test(command)) return /blend/.test(haystack)
   return false
 }
 
@@ -460,27 +418,9 @@ function chooseTaskForCommand(tasks, command) {
 function parseWorkerCommand(text) {
   const normalized = text.toLowerCase()
   return {
-    wantsNeedsParts: /\bneed(s)?\s+parts?|missing\s+parts?|parts?\s+(needed|missing|issue)\b/i.test(normalized),
-    wantsSuppDamage: /\bsupp(lement)?\s*(damage|needed)?|additional\s+damage|hidden\s+damage|more\s+damage\b/i.test(normalized),
     wantsComplete: /\b(done|complete|completed|finished|finish)\b/i.test(normalized),
     wantsStart: /\b(start|started|begin|working|work on)\b/i.test(normalized),
   }
-}
-
-function findEmployeeByRole(employees, role) {
-  return employees.find(emp => emp.role === role)?.uid || null
-}
-
-function roleFallbackAssignee(employees, roles) {
-  for (const role of roles) {
-    const uid = findEmployeeByRole(employees, role)
-    if (uid) return uid
-  }
-  return null
-}
-
-function makeNote(authorName, text) {
-  return `[${format(new Date(), 'MM/dd HH:mm')} - ${authorName}] ${text}`
 }
 
 function escapeRegExp(value) {
@@ -501,22 +441,22 @@ function taskAssignmentTitlesFromNotes(notes, workerName) {
     .filter(Boolean)
 }
 
-function isGenericBodyTask(task) {
+function isGenericPaintTask(task) {
   const title = compactTaskTitle(task).toLowerCase()
-  return title === 'teardown' || title === 'process repair' || title === 'teardown & process repair'
+  return title === 'paint prep' || title === 'paint' || title === 'paint prep & paint job'
 }
 
-function taskLooksLikeBodyAssignment(text) {
-  return /\b(teardown|tear\s*down|begin repair|start repair|process repair|body\s*(man|tech|work))\b/i.test(text)
+function taskLooksLikePaintAssignment(text) {
+  return /\b(paint\s*prep|prep\s*paint|paint\s*job|paint\s*work|in\s*paint)\b/i.test(text)
 }
 
 function visibleTasksForRo(ro, tasks, workerName) {
   const legacyCustomTitles = taskAssignmentTitlesFromNotes(ro.notes, workerName)
-    .filter(title => !taskLooksLikeBodyAssignment(title))
+    .filter(title => !taskLooksLikePaintAssignment(title))
 
   let titleIndex = 0
   const decorated = tasks.map(task => {
-    if (!legacyCustomTitles.length || !isGenericBodyTask(task)) return task
+    if (!legacyCustomTitles.length || !isGenericPaintTask(task)) return task
     const title = legacyCustomTitles[titleIndex]
     titleIndex += 1
     if (!title) return task
@@ -567,15 +507,6 @@ function TaskRow({ task, onCycle, language }) {
   )
 }
 
-function ExceptionChip({ active, children }) {
-  if (!active) return null
-  return (
-    <span className="rounded-full bg-amber-100 px-2 py-1 text-[11px] font-semibold text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-400/20">
-      {children}
-    </span>
-  )
-}
-
 function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, showCompleted = false, language = 'english' }) {
   const [showDoneTasks, setShowDoneTasks] = useState(false)
   const eta = etaOf(ro)
@@ -585,7 +516,6 @@ function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, show
   const completedTasks = sortedTasks.filter(t => t.status === 'completed')
   const visibleTasks = showCompleted ? [] : activeTasks
   const doneCount = sortedTasks.filter(t => t.status === 'completed').length
-  const flags = ro.workerFlags || {}
   const meta = vehicleMetaLine(ro)
 
   return (
@@ -593,8 +523,6 @@ function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, show
       className={`rounded-[1.35rem] border bg-white/82 p-3.5 shadow-lg shadow-zinc-200/70 backdrop-blur-xl transition dark:bg-zinc-950/80 dark:shadow-black/20 ${
         selected
           ? 'border-blue-500/80 ring-1 ring-blue-400/25 dark:border-blue-400/55 dark:ring-blue-400/10'
-          : flags.needsParts || flags.suppDamage
-          ? 'border-amber-400/70'
           : 'border-zinc-200 dark:border-zinc-800'
       }`}
     >
@@ -637,99 +565,45 @@ function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, show
       </div>
 
       {sortedTasks.length > 0 && (
-      <div className="mt-4 rounded-2xl bg-zinc-50/90 p-2 ring-1 ring-zinc-200 dark:bg-zinc-950/45 dark:ring-white/10">
-        <div className="mb-2 flex items-center justify-between px-1">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-            {showCompleted ? t(language, 'completed', 'Completed') : sortedTasks.length > 1 ? `${sortedTasks.length} ${t(language, 'tasks', 'tasks')}` : t(language, 'task', 'Task')}
-          </p>
-          {sortedTasks.length > 0 && (
-            <p className="text-[11px] font-medium text-zinc-500">{doneCount}/{sortedTasks.length} {t(language, 'done', 'done')}</p>
-          )}
-        </div>
-        <div className="space-y-1.5">
-          {visibleTasks.length > 0 && (
-            visibleTasks.map(task => (
-              <TaskRow key={task.id} task={task} onCycle={onCycleTask} language={language} />
-            ))
-          )}
-          {completedTasks.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowDoneTasks(prev => !prev)}
-              className="flex w-full items-center justify-between rounded-xl bg-emerald-50/45 px-2.5 py-2 text-left text-[12px] font-semibold text-emerald-700 ring-1 ring-emerald-200/60 transition active:scale-[0.99] dark:bg-white/[0.025] dark:text-emerald-200 dark:ring-white/10"
-            >
-              <span>{t(language, 'completed', 'Completed')} {doneCount}/{sortedTasks.length}</span>
-              <span className="text-[11px] text-emerald-500 dark:text-emerald-300">{showDoneTasks ? 'Hide' : 'Show'}</span>
-            </button>
-          )}
-          {completedTasks.length > 0 && showDoneTasks && (
-            completedTasks.map(task => (
-              <TaskRow key={task.id} task={task} onCycle={onCycleTask} language={language} />
-            ))
-          )}
-          {activeTasks.length === 0 && completedTasks.length === 0 && (
-            <div className="rounded-xl px-2.5 py-3 text-[12px] text-zinc-500">
-              {showCompleted ? t(language, 'noCompletedTask', 'No completed task yet') : t(language, 'noActiveTask', 'No active task assigned')}
-            </div>
-          )}
-        </div>
-      </div>
-      )}
-
-      {(flags.needsParts || flags.suppDamage) && (
-        <div className="mt-3 flex justify-end gap-1.5">
-          <ExceptionChip active={flags.needsParts}>Parts notified</ExceptionChip>
-          <ExceptionChip active={flags.suppDamage}>Estimator notified</ExceptionChip>
+        <div className="mt-4 rounded-2xl bg-zinc-50/90 p-2 ring-1 ring-zinc-200 dark:bg-zinc-950/45 dark:ring-white/10">
+          <div className="mb-2 flex items-center justify-between px-1">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+              {showCompleted ? t(language, 'completed', 'Completed') : sortedTasks.length > 1 ? `${sortedTasks.length} ${t(language, 'tasks', 'tasks')}` : t(language, 'task', 'Task')}
+            </p>
+            {sortedTasks.length > 0 && (
+              <p className="text-[11px] font-medium text-zinc-500">{doneCount}/{sortedTasks.length} {t(language, 'done', 'done')}</p>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            {visibleTasks.length > 0 && (
+              visibleTasks.map(task => (
+                <TaskRow key={task.id} task={task} onCycle={onCycleTask} language={language} />
+              ))
+            )}
+            {completedTasks.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowDoneTasks(prev => !prev)}
+                className="flex w-full items-center justify-between rounded-xl bg-emerald-50/45 px-2.5 py-2 text-left text-[12px] font-semibold text-emerald-700 ring-1 ring-emerald-200/60 transition active:scale-[0.99] dark:bg-white/[0.025] dark:text-emerald-200 dark:ring-white/10"
+              >
+                <span>{t(language, 'completed', 'Completed')} {doneCount}/{sortedTasks.length}</span>
+                <span className="text-[11px] text-emerald-500 dark:text-emerald-300">{showDoneTasks ? 'Hide' : 'Show'}</span>
+              </button>
+            )}
+            {completedTasks.length > 0 && showDoneTasks && (
+              completedTasks.map(task => (
+                <TaskRow key={task.id} task={task} onCycle={onCycleTask} language={language} />
+              ))
+            )}
+            {activeTasks.length === 0 && completedTasks.length === 0 && (
+              <div className="rounded-xl px-2.5 py-3 text-[12px] text-zinc-500">
+                {showCompleted ? t(language, 'noCompletedTask', 'No completed task yet') : t(language, 'noActiveTask', 'No active task assigned')}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </article>
-  )
-}
-
-function QuickDrawer({ ro, onClose, onToggleFlag }) {
-  if (!ro) return null
-  const flags = ro.workerFlags || {}
-  return (
-    <div className="fixed inset-x-3 bottom-[4.75rem] z-40 mx-auto max-w-md rounded-3xl border border-zinc-200/80 bg-white/90 p-3 shadow-2xl shadow-zinc-400/35 backdrop-blur-2xl dark:border-zinc-800 dark:bg-zinc-950/95 dark:shadow-black/60 md:left-auto md:right-6 md:w-[26rem]">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
-          <p className="text-[11px] font-medium text-zinc-500">Quick action</p>
-          <p className="text-sm font-semibold text-zinc-950 dark:text-zinc-100">RO#{ro.roNumber}</p>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 ring-1 ring-zinc-200 transition hover:text-zinc-900 dark:bg-zinc-900 dark:text-zinc-400 dark:ring-zinc-800 dark:hover:text-zinc-100"
-          aria-label="Minimize quick action"
-        >
-          <IconChevron />
-        </button>
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={() => onToggleFlag(ro, 'needsParts')}
-          className={`rounded-2xl px-3 py-3 text-sm font-semibold transition active:scale-[0.98] ${
-            flags.needsParts
-              ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-400/20'
-              : 'bg-zinc-100/85 text-zinc-700 ring-1 ring-zinc-200 dark:bg-zinc-950/70 dark:text-zinc-300 dark:ring-white/10'
-          }`}
-        >
-          Needs parts
-        </button>
-        <button
-          type="button"
-          onClick={() => onToggleFlag(ro, 'suppDamage')}
-          className={`rounded-2xl px-3 py-3 text-sm font-semibold transition active:scale-[0.98] ${
-            flags.suppDamage
-              ? 'bg-rose-100 text-rose-800 ring-1 ring-rose-200 dark:bg-rose-500/10 dark:text-rose-200 dark:ring-rose-400/20'
-              : 'bg-zinc-100/85 text-zinc-700 ring-1 ring-zinc-200 dark:bg-zinc-950/70 dark:text-zinc-300 dark:ring-white/10'
-          }`}
-        >
-          Supp Damage
-        </button>
-      </div>
-    </div>
   )
 }
 
@@ -809,7 +683,7 @@ function WorkerGibComposer({ open, text, setText, onSubmit, onClose, onListen, o
       >
         <div className="mb-3 flex items-center justify-between">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Worker update</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Paint update</p>
             <p className="text-sm font-semibold text-zinc-950 dark:text-zinc-100">Type an RO# or describe the job</p>
           </div>
           <button
@@ -824,141 +698,141 @@ function WorkerGibComposer({ open, text, setText, onSubmit, onClose, onListen, o
 
         {pending && (
           <div className="mb-2 rounded-[1.15rem] border border-blue-400/25 bg-blue-500/10 p-3 text-sm text-zinc-900 dark:text-zinc-100">
-          <div className="mb-2 flex items-start justify-between gap-3">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-300">Review update</p>
-              <p className="mt-0.5 text-sm font-semibold">RO#{pending.roNumber}</p>
-            </div>
-            <button
-              type="button"
-              onClick={onCancelPending}
-              className="flex h-7 w-7 items-center justify-center rounded-full bg-white/55 text-zinc-500 ring-1 ring-zinc-200 dark:bg-white/5 dark:text-zinc-400 dark:ring-white/10"
-              aria-label="Cancel update"
-            >
-              ×
-            </button>
-          </div>
-          <div className="space-y-1.5">
-            {pending.actions.map((action, index) => (
-              <div key={`${action}-${index}`} className="flex items-center gap-2 rounded-xl bg-white/45 px-2.5 py-2 text-[12px] dark:bg-black/20">
-                <span className="h-1.5 w-1.5 rounded-full bg-blue-300" />
-                <span>{action}</span>
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-300">Review update</p>
+                <p className="mt-0.5 text-sm font-semibold">RO#{pending.roNumber}</p>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {photos.length > 0 && (
-        <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          {photos.map((photo, index) => (
-            <div key={`${photo.name}-${index}`} className="relative h-14 w-14 shrink-0 overflow-hidden rounded-2xl ring-1 ring-white/15">
               <button
                 type="button"
-                onClick={() => setPreviewPhoto(photo)}
-                className="block h-full w-full"
-                aria-label={`Preview ${photo.name || 'photo'}`}
-              >
-                <img src={photo.preview} alt={photo.name} className="h-full w-full object-cover" />
-              </button>
-              <button
-                type="button"
-                onClick={() => onClearPhoto(index)}
-                className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-[12px] text-white"
-                aria-label="Remove photo"
+                onClick={onCancelPending}
+                className="flex h-7 w-7 items-center justify-center rounded-full bg-white/55 text-zinc-500 ring-1 ring-zinc-200 dark:bg-white/5 dark:text-zinc-400 dark:ring-white/10"
+                aria-label="Cancel update"
               >
                 ×
               </button>
             </div>
-          ))}
+            <div className="space-y-1.5">
+              {pending.actions.map((action, index) => (
+                <div key={`${action}-${index}`} className="flex items-center gap-2 rounded-xl bg-white/45 px-2.5 py-2 text-[12px] dark:bg-black/20">
+                  <span className="h-1.5 w-1.5 rounded-full bg-blue-300" />
+                  <span>{action}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {photos.length > 0 && (
+          <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {photos.map((photo, index) => (
+              <div key={`${photo.name}-${index}`} className="relative h-14 w-14 shrink-0 overflow-hidden rounded-2xl ring-1 ring-white/15">
+                <button
+                  type="button"
+                  onClick={() => setPreviewPhoto(photo)}
+                  className="block h-full w-full"
+                  aria-label={`Preview ${photo.name || 'photo'}`}
+                >
+                  <img src={photo.preview} alt={photo.name} className="h-full w-full object-cover" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onClearPhoto(index)}
+                  className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-[12px] text-white"
+                  aria-label="Remove photo"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={onPhoto}
+              disabled={busy}
+              className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-zinc-100/90 text-zinc-500 ring-1 ring-zinc-200 dark:bg-zinc-900/90 dark:text-zinc-400 dark:ring-white/10"
+              aria-label="Add another photo"
+            >
+              +
+            </button>
+          </div>
+        )}
+        {previewPhoto && (
+          <div
+            className="fixed inset-0 z-[95] flex items-center justify-center bg-black/85 p-3"
+            onClick={closePreview}
+          >
+            <div className="relative max-h-full max-w-full" onClick={event => event.stopPropagation()}>
+              <img
+                src={previewPhoto.preview}
+                alt={previewPhoto.name || 'Selected photo'}
+                className="max-h-[86vh] max-w-full rounded-2xl object-contain shadow-2xl"
+              />
+              <button
+                type="button"
+                onClick={closePreview}
+                className="absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full bg-black/70 text-lg font-semibold text-white ring-1 ring-white/20"
+                aria-label="Close photo preview"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="flex items-end gap-2">
+          <button
+            type="button"
+            onClick={onListen}
+            disabled={busy || transcribing}
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl ring-1 transition ${
+              listening ? 'bg-red-500 text-white ring-red-400/30' : transcribing ? 'bg-purple-500/20 text-purple-600 ring-purple-400/25 dark:text-purple-200' : 'bg-zinc-100/95 text-zinc-500 ring-zinc-200 dark:bg-zinc-900/95 dark:text-zinc-400 dark:ring-white/10'
+            }`}
+            aria-label="Voice update"
+          >
+            {transcribing ? (
+              <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+              </svg>
+            ) : <IconMic />}
+          </button>
+          <textarea
+            ref={inputRef}
+            value={text}
+            onChange={e => setText(e.target.value)}
+            disabled={busy}
+            placeholder="e.g. 9549 paint prep done, photos attached..."
+            rows={3}
+            className="max-h-40 min-h-20 min-w-0 flex-1 resize-none rounded-[1.35rem] bg-zinc-100/85 px-3.5 py-3 text-[15px] leading-snug text-zinc-950 placeholder:text-zinc-400 ring-1 ring-zinc-200 focus:outline-none focus:ring-blue-400/40 dark:bg-zinc-900/80 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:ring-white/10"
+          />
           <button
             type="button"
             onClick={onPhoto}
             disabled={busy}
-            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-zinc-100/90 text-zinc-500 ring-1 ring-zinc-200 dark:bg-zinc-900/90 dark:text-zinc-400 dark:ring-white/10"
-            aria-label="Add another photo"
+            className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-zinc-100/95 text-zinc-500 ring-1 ring-zinc-200 transition hover:text-zinc-900 dark:bg-zinc-900/95 dark:text-zinc-400 dark:ring-white/10 dark:hover:text-zinc-100"
+            aria-label="Upload photo"
           >
-            +
+            <IconCamera />
+            {photos.length > 0 && (
+              <span className="absolute -right-1 -top-1 flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">
+                {photos.length}
+              </span>
+            )}
           </button>
-        </div>
-      )}
-      {previewPhoto && (
-        <div
-          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/85 p-3"
-          onClick={closePreview}
-        >
-          <div className="relative max-h-full max-w-full" onClick={event => event.stopPropagation()}>
-            <img
-              src={previewPhoto.preview}
-              alt={previewPhoto.name || 'Selected photo'}
-              className="max-h-[86vh] max-w-full rounded-2xl object-contain shadow-2xl"
-            />
+          {canSubmit && (
             <button
-              type="button"
-              onClick={closePreview}
-              className="absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full bg-black/70 text-lg font-semibold text-white ring-1 ring-white/20"
-              aria-label="Close photo preview"
+              type="submit"
+              disabled={busy}
+              className="h-10 shrink-0 rounded-2xl bg-blue-500 px-3 text-xs font-semibold text-white transition active:scale-[0.98] disabled:opacity-50"
             >
-              ×
+              {uploading ? 'Uploading' : pending ? 'Apply' : 'Review'}
             </button>
-          </div>
-        </div>
-      )}
-      <div className="flex items-end gap-2">
-        <button
-          type="button"
-          onClick={onListen}
-          disabled={busy || transcribing}
-          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl ring-1 transition ${
-            listening ? 'bg-red-500 text-white ring-red-400/30' : transcribing ? 'bg-purple-500/20 text-purple-600 ring-purple-400/25 dark:text-purple-200' : 'bg-zinc-100/95 text-zinc-500 ring-zinc-200 dark:bg-zinc-900/95 dark:text-zinc-400 dark:ring-white/10'
-          }`}
-          aria-label="Voice update"
-        >
-          {transcribing ? (
-            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-            </svg>
-          ) : <IconMic />}
-        </button>
-        <textarea
-          ref={inputRef}
-          value={text}
-          onChange={e => setText(e.target.value)}
-          disabled={busy}
-          placeholder="e.g. 9549 reassembly done, photos attached..."
-          rows={3}
-          className="max-h-40 min-h-20 min-w-0 flex-1 resize-none rounded-[1.35rem] bg-zinc-100/85 px-3.5 py-3 text-[15px] leading-snug text-zinc-950 placeholder:text-zinc-400 ring-1 ring-zinc-200 focus:outline-none focus:ring-blue-400/40 dark:bg-zinc-900/80 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:ring-white/10"
-        />
-        <button
-          type="button"
-          onClick={onPhoto}
-          disabled={busy}
-          className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-zinc-100/95 text-zinc-500 ring-1 ring-zinc-200 transition hover:text-zinc-900 dark:bg-zinc-900/95 dark:text-zinc-400 dark:ring-white/10 dark:hover:text-zinc-100"
-          aria-label="Upload photo"
-        >
-          <IconCamera />
-          {photos.length > 0 && (
-            <span className="absolute -right-1 -top-1 flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-bold text-white">
-              {photos.length}
-            </span>
           )}
-        </button>
-        {canSubmit && (
-          <button
-            type="submit"
-            disabled={busy}
-            className="h-10 shrink-0 rounded-2xl bg-blue-500 px-3 text-xs font-semibold text-white transition active:scale-[0.98] disabled:opacity-50"
-          >
-            {uploading ? 'Uploading' : pending ? 'Apply' : 'Review'}
-          </button>
-        )}
-      </div>
+        </div>
       </form>
     </div>
   )
 }
 
-export default function MobileWorkerTaskView() {
+export default function MobilePainterTaskView() {
   const { user, role, displayName, userProfile } = useAuth()
   const language = userProfile?.language || 'english'
   const toast = useToast()
@@ -966,13 +840,12 @@ export default function MobileWorkerTaskView() {
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const photosRef = useRef([])
-  const autoCreatedBodyTaskKeysRef = useRef(new Set())
+  const paintTaskBackfillRef = useRef(new Set())
 
   const [ros, setRos] = useState([])
   const [tasks, setTasks] = useState([])
   const [employees, setEmployees] = useState([])
   const [selectedRoId, setSelectedRoId] = useState(null)
-  const [drawerOpen, setDrawerOpen] = useState(false)
   const [sheetRoId, setSheetRoId] = useState(null)
   const [filter, setFilter] = useState('today')
   const [quickText, setQuickText] = useState('')
@@ -987,6 +860,7 @@ export default function MobileWorkerTaskView() {
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [recentUpdates, setRecentUpdates] = useState({})
+  const [upcomingOpen, setUpcomingOpen] = useState(false)
 
   useEffect(() => {
     photosRef.current = photos
@@ -1034,67 +908,72 @@ export default function MobileWorkerTaskView() {
     return found?.name || displayName || user.email || 'Worker'
   }, [displayName, employees, user.email, user.uid])
 
-  useEffect(() => {
-    if (loading || role !== ROLES.BODY_MAN || !user.uid) return
+  const defaultPaintTeamUids = useMemo(() => {
+    const painter = employees.filter(emp => emp.role === ROLES.PAINTER)
+    const helper = employees.filter(emp => emp.role === ROLES.PAINT_HELPER)
+    return new Set([
+      ...(painter.length === 1 ? [painter[0].uid] : []),
+      ...(helper.length === 1 ? [helper[0].uid] : []),
+    ])
+  }, [employees])
 
-    const createMissingBodyTasks = async () => {
-      for (const ro of ros) {
-        const tmpl = bodyTaskForStatus(ro.status)
-        if (!tmpl || ro.status === 'delivered' || ro.assignedBodyMan !== user.uid) continue
-        if (hasBodyMainTaskForStatus(ro, tasks)) continue
+  const isDefaultPaintTeamMember = defaultPaintTeamUids.has(user.uid)
 
-        const taskId = `auto_body_${ro.id}_${tmpl.phase}`
-        if (autoCreatedBodyTaskKeysRef.current.has(taskId)) continue
-        autoCreatedBodyTaskKeysRef.current.add(taskId)
-        const taskRef = doc(db, 'tasks', taskId)
-        const existing = await getDoc(taskRef)
-        if (existing.exists()) continue
+  const paintTeamRoIds = useMemo(() => {
+    return new Set(
+      ros
+        .filter(ro =>
+          ro.assignedPainter === user.uid
+          || ro.assignedPaintHelper === user.uid
+          || (isDefaultPaintTeamMember && roNeedsPaint(ro))
+        )
+        .map(ro => ro.id)
+    )
+  }, [isDefaultPaintTeamMember, ros, user.uid])
 
-        await setDoc(taskRef, {
-          roId:          ro.id,
-          roNumber:      ro.roNumber,
-          vehicleInfo:   vehicleLine(ro),
-          assignedTo:    user.uid,
-          assignedToName: authorName,
-          assignedBy:    user.uid,
-          assignedByName: authorName,
-          assignedAt:    serverTimestamp(),
-          title:         tmpl.title,
-          phase:         tmpl.phase,
-          category:      'body',
-          taskKind:      'primary',
-          autoTriggered: true,
-          source:        'status_backfill',
-          status:        'pending',
-          createdAt:     serverTimestamp(),
-          updatedAt:     serverTimestamp(),
-        }, { merge: true })
+  const paintTeamUids = useMemo(() => {
+    const uids = new Set([user.uid, ...defaultPaintTeamUids])
+    for (const ro of ros) {
+      if (ro.assignedPainter === user.uid || ro.assignedPaintHelper === user.uid || (isDefaultPaintTeamMember && roNeedsPaint(ro))) {
+        if (ro.assignedPainter) uids.add(ro.assignedPainter)
+        if (ro.assignedPaintHelper) uids.add(ro.assignedPaintHelper)
       }
     }
+    return uids
+  }, [defaultPaintTeamUids, isDefaultPaintTeamMember, ros, user.uid])
 
-    createMissingBodyTasks().catch(err => {
-      toast.warn('Could not sync body tasks: ' + err.message)
-    })
-  }, [authorName, loading, role, ros, tasks, toast, user.uid])
+  const BODY_PHASES = new Set(['teardown', 'body', 'body_work', 'reassembly', 'waiting_parts', 'sublet', 'detail'])
+
+  // Painter/helper see two groups: Active (working now) and Upcoming (in upstream repair)
+  const PAINTER_ACTIVE_STATUSES   = new Set(['body_work', 'body_complete', 'paint_prep', 'in_paint'])
+  const PAINTER_UPCOMING_STATUSES = new Set(['checked_in', 'teardown', 'waiting_parts'])
+  const PAINTER_VISIBLE_STATUSES  = new Set([...PAINTER_ACTIVE_STATUSES, ...PAINTER_UPCOMING_STATUSES])
 
   const assignedTasks = useMemo(() => {
-    return tasks.filter(task => task.assignedTo === user.uid)
-  }, [tasks, user.uid])
+    return tasks.filter(task => {
+      if (BODY_PHASES.has(task.phase)) return false
+      if (task.assignedTo === user.uid) return true
+      if (['paint_prep', 'paint'].includes(task.phase) && paintTeamRoIds.has(task.roId)) return true
+      if (['paint_prep', 'paint'].includes(task.phase) && paintTeamUids.has(task.assignedTo)) return true
+      return false
+    })
+  }, [tasks, user.uid, paintTeamRoIds, paintTeamUids])
 
   const taskRoIds = useMemo(() => new Set(assignedTasks.map(task => task.roId).filter(Boolean)), [assignedTasks])
   const taskRoNumbers = useMemo(() => new Set(assignedTasks.map(task => String(task.roNumber || '')).filter(Boolean)), [assignedTasks])
 
   const workerRos = useMemo(() => {
     return ros
-      .filter(ro => ro.status !== 'delivered')
-      .filter(ro => assignedToWorker(ro, user.uid, role) || taskRoIds.has(ro.id) || taskRoNumbers.has(String(ro.roNumber || '')))
+      .filter(ro => PAINTER_VISIBLE_STATUSES.has(ro.status))
+      .filter(roNeedsPaint)
+      .filter(ro => paintTeamRoIds.has(ro.id) || taskRoIds.has(ro.id) || taskRoNumbers.has(String(ro.roNumber || '')))
       .sort((a, b) => {
         const ea = etaOf(a) || '9999-12-31'
         const eb = etaOf(b) || '9999-12-31'
         if (ea !== eb) return ea.localeCompare(eb)
         return String(a.roNumber || '').localeCompare(String(b.roNumber || ''))
       })
-  }, [role, ros, taskRoIds, taskRoNumbers, user.uid])
+  }, [paintTeamRoIds, ros, taskRoIds, taskRoNumbers])
 
   const tasksByRo = useMemo(() => {
     const map = new Map()
@@ -1121,12 +1000,11 @@ export default function MobileWorkerTaskView() {
     if (filter === 'done') {
       return workerRos.filter(ro => {
         const roTasks = visibleTasksByRo.get(ro.id) || []
-        if (isBodyWorkerRo(ro, user.uid, role)) return bodyMainTasksComplete(roTasks)
         return roTasks.length > 0 && roTasks.every(task => task.status === 'completed')
       })
     }
     if (filter === 'waiting') {
-      return workerRos.filter(ro => ro.workerFlags?.needsParts || ro.workerFlags?.suppDamage || ro.partsStatus === 'ordered' || ro.partsStatus === 'partially_received')
+      return workerRos.filter(ro => ro.partsStatus === 'ordered' || ro.partsStatus === 'partially_received')
     }
     if (filter === 'soon') {
       return workerRos.filter(ro => {
@@ -1141,11 +1019,18 @@ export default function MobileWorkerTaskView() {
     }
     return workerRos.filter(ro => {
       const roTasks = visibleTasksByRo.get(ro.id) || []
-      if (isBodyWorkerRo(ro, user.uid, role)) return !bodyMainTasksComplete(roTasks)
-      return roTasks.length === 0
-        || roTasks.some(task => task.status !== 'completed')
+      return roTasks.length === 0 || roTasks.some(task => task.status !== 'completed')
     })
-  }, [filter, role, user.uid, visibleTasksByRo, workerRos])
+  }, [filter, visibleTasksByRo, workerRos])
+
+  const activeRos = useMemo(
+    () => filteredRos.filter(ro => PAINTER_ACTIVE_STATUSES.has(ro.status)),
+    [filteredRos]
+  )
+  const upcomingRos = useMemo(
+    () => workerRos.filter(ro => PAINTER_UPCOMING_STATUSES.has(ro.status)),
+    [workerRos]
+  )
 
   const selectedRo = useMemo(() => workerRos.find(ro => ro.id === selectedRoId) || workerRos[0] || null, [selectedRoId, workerRos])
   const sheetRo = useMemo(() => workerRos.find(ro => ro.id === sheetRoId) || null, [sheetRoId, workerRos])
@@ -1164,13 +1049,14 @@ export default function MobileWorkerTaskView() {
         return false
       }
     }).length
-    const blocked = workerRos.filter(ro => ro.workerFlags?.needsParts || ro.workerFlags?.suppDamage).length
     const activeDedupedTasks = [...visibleTasksByRo.values()]
       .flat()
       .filter(task => task.status !== 'completed')
       .length
-    return { cars: workerRos.length, tasks: activeDedupedTasks, blocked, dueSoon }
+    return { cars: workerRos.length, tasks: activeDedupedTasks, dueSoon }
   }, [visibleTasksByRo, workerRos])
+
+  const makeNote = (text) => `[${format(new Date(), 'MM/dd HH:mm')} - ${authorName}] ${text}`
 
   const updateRoNote = async (ro, line) => {
     const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
@@ -1178,6 +1064,111 @@ export default function MobileWorkerTaskView() {
       notes: prevNotes ? `${line}\n${prevNotes}` : line,
       updatedAt: serverTimestamp(),
     })
+  }
+
+  const createDownstreamTasks = async (newStatus, roData) => {
+    const templates = getDownstreamTasks(newStatus, roData)
+    const roUpdates = {}
+    for (const tmpl of templates) {
+      const hasOpenDup = tasks.some(task => {
+        if (task.roId !== roData.id || task.phase !== tmpl.phase) return false
+        if (tmpl.category === 'paint' && tmpl.taskKind === 'primary') {
+          return task.taskKind !== 'secondary' && (tmpl.statusBackfill || task.status !== 'completed')
+        }
+        if (task.status === 'completed') return false
+        return task.title === tmpl.title
+      })
+      if (hasOpenDup) continue
+      let assignTo = tmpl.assignedToUid
+      if (!assignTo && tmpl.assignedToRole) {
+        const emp = employees.find(e => e.role === tmpl.assignedToRole)
+        assignTo = emp?.uid ?? null
+      }
+      if (tmpl.setRoField && assignTo) roUpdates[tmpl.setRoField] = assignTo
+      await addDoc(collection(db, 'tasks'), {
+        roId: roData.id,
+        roNumber: roData.roNumber,
+        vehicleInfo: roData.vehicle || roData.vehicleInfo || '',
+        assignedTo: assignTo,
+        assignedBy: user.uid,
+        assignedByName: authorName,
+        assignedAt: serverTimestamp(),
+        title: tmpl.title,
+        phase: tmpl.phase,
+        category: tmpl.category,
+        taskKind: tmpl.taskKind,
+        autoTriggered: true,
+        source: 'auto',
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        ...(tmpl.noAssigneeNote
+          ? { taskNotes: [{ text: tmpl.noAssigneeNote, by: 'System', at: new Date().toISOString() }] }
+          : {}),
+      })
+    }
+    if (Object.keys(roUpdates).length) {
+      await updateDoc(doc(db, 'ros', roData.id), { ...roUpdates, updatedAt: serverTimestamp() })
+    }
+  }
+
+  useEffect(() => {
+    if (loading || !employees.length) return
+    const paintStatuses = new Set(['paint_prep', 'in_paint'])
+    const hasPrimaryPaintTask = (roId, phase) => tasks.some(task =>
+      task.roId === roId &&
+      task.phase === phase &&
+      task.taskKind !== 'secondary'
+    )
+    const needsBackfill = ros.filter(ro =>
+      paintStatuses.has(ro.status) &&
+      roNeedsPaint(ro) &&
+      paintTeamRoIds.has(ro.id) &&
+      (!hasPrimaryPaintTask(ro.id, 'paint_prep') || !hasPrimaryPaintTask(ro.id, 'paint'))
+    )
+    for (const ro of needsBackfill) {
+      const key = `${ro.id}:${ro.status}`
+      if (paintTaskBackfillRef.current.has(key)) continue
+      paintTaskBackfillRef.current.add(key)
+      createDownstreamTasks(ro.status, ro).catch(err => {
+        paintTaskBackfillRef.current.delete(key)
+        toast.error(`Paint task setup failed for RO#${ro.roNumber}: ${err.message}`)
+      })
+    }
+  }, [employees.length, loading, paintTeamRoIds, ros, tasks, toast])
+
+  const promoteRoIfPhaseComplete = async (task, ro, noteSuffix = '') => {
+    if (!task?.roId || !task.phase || !ro?.id) return null
+    const roRef = doc(db, 'ros', ro.id)
+    const roSnap = await getDoc(roRef)
+    if (!roSnap.exists()) return null
+    const currentRo = { id: roSnap.id, ...roSnap.data() }
+    const requiredPhase = STATUS_PHASE_TRIGGER[currentRo.status]
+    if (!requiredPhase || requiredPhase !== task.phase) return null
+
+    const phaseTasks = tasks.filter(item => item.roId === ro.id && item.phase === requiredPhase)
+    const allDone = phaseTasks.length > 0 && phaseTasks.every(item => item.id === task.id || item.status === 'completed')
+    if (!allDone) return null
+
+    const suggestion = getSuggestedNextStatus(requiredPhase, currentRo)
+    if (!suggestion || suggestion.nextStatus === currentRo.status) return null
+
+    const line = makeNote(noteSuffix ? `${suggestion.noteText} ${noteSuffix}` : suggestion.noteText)
+    const prevNotes = typeof currentRo.notes === 'string' ? currentRo.notes : ''
+    await updateDoc(roRef, {
+      status: suggestion.nextStatus,
+      notes: prevNotes ? `${line}\n${prevNotes}` : line,
+      updatedAt: serverTimestamp(),
+      changeLog: arrayUnion({
+        type: 'status_change',
+        value: suggestion.nextStatus,
+        label: statusLabel(language, suggestion.nextStatus, STATUS_MAP[suggestion.nextStatus]?.label ?? suggestion.nextStatus),
+        by: authorName,
+        at: new Date().toISOString(),
+        source: 'mobile_paint_task',
+      }),
+    })
+    await createDownstreamTasks(suggestion.nextStatus, currentRo)
+    return suggestion
   }
 
   const handleCycleTask = async (task) => {
@@ -1198,7 +1189,10 @@ export default function MobileWorkerTaskView() {
           : next === 'in_progress'
           ? `started task: ${compactTaskTitle(task)}.`
           : `reopened task: ${compactTaskTitle(task)}.`
-        await updateRoNote(ro, makeNote(authorName, label))
+        await updateRoNote(ro, makeNote(label))
+        if (next === 'completed') {
+          await promoteRoIfPhaseComplete(task, ro, `Triggered by mobile task completion: ${compactTaskTitle(task)}.`)
+        }
       }
     } catch (err) {
       toast.error('Task update failed: ' + err.message)
@@ -1209,55 +1203,6 @@ export default function MobileWorkerTaskView() {
     setSelectedRoId(roId)
     setPendingCommand(null)
     setSheetRoId(roId)
-  }
-
-  const createFlagTask = async (ro, flag) => {
-    const needsParts = flag === 'needsParts'
-    const assignedTo = needsParts
-      ? (ro.assignedPartsManager || roleFallbackAssignee(employees, [ROLES.PARTS_MANAGER, ...MANAGER_ROLES]))
-      : (ro.assignedEstimator || roleFallbackAssignee(employees, [ROLES.ESTIMATOR, ...MANAGER_ROLES]))
-
-    await addDoc(collection(db, 'tasks'), {
-      roId: ro.id,
-      roNumber: ro.roNumber,
-      vehicleInfo: vehicleLine(ro),
-      assignedTo,
-      assignedBy: user.uid,
-      assignedByName: authorName,
-      assignedAt: serverTimestamp(),
-      autoTriggered: true,
-      source: 'worker',
-      status: 'pending',
-      priority: 'high',
-      category: needsParts ? 'parts' : 'supplement',
-      title: needsParts ? 'Review parts issue' : 'Review supplement damage',
-      description: `Worker flagged ${needsParts ? 'needs parts' : 'supplement damage'} on RO#${ro.roNumber}.`,
-      createdAt: serverTimestamp(),
-    })
-  }
-
-  const handleToggleFlag = async (ro, flag) => {
-    const current = Boolean(ro.workerFlags?.[flag])
-    const next = !current
-    const needsParts = flag === 'needsParts'
-    const note = next
-      ? makeNote(authorName, needsParts ? 'Needs parts flagged from mobile work view.' : 'Supplement damage flagged from mobile work view.')
-      : makeNote(authorName, needsParts ? 'Needs parts flag cleared.' : 'Supplement damage flag cleared.')
-
-    try {
-      await updateDoc(doc(db, 'ros', ro.id), {
-        [`workerFlags.${flag}`]: next,
-        [`workerFlags.${flag}By`]: next ? user.uid : null,
-        [`workerFlags.${flag}ByName`]: next ? authorName : null,
-        [`workerFlags.${flag}At`]: next ? serverTimestamp() : null,
-        updatedAt: serverTimestamp(),
-      })
-      await updateRoNote(ro, note)
-      if (next) await createFlagTask(ro, flag)
-      toast.success(next ? (needsParts ? 'Parts manager notified' : 'Estimator notified') : 'Flag cleared')
-    } catch (err) {
-      toast.error('Update failed: ' + err.message)
-    }
   }
 
   const findRoForQuickText = () => {
@@ -1281,7 +1226,7 @@ export default function MobileWorkerTaskView() {
     const label = next === 'completed'
       ? `completed task: ${compactTaskTitle(task)}. Completion date: ${timestamp}.`
       : `started task: ${compactTaskTitle(task)}.`
-    if (!options.skipNote) await updateRoNote(ro, makeNote(authorName, commandText ? `${label} Note: ${commandText}` : label))
+    if (!options.skipNote) await updateRoNote(ro, makeNote(commandText ? `${label} Note: ${commandText}` : label))
     return label
   }
 
@@ -1298,7 +1243,10 @@ export default function MobileWorkerTaskView() {
   const resolvePhotoLabel = (text, idx) => {
     const padded = String(idx + 1).padStart(2, '0')
     const isDefault = !text.trim() || /\b(ip|in\s*progress)\b/i.test(text.trim())
-    if (isDefault) return `Rpr photo_${padded}`
+    if (isDefault) {
+      const base = role === ROLES.PAINT_HELPER ? 'Prep photo' : 'Ref photo'
+      return `${base}_${padded}`
+    }
     const clean = text.trim().slice(0, 30).replace(/[^\w\s-]/g, '').trim()
     return photos.length > 1 ? `${clean}_${padded}` : clean
   }
@@ -1332,7 +1280,7 @@ export default function MobileWorkerTaskView() {
       updatedAt: serverTimestamp(),
     })
     const note = `uploaded ${photos.length} photo${photos.length === 1 ? '' : 's'}: ${attachments.map(a => a.label).join(', ')}.`
-    if (!options.skipNote) await updateRoNote(ro, makeNote(authorName, note))
+    if (!options.skipNote) await updateRoNote(ro, makeNote(note))
     photos.forEach(photo => URL.revokeObjectURL(photo.preview))
     setPhotos([])
     setUploading(false)
@@ -1347,16 +1295,9 @@ export default function MobileWorkerTaskView() {
     if (command.wantsComplete && task) actions.push(`Complete task: ${compactTaskTitle(task)}`)
     else if (command.wantsStart && task) actions.push(`Start task: ${compactTaskTitle(task)}`)
     else if ((command.wantsComplete || command.wantsStart) && !task) actions.push('Add note: task not matched')
-    if (command.wantsNeedsParts && !ro.workerFlags?.needsParts) actions.push('Flag: Needs parts')
-    if (command.wantsSuppDamage && !ro.workerFlags?.suppDamage) actions.push('Flag: Supplement damage')
-    if (photos.length) actions.push(`Upload ${photos.length} worker progress photo${photos.length === 1 ? '' : 's'}`)
+    if (photos.length) actions.push(`Upload ${photos.length} paint progress photo${photos.length === 1 ? '' : 's'}`)
     if (text && actions.length === 0) actions.push(`Add note: ${text}`)
-    return {
-      roId: ro.id,
-      roNumber: ro.roNumber,
-      text,
-      actions,
-    }
+    return { roId: ro.id, roNumber: ro.roNumber, text, actions }
   }
 
   const handleQuickSubmit = async () => {
@@ -1379,40 +1320,17 @@ export default function MobileWorkerTaskView() {
       const task = text ? chooseTaskForCommand(roTasks, text) : null
       const actions = []
       const noteLines = []
+      let completedTaskForPromotion = null
 
       if (command.wantsComplete && task) {
         const label = await updateTaskStatusFromWorker(task, 'completed', ro, text, { skipNote: true })
         if (label) noteLines.push(text ? `${label} Note: ${text}` : label)
         actions.push(`completed ${compactTaskTitle(task)}`)
+        completedTaskForPromotion = task
       } else if (command.wantsStart && task) {
         const label = await updateTaskStatusFromWorker(task, 'in_progress', ro, text, { skipNote: true })
         if (label) noteLines.push(text ? `${label} Note: ${text}` : label)
         actions.push(`started ${compactTaskTitle(task)}`)
-      }
-
-      if (command.wantsNeedsParts && !ro.workerFlags?.needsParts) {
-        await updateDoc(doc(db, 'ros', ro.id), {
-          'workerFlags.needsParts': true,
-          'workerFlags.needsPartsAt': new Date().toISOString(),
-          'workerFlags.needsPartsBy': user.uid,
-          'workerFlags.needsPartsByName': authorName,
-          updatedAt: serverTimestamp(),
-        })
-        await createFlagTask(ro, 'needsParts')
-        noteLines.push('Needs parts flagged from mobile worker GIB.')
-        actions.push('needs parts')
-      }
-      if (command.wantsSuppDamage && !ro.workerFlags?.suppDamage) {
-        await updateDoc(doc(db, 'ros', ro.id), {
-          'workerFlags.suppDamage': true,
-          'workerFlags.suppDamageAt': new Date().toISOString(),
-          'workerFlags.suppDamageBy': user.uid,
-          'workerFlags.suppDamageByName': authorName,
-          updatedAt: serverTimestamp(),
-        })
-        await createFlagTask(ro, 'suppDamage')
-        noteLines.push('Supplement damage flagged from mobile worker GIB.')
-        actions.push('supp damage')
       }
 
       const uploaded = await uploadQueuedPhotos(ro, text, { skipNote: true })
@@ -1427,11 +1345,15 @@ export default function MobileWorkerTaskView() {
       }
       if (noteLines.length) {
         const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
-        const newNotes = noteLines.map(line => makeNote(authorName, line)).join('\n')
+        const newNotes = noteLines.map(line => makeNote(line)).join('\n')
         await updateDoc(doc(db, 'ros', ro.id), {
           notes: prevNotes ? `${newNotes}\n${prevNotes}` : newNotes,
           updatedAt: serverTimestamp(),
         })
+      }
+      if (completedTaskForPromotion) {
+        const promotion = await promoteRoIfPhaseComplete(completedTaskForPromotion, ro, `Triggered by mobile quick update: ${compactTaskTitle(completedTaskForPromotion)}.`)
+        if (promotion) actions.push(statusLabel(language, promotion.nextStatus, STATUS_MAP[promotion.nextStatus]?.label ?? promotion.nextStatus))
       }
 
       setRecentUpdates(prev => ({
@@ -1517,143 +1439,172 @@ export default function MobileWorkerTaskView() {
 
   return (
     <>
-    {showPhotoSheet && (
-      <PhotoSheet
-        onCamera={() => {
-          setShowPhotoSheet(false)
-          setShowCamera(true)
-        }}
-        onLibrary={() => {
-          setShowPhotoSheet(false)
-          fileInputRef.current?.click()
-        }}
-        onClose={() => setShowPhotoSheet(false)}
-      />
-    )}
-    {showCamera && (
-      <CameraModal
-        onDone={(shots) => {
-          setPhotos(prev => [...prev, ...shots])
-          setShowCamera(false)
-        }}
-        onClose={() => setShowCamera(false)}
-      />
-    )}
-    <div className="-mx-4 -my-4 min-h-[calc(100vh-3.5rem)] bg-[#f6f7f9] px-4 pb-28 pt-5 text-zinc-950 dark:bg-[#050608] dark:text-zinc-100 md:-my-6 md:rounded-[2rem] md:px-6 md:pb-32 md:pt-6">
-      <div className="mx-auto max-w-md md:max-w-2xl">
-        <header className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-[24px] font-semibold tracking-[-0.01em] text-zinc-950 dark:text-white">{t(language, 'myWork', 'My Work')}</h1>
-            <p className="mt-1 text-[13px] text-zinc-500">
-              {displayName || 'Worker'} · {format(new Date(), 'EEEE, MMM d')}
-            </p>
-          </div>
-          <div className="flex h-11 w-11 items-center justify-center rounded-full bg-blue-500/20 text-sm font-semibold text-blue-100 ring-1 ring-blue-400/30">
-            {(displayName || user.email || 'ME').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
-          </div>
-        </header>
-
-        <section className="mt-5 grid grid-cols-3 gap-2">
-          <StatCard number={stats.cars} label={t(language, 'cars', 'cars')} />
-          <StatCard number={stats.tasks} label={t(language, 'tasks', 'tasks')} />
-          <StatCard number={stats.blocked} label={t(language, 'needsManager', 'needs manager')} />
-        </section>
-
-        <section className="mt-4 flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          {[
-            ['today', t(language, 'active', 'Active')],
-            ['soon', `${t(language, 'dueSoon', 'Due soon')} ${stats.dueSoon}`],
-            ['waiting', t(language, 'waitingOnMe', 'Waiting on me')],
-            ['done', t(language, 'done', 'Done')],
-          ].map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setFilter(key)}
-              className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition ${
-                filter === key
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-white/80 text-zinc-600 shadow-sm shadow-zinc-200/60 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-black/20 dark:ring-zinc-800'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </section>
-
-        <section className="mt-5">
-          <div className="mb-3 flex items-baseline gap-2">
-            <h2 className="text-[17px] font-semibold tracking-tight text-zinc-950 dark:text-white">{t(language, 'myRos', 'My ROs')}</h2>
-            <p className="text-[12px] text-zinc-500">{t(language, 'assignedWorkOnly', 'assigned work only')}</p>
-          </div>
-          {filteredRos.length === 0 ? (
-            <div className="rounded-3xl border border-zinc-200 bg-white/70 px-4 py-8 text-center text-sm text-zinc-500 shadow-sm shadow-zinc-200/60 dark:border-zinc-800 dark:bg-zinc-950/70 dark:shadow-black/20">
-              {t(language, 'noRos', 'No ROs in this view.')}
+      {showPhotoSheet && (
+        <PhotoSheet
+          onCamera={() => {
+            setShowPhotoSheet(false)
+            setShowCamera(true)
+          }}
+          onLibrary={() => {
+            setShowPhotoSheet(false)
+            fileInputRef.current?.click()
+          }}
+          onClose={() => setShowPhotoSheet(false)}
+        />
+      )}
+      {showCamera && (
+        <CameraModal
+          onDone={(shots) => {
+            setPhotos(prev => [...prev, ...shots])
+            setShowCamera(false)
+          }}
+          onClose={() => setShowCamera(false)}
+        />
+      )}
+      <div className="-mx-4 -my-4 min-h-[calc(100vh-3.5rem)] bg-[#f6f7f9] px-4 pb-28 pt-5 text-zinc-950 dark:bg-[#050608] dark:text-zinc-100 md:-my-6 md:rounded-[2rem] md:px-6 md:pb-32 md:pt-6">
+        <div className="mx-auto max-w-md md:max-w-2xl">
+          <header className="flex items-start justify-between gap-4">
+            <div>
+              <h1 className="text-[24px] font-semibold tracking-[-0.01em] text-zinc-950 dark:text-white">{t(language, 'myWork', 'My Work')}</h1>
+              <p className="mt-1 text-[13px] text-zinc-500">
+                {displayName || 'Worker'} · {format(new Date(), 'EEEE, MMM d')}
+              </p>
             </div>
-          ) : (
-            <div className="space-y-3">
-              {filteredRos.map(ro => (
-                <ROCard
-                  key={ro.id}
-                  ro={ro}
-                  tasks={visibleTasksByRo.get(ro.id) || []}
-                  selected={selectedRo?.id === ro.id}
-                  onSelect={handleSelectRo}
-                  onCycleTask={handleCycleTask}
-                  recentUpdate={recentUpdates[ro.id]}
-                  showCompleted={filter === 'done'}
-                  language={language}
-                />
-              ))}
+            <div className="flex h-11 w-11 items-center justify-center rounded-full bg-violet-500/20 text-sm font-semibold text-violet-100 ring-1 ring-violet-400/30">
+              {(displayName || user.email || 'ME').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
             </div>
-          )}
-        </section>
+          </header>
+
+          <section className="mt-5 grid grid-cols-3 gap-2">
+            <StatCard number={stats.cars} label={t(language, 'cars', 'cars')} />
+            <StatCard number={stats.tasks} label={t(language, 'tasks', 'tasks')} />
+            <StatCard number={stats.dueSoon} label={t(language, 'dueSoon', 'due soon')} />
+          </section>
+
+          <section className="mt-4 flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {[
+              ['today', t(language, 'active', 'Active')],
+              ['soon', `${t(language, 'dueSoon', 'Due soon')} ${stats.dueSoon}`],
+              ['waiting', t(language, 'waitingOnParts', 'Waiting on parts')],
+              ['done', t(language, 'done', 'Done')],
+            ].map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setFilter(key)}
+                className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  filter === key
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-white/80 text-zinc-600 shadow-sm shadow-zinc-200/60 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-300 dark:shadow-black/20 dark:ring-zinc-800'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </section>
+
+          <section className="mt-5">
+            <div className="mb-3 flex items-baseline gap-2">
+              <h2 className="text-[17px] font-semibold tracking-tight text-zinc-950 dark:text-white">{t(language, 'myRos', 'My ROs')}</h2>
+              <p className="text-[12px] text-zinc-500">{t(language, 'assignedWorkOnly', 'assigned work only')}</p>
+            </div>
+            {activeRos.length === 0 ? (
+              <div className="rounded-3xl border border-zinc-200 bg-white/70 px-4 py-8 text-center text-sm text-zinc-500 shadow-sm shadow-zinc-200/60 dark:border-zinc-800 dark:bg-zinc-950/70 dark:shadow-black/20">
+                {t(language, 'noRos', 'No ROs in this view.')}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {activeRos.map(ro => (
+                  <ROCard
+                    key={ro.id}
+                    ro={ro}
+                    tasks={visibleTasksByRo.get(ro.id) || []}
+                    selected={selectedRo?.id === ro.id}
+                    onSelect={handleSelectRo}
+                    onCycleTask={handleCycleTask}
+                    recentUpdate={recentUpdates[ro.id]}
+                    showCompleted={filter === 'done'}
+                    language={language}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="mt-5">
+              <button
+                type="button"
+                onClick={() => setUpcomingOpen(v => !v)}
+                className="flex w-full items-center justify-between gap-2 rounded-2xl border border-zinc-200 bg-white/70 px-4 py-3 text-left shadow-sm shadow-zinc-200/60 dark:border-zinc-800 dark:bg-zinc-950/70 dark:shadow-black/20"
+              >
+                <div className="flex items-baseline gap-2">
+                  <h2 className="text-[15px] font-semibold tracking-tight text-zinc-950 dark:text-white">{t(language, 'upcoming', 'Upcoming')}</h2>
+                  <p className="text-[12px] text-zinc-500">{upcomingRos.length} {t(language, 'inRepair', 'in repair')}</p>
+                </div>
+                <span className="text-[12px] text-zinc-500">{upcomingOpen ? '▾' : '▸'}</span>
+              </button>
+              {upcomingOpen && (
+                <div className="mt-3 space-y-3">
+                  {upcomingRos.length === 0 ? (
+                    <div className="rounded-3xl border border-zinc-200 bg-white/70 px-4 py-6 text-center text-sm text-zinc-500 shadow-sm shadow-zinc-200/60 dark:border-zinc-800 dark:bg-zinc-950/70 dark:shadow-black/20">
+                      {t(language, 'noUpcomingRos', 'No upcoming paint ROs.')}
+                    </div>
+                  ) : upcomingRos.map(ro => (
+                    <ROCard
+                      key={ro.id}
+                      ro={ro}
+                      tasks={[]}
+                      selected={selectedRo?.id === ro.id}
+                      onSelect={handleSelectRo}
+                      onCycleTask={handleCycleTask}
+                      recentUpdate={recentUpdates[ro.id]}
+                      showCompleted={false}
+                      language={language}
+                    />
+                  ))}
+                </div>
+              )}
+          </section>
+        </div>
+
+        <MiniGib
+          text={quickText}
+          selectedRo={selectedRo}
+          onExpand={() => setComposerOpen(true)}
+          onPhoto={() => setShowPhotoSheet(true)}
+          photos={photos}
+          transcribing={transcribing}
+          uploading={uploading}
+          busy={busy}
+        />
+        <MobileROSheet ro={sheetRo} language={language} onClose={() => setSheetRoId(null)} />
+        <WorkerGibComposer
+          open={composerOpen}
+          text={quickText}
+          setText={setQuickText}
+          selectedRo={selectedRo}
+          onSubmit={handleQuickSubmit}
+          onClose={() => setComposerOpen(false)}
+          onListen={handleListen}
+          onPhoto={() => setShowPhotoSheet(true)}
+          onClearPhoto={removePhoto}
+          onCancelPending={() => setPendingCommand(null)}
+          pending={pendingCommand}
+          photos={photos}
+          listening={listening}
+          transcribing={transcribing}
+          uploading={uploading}
+          busy={busy}
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={handlePhotoSelect}
+        />
       </div>
-
-      <QuickDrawer
-        ro={drawerOpen ? selectedRo : null}
-        onClose={() => setDrawerOpen(false)}
-        onToggleFlag={handleToggleFlag}
-      />
-      <MobileROSheet ro={sheetRo} language={language} onClose={() => setSheetRoId(null)} />
-
-      <MiniGib
-        text={quickText}
-        selectedRo={selectedRo}
-        onExpand={() => setComposerOpen(true)}
-        onPhoto={() => setShowPhotoSheet(true)}
-        photos={photos}
-        transcribing={transcribing}
-        uploading={uploading}
-        busy={busy}
-      />
-      <WorkerGibComposer
-        open={composerOpen}
-        text={quickText}
-        setText={setQuickText}
-        selectedRo={selectedRo}
-        onSubmit={handleQuickSubmit}
-        onClose={() => setComposerOpen(false)}
-        onListen={handleListen}
-        onPhoto={() => setShowPhotoSheet(true)}
-        onClearPhoto={removePhoto}
-        onCancelPending={() => setPendingCommand(null)}
-        pending={pendingCommand}
-        photos={photos}
-        listening={listening}
-        transcribing={transcribing}
-        uploading={uploading}
-        busy={busy}
-      />
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        className="hidden"
-        onChange={handlePhotoSelect}
-      />
-    </div>
     </>
   )
 }

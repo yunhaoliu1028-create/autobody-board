@@ -9,6 +9,16 @@ import { getSuggestedNextStatus, getDownstreamTasks } from '../engine/taskRules'
 import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
 import MentionTextarea, { buildMentionCandidates } from './MentionTextarea'
 import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
+import { compressImageFile, compressVideoFrame } from '../utils/imageCompression'
+import { playShutterSound } from '../utils/cameraFeedback'
+import { inferStructuredActionsFromText } from '../utils/aiActionInference'
+import {
+  extractPartsOrderCandidates,
+  mergePreferredPartsOrderActions,
+  vendorsMatchIgnoringParsingMetadata,
+} from '../utils/partsOrderParsing'
+
+const BODY_RELEASE_ERROR = 'Please assign a body technician before releasing repair'
 
 function dueDateToPriority(ro) {
   const dateStr = ro?.eta || ro?.cccDateOut || ro?.promisedDate
@@ -32,10 +42,17 @@ function normalizeName(value = '') {
 }
 
 function normalizeVendorName(value = '') {
-  return normalizeName(value)
+  const normalized = normalizeName(value)
     .split(' ')
     .filter(part => !['dealer', 'dealership', 'oem', 'parts', 'part'].includes(part))
     .join(' ')
+    .trim()
+  if (['sm toyota', 's m toyota', 'smt'].includes(normalized)) return 'santa margarita toyota'
+  if (['kaystone', 'keyston', 'kystone', 'key stone'].includes(normalized)) return 'keystone'
+  return normalized
+    .replace(/\bchevy\b/g, 'chevrolet')
+    .replace(/\bph\b/g, 'puente hills')
+    .replace(/\s+/g, ' ')
     .trim()
 }
 
@@ -44,6 +61,7 @@ function vendorNamesMatch(left = '', right = '') {
   const b = normalizeVendorName(right)
   if (!a || !b) return false
   if (a === b) return true
+  if (a.replace(/\s+/g, '') === b.replace(/\s+/g, '')) return true
 
   const aParts = a.split(' ').filter(Boolean)
   const bParts = b.split(' ').filter(Boolean)
@@ -75,6 +93,63 @@ function orderMatchesVendor(order, rawVendor = '', rawVendorFull = '') {
     return isDealerVendorText(`${order?.vendor ?? ''} ${order?.vendorFull ?? ''}`)
   }
   return false
+}
+
+function withApplyTimeout(promise, timeoutMs = 20000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Apply is taking too long. Please refresh and check whether the update already went through before applying again.')), timeoutMs)
+    }),
+  ])
+}
+
+function vendorGroupKey(order = {}) {
+  return normalizeVendorName(order.vendorFull) || normalizeVendorName(order.vendor) || 'missing vendor'
+}
+
+function orderQtyValue(order = {}) {
+  return numericQty(order.qty ?? order.quantity, 0)
+}
+
+function orderReceivedValue(order = {}) {
+  return numericQty(order.qtyReceived ?? order.receivedQty, 0)
+}
+
+function preferredVendorLabel(order = {}, fallback = 'Missing vendor') {
+  const full = (order.vendorFull || '').trim()
+  const vendor = (order.vendor || '').trim()
+  const fullParts = normalizeVendorName(full).split(' ').filter(Boolean).length
+  const vendorParts = normalizeVendorName(vendor).split(' ').filter(Boolean).length
+  if (full && fullParts > vendorParts) return full
+  return vendor || full || fallback
+}
+
+function mergePartsOrdersForAction(orders = []) {
+  const groups = new Map()
+  orders.forEach(order => {
+    const key = vendorGroupKey(order)
+    const current = groups.get(key) ?? {
+      key,
+      vendor: preferredVendorLabel(order),
+      vendorFull: order.vendorFull || '',
+      quantity: 0,
+      received: 0,
+      eta: null,
+      sourceOrders: [],
+    }
+    const label = preferredVendorLabel(order, current.vendor)
+    if (label.length > current.vendor.length || current.vendor === 'Missing vendor') current.vendor = label
+    if (!current.vendorFull && order.vendorFull) current.vendorFull = order.vendorFull
+    const ordered = orderQtyValue(order)
+    const received = Math.min(orderReceivedValue(order), ordered || orderReceivedValue(order))
+    current.quantity += ordered
+    current.received += received
+    if (order.eta && (!current.eta || order.eta < current.eta)) current.eta = order.eta
+    current.sourceOrders.push(order)
+    groups.set(key, current)
+  })
+  return [...groups.values()].filter(group => group.quantity > 0)
 }
 
 function actionVendorsMatch(left = {}, right = {}) {
@@ -120,7 +195,7 @@ function findEmployeeByName(employees, rawName = '', preferredRole = null) {
   })
   if (preferredRole) {
     const roleMatch = matches.find(emp => emp.role === preferredRole)
-    if (roleMatch) return roleMatch
+    return roleMatch ?? null
   }
   return matches[0] ?? null
 }
@@ -240,6 +315,41 @@ function numericQty(value, fallback = 0) {
   return Number.isFinite(n) && n > 0 ? n : fallback
 }
 
+function actionVendorsMatchIgnoringParsingMetadata(left = {}, right = {}) {
+  return vendorsMatchIgnoringParsingMetadata(left.vendor, right.vendor)
+    || vendorsMatchIgnoringParsingMetadata(left.vendorFull, right.vendor)
+    || vendorsMatchIgnoringParsingMetadata(left.vendor, right.vendorFull)
+    || vendorsMatchIgnoringParsingMetadata(left.vendorFull, right.vendorFull)
+}
+
+function partsQtyValue(value, fallback = 0) {
+  const numeric = numericQty(value, 0)
+  if (numeric) return numeric
+  const wordMap = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+  }
+  return wordMap[String(value ?? '').trim().toLowerCase()] ?? fallback
+}
+
+function fmtShortDate(value) {
+  if (!value) return ''
+  try {
+    const parsed = parseISO(value)
+    return isValid(parsed) ? format(parsed, 'M/d') : value
+  } catch {
+    return value
+  }
+}
+
 function calculatePartsStatus(orders = [], fallback = 'not_ordered') {
   if (!orders.length) return fallback || 'not_ordered'
   if (orders.every(isOrderFullyReceived)) return 'all_received'
@@ -299,7 +409,7 @@ function bodyPhaseFromActionsForRo(actions = [], roNumber, inputText = '') {
 
 function resolveBodyTech(roDoc, employees = []) {
   const byUid = findEmployeeByUid(employees, roDoc?.assignedBodyMan)
-  if (byUid) return { uid: byUid.uid, name: byUid.name, source: 'assignedBodyMan', needsReview: false }
+  if (byUid?.role === 'body_man') return { uid: byUid.uid, name: byUid.name, source: 'assignedBodyMan', needsReview: false }
 
   const cccName = roDoc?.bodyTechName
     || roDoc?.bodyTech
@@ -315,6 +425,89 @@ function resolveBodyTech(roDoc, employees = []) {
 
 function assignedBodyTechName(roDoc, employees = []) {
   return resolveBodyTech(roDoc, employees).name
+}
+
+function hasAssignedBodyTech(roDoc, pendingFields = {}, employees = []) {
+  if (pendingFields.assignedBodyMan) return true
+  return resolveBodyTech(roDoc, employees).source === 'assignedBodyMan'
+}
+
+function actionAssignsBodyTech(action, roDoc, employees = []) {
+  if (action.type !== 'assign_body_man') return false
+  const assignee = action.assigneeUid
+    ? findEmployeeByUid(employees, action.assigneeUid)
+    : findEmployeeByName(employees, action.assigneeName, 'body_man')
+  if (!roDoc || assignee?.role !== 'body_man') return false
+  return action.roId === roDoc.id || String(action.roNumber ?? '') === String(roDoc.roNumber ?? '')
+}
+
+function releaseHasBodyTech(roDoc, pendingFields = {}, actions = [], employees = []) {
+  return hasAssignedBodyTech(roDoc, pendingFields, employees)
+    || actions.some(action => actionAssignsBodyTech(action, roDoc, employees))
+}
+
+function isPaintPrimaryTemplate(tmpl = {}) {
+  return tmpl.category === 'paint' && tmpl.taskKind === 'primary'
+}
+
+async function hasOpenTaskForTemplate(roId, tmpl) {
+  if (!roId || !tmpl?.phase) return false
+  const snap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roId), where('phase', '==', tmpl.phase)))
+  return snap.docs.some(d => {
+    const task = d.data()
+    if (isPaintPrimaryTemplate(tmpl)) {
+      return task.taskKind !== 'secondary' && (tmpl.statusBackfill || task.status !== 'completed')
+    }
+    if (task.status === 'completed') return false
+    return task.title === tmpl.title
+  })
+}
+
+function taskFieldsFromTemplate({ roDoc, tmpl, assignTo, user, author, employees }) {
+  const assigneeName = employees.find(e => e.uid === assignTo)?.name ?? ''
+  const fields = {
+    roId: roDoc.id,
+    roNumber: roDoc.roNumber,
+    vehicleInfo: roDoc.vehicle || roDoc.vehicleInfo || '',
+    assignedTo: assignTo,
+    assignedBy: user.uid,
+    assignedByName: author,
+    assignedToName: assigneeName,
+    assignedAt: serverTimestamp(),
+    title: tmpl.title,
+    phase: tmpl.phase,
+    category: tmpl.category,
+    taskKind: tmpl.taskKind,
+    autoTriggered: true,
+    source: 'auto',
+    priority: dueDateToPriority(roDoc),
+    dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
+    status: 'pending',
+    createdAt: serverTimestamp(),
+    ...(tmpl.noAssigneeNote ? { taskNotes: [{ text: tmpl.noAssigneeNote, by: 'System', at: new Date().toISOString() }] } : {}),
+  }
+  // Firestore rejects `undefined` field values. Templates that aren't paint-related
+  // have no category/taskKind — strip any undefined keys before the write.
+  for (const k of Object.keys(fields)) {
+    if (fields[k] === undefined) delete fields[k]
+  }
+  return fields
+}
+
+async function addDownstreamTasksForEntry({ entry, status, roDoc, employees, user, author, addTask }) {
+  const downstreamTemplates = getDownstreamTasks(status, { ...roDoc, ...entry.fields })
+  for (const tmpl of downstreamTemplates) {
+    if (await hasOpenTaskForTemplate(roDoc.id, tmpl)) continue
+    let assignTo = tmpl.assignedToUid
+    if (!assignTo && tmpl.assignedToRole) {
+      const emp = employees.find(e => e.role === tmpl.assignedToRole)
+      assignTo = emp?.uid ?? null
+    }
+    if (tmpl.setRoField && assignTo) entry.fields[tmpl.setRoField] = assignTo
+    if (assignTo) {
+      entry.taskPromises.push(addTask(taskFieldsFromTemplate({ roDoc, tmpl, assignTo, user, author, employees })))
+    }
+  }
 }
 
 function inputExplicitlyMentionsAssignee(inputText = '', assigneeName = '') {
@@ -354,6 +547,445 @@ function normalizeBodyAssigneeDefaults(actions = [], inputText = '', ros = [], e
   })
 }
 
+function parseReceivedAllExcept(inputText = '') {
+  const text = String(inputText || '')
+  if (!/\b(received|recieved|rcvd|got)\b/i.test(text) || !/\b(all|everything)\b/i.test(text) || !/\bexcept\b/i.test(text)) {
+    return null
+  }
+
+  const roMatch = text.match(/\b(?:ro\s*#?|#)?\s*(\d{4,})\b/i)
+  const roNumber = roMatch?.[1] || ''
+  const afterExcept = text.split(/\bexcept\b/i).pop()?.trim() || ''
+
+  const parseEta = (match) => {
+    if (!match) return null
+    const year = match[3]
+      ? Number(match[3].length === 2 ? `20${match[3]}` : match[3])
+      : new Date().getFullYear()
+    const month = String(Number(match[1])).padStart(2, '0')
+    const day = String(Number(match[2])).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
+  const exceptions = []
+  const clauseRe = /(\d+)\s*(?:pc|pcs|part|parts|piece|pieces)?\s*(?:from\s+)?(.+?)(?=\s+(?:and|,|;)\s+\d+\s*(?:pc|pcs|part|parts|piece|pieces)?\s*(?:from\s+)?|$)/gi
+  for (const match of afterExcept.matchAll(clauseRe)) {
+    const shortQty = numericQty(match[1], 0)
+    const rawClause = match[2] || ''
+    const etaMatch = rawClause.match(/\b(?:parts?|part|vendor)?\s*eta\s*(?:is|to|=|changed\s+to)?\s*(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/i)
+    const rawVendor = rawClause
+      .replace(/\b(?:parts?|part|vendor)?\s*eta\b.*$/i, ' ')
+      .replace(/\b(?:is|are|still|pending|missing|short|backorder(?:ed)?|left|remaining)\b/gi, ' ')
+      .replace(/[.,;:!?]+\s*$/g, '')
+      .trim()
+    if (shortQty && rawVendor) {
+      exceptions.push({ shortQty, rawVendor, eta: parseEta(etaMatch) })
+    }
+  }
+
+  if (!exceptions.length) {
+    const qtyThenVendor = afterExcept.match(/^(\d+)\s*(?:pc|pcs|part|parts|piece|pieces)?\s*(?:from\s+)?(.+?)\s*$/i)
+    const vendorThenQty = afterExcept.match(/^(?:from\s+)?(.+?)\s+(\d+)\s*(?:pc|pcs|part|parts|piece|pieces)?\s*$/i)
+    const shortQty = numericQty(qtyThenVendor?.[1] ?? vendorThenQty?.[2], 0)
+    const etaMatch = text.match(/\b(?:parts?|part|vendor)?\s*eta\s*(?:is|to|=|changed\s+to)?\s*(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/i)
+    const rawVendor = (qtyThenVendor?.[2] ?? vendorThenQty?.[1] ?? '')
+      .replace(/\b(?:parts?|part|vendor)?\s*eta\b.*$/i, ' ')
+    .replace(/\b(?:is|are|still|pending|missing|short|backorder(?:ed)?|left|remaining)\b/gi, ' ')
+    .replace(/[.,;:!?]+\s*$/g, '')
+    .trim()
+    if (shortQty && rawVendor) exceptions.push({ shortQty, rawVendor, eta: parseEta(etaMatch) })
+  }
+
+  if (!roNumber || !exceptions.length) return null
+  return { roNumber, exceptions }
+}
+
+function normalizeReceivedAllExceptActions(rawActions = [], inputText = '', ros = []) {
+  const parsed = parseReceivedAllExcept(inputText)
+  if (!parsed) return rawActions
+
+  const roDoc = ros.find(ro => String(ro.roNumber ?? '') === String(parsed.roNumber))
+  const orders = Array.isArray(roDoc?.partsOrders) ? roDoc.partsOrders : []
+  if (!roDoc || !orders.length) return rawActions
+
+  const groups = mergePartsOrdersForAction(orders)
+  const exceptions = parsed.exceptions
+    .map(exception => {
+      const group = groups.find(item =>
+        vendorNamesMatch(item.vendor, exception.rawVendor) || vendorNamesMatch(item.vendorFull, exception.rawVendor)
+      )
+      return group ? { ...exception, group } : null
+    })
+    .filter(Boolean)
+  if (exceptions.length !== parsed.exceptions.length) return rawActions
+  const exceptionByKey = new Map(exceptions.map(exception => [exception.group.key, exception]))
+
+  const generated = groups
+    .map(group => {
+      const total = group.quantity
+      const exception = exceptionByKey.get(group.key)
+      const nextReceived = Math.max(0, total - (exception?.shortQty ?? 0))
+      return {
+        type: 'log_parts_received',
+        roNumber: roDoc.roNumber,
+        vendor: group.vendor || exception?.rawVendor || '',
+        vendorFull: group.vendorFull || '',
+        qtyReceived: nextReceived,
+        totalQty: total,
+        receiveMode: 'set',
+        currentQtyReceived: group.received,
+        nextQtyReceived: nextReceived,
+        eta: exception?.eta || undefined,
+        confidence: 'high',
+      }
+    })
+
+  const exceptionSummary = exceptions.map(exception => {
+    const label = exception.group.vendor || exception.group.vendorFull || exception.rawVendor
+    return `${label} short ${exception.shortQty} pc${exception.shortQty === 1 ? '' : 's'}${exception.eta ? ` ETA ${fmtShortDate(exception.eta)}` : ''}`
+  }).join('; ')
+  generated.push({
+    type: 'add_note',
+    roNumber: roDoc.roNumber,
+    note: `Parts received: all vendors complete except ${exceptionSummary}.`,
+    confidence: 'high',
+  })
+
+  const partsTypes = new Set(['log_parts_received', 'update_parts_order', 'update_parts_status', 'add_note'])
+  const filtered = rawActions.filter(action =>
+    String(action.roNumber ?? '') !== String(roDoc.roNumber ?? '') || !partsTypes.has(action.type)
+  )
+  return [...filtered, ...generated]
+}
+
+function parseReceivedAllFromVendors(inputText = '') {
+  const text = String(inputText || '')
+  if (!/\b(received|recieved|rcvd|got)\b/i.test(text) || !/\ball\s+parts?\s+from\b/i.test(text)) return null
+  const parsedSegments = text
+    .split(/\s*\/\/+\s*/g)
+    .map(segment => segment.trim())
+    .filter(segment => /\b(received|recieved|rcvd|got)\b/i.test(segment) && /\ball\s+parts?\s+from\b/i.test(segment))
+    .map(segment => {
+      const roMatch = segment.match(/\b(?:ro\s*#?|#)?\s*(\d{4,})\b/i)
+      const roNumber = roMatch?.[1] || ''
+      const afterFrom = segment.split(/\ball\s+parts?\s+from\b/i).pop()?.trim() || ''
+      const vendorText = afterFrom
+        .split(/\b(?:part|parts)\s+from\b/i)[0]
+        .replace(/\b(?:and\s+)?(?:still\s+)?(?:waiting|short|except|missing)\b.*$/i, '')
+        .replace(/[.;:!?/]+$/g, '')
+        .trim()
+      const rawVendors = vendorText
+        .split(/\s*(?:,|;|&|\+|\band\b)\s*/i)
+        .map(item => item.trim())
+        .filter(Boolean)
+      return roNumber && rawVendors.length ? { roNumber, rawVendors } : null
+    })
+    .filter(Boolean)
+  return parsedSegments.length ? parsedSegments : null
+}
+
+function normalizeReceivedAllFromVendorActions(rawActions = [], inputText = '', ros = []) {
+  const parsedSegments = parseReceivedAllFromVendors(inputText)
+  if (!parsedSegments) return rawActions
+
+  let nextActions = rawActions
+  for (const parsed of parsedSegments) {
+    const roDoc = ros.find(ro => String(ro.roNumber ?? '') === String(parsed.roNumber))
+    const orders = Array.isArray(roDoc?.partsOrders) ? roDoc.partsOrders : []
+    if (!roDoc || !orders.length) continue
+
+    const groups = mergePartsOrdersForAction(orders)
+    const matched = parsed.rawVendors
+      .map(rawVendor => {
+        const group = groups.find(item =>
+          vendorNamesMatch(item.vendor, rawVendor) || vendorNamesMatch(item.vendorFull, rawVendor)
+        )
+        return group ? { rawVendor, group } : null
+      })
+      .filter(Boolean)
+    if (!matched.length) continue
+
+    const generated = matched.map(({ group, rawVendor }) => ({
+      type: 'log_parts_received',
+      roNumber: roDoc.roNumber,
+      vendor: group.vendor || rawVendor,
+      vendorFull: group.vendorFull || '',
+      qtyReceived: group.quantity,
+      totalQty: group.quantity,
+      receiveMode: 'set',
+      currentQtyReceived: group.received,
+      nextQtyReceived: group.quantity,
+      confidence: 'high',
+    }))
+
+    const generatedKeys = new Set(matched.map(({ group }) => group.key))
+    nextActions = nextActions.filter(action => {
+      if (String(action.roNumber ?? '') !== String(roDoc.roNumber ?? '')) return true
+      if (!['log_parts_received', 'update_parts_order'].includes(action.type)) return true
+      return !generatedKeys.has(normalizeVendorName(action.vendorFull || action.vendor))
+    })
+    nextActions = [...nextActions, ...generated]
+  }
+  return nextActions
+}
+
+function cleanWaitingVendor(value = '') {
+  return String(value || '')
+    .replace(/\b(?:eta|due|arriv(?:e|es|ing|al)?)\b.*$/i, '')
+    .replace(/\b(?:back\s*order|backorder|backordered|ordered|order|wait|waiting|awaiting|still|on|from)\b/gi, ' ')
+    .replace(/[.,;:!?/]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function parseWaitingPartsOrders(inputText = '') {
+  const text = String(inputText || '')
+  if (!/\b(ord\w*|wait\w*|await\w*)\b/i.test(text) || !/\bfrom\b/i.test(text)) return []
+  return text
+    .split(/\s*\/\/+\s*/g)
+    .map(segment => segment.trim())
+    .flatMap(segment => {
+      const roNumber = segment.match(/\b(?:ro\s*#?|#)?\s*(\d{4,})\b/i)?.[1] || ''
+      if (!roNumber) return []
+      const matches = []
+      const re = /\b(?:ord\w*|wait\w*|await\w*)(?:\s+(?:and|&)\s+(?:ord\w*|wait\w*|await\w*))?\s+(?:on\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:pc|pcs|part|parts|piece|pieces)?\s+from\s+(.+?)(?:\s+(?:eta|due|arriv(?:e|es|ing|al)?)\s*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?))?(?=$|[.;,])/gi
+      for (const match of segment.matchAll(re)) {
+        const qty = partsQtyValue(match[1], 0)
+        const rawVendor = cleanWaitingVendor(match[2])
+        if (!qty || !rawVendor) continue
+        matches.push({
+          roNumber,
+          qty,
+          rawVendor,
+          eta: parseShortDate(match[3] || ''),
+        })
+      }
+      return matches
+    })
+}
+
+function normalizeWaitingPartsOrderActions(rawActions = [], inputText = '', ros = []) {
+  const parsedOrders = parseWaitingPartsOrders(inputText)
+  if (!parsedOrders.length) return rawActions
+
+  let nextActions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
+  for (const parsed of parsedOrders) {
+    const roDoc = ros.find(ro => String(ro.roNumber ?? '') === String(parsed.roNumber))
+    const groups = mergePartsOrdersForAction(Array.isArray(roDoc?.partsOrders) ? roDoc.partsOrders : [])
+    const group = groups.find(item =>
+      vendorNamesMatch(item.vendor, parsed.rawVendor) || vendorNamesMatch(item.vendorFull, parsed.rawVendor)
+    )
+    const vendor = group?.vendor || parsed.rawVendor
+    const vendorFull = group?.vendorFull || parsed.rawVendor
+    const normalizedOrder = {
+      type: 'update_parts_order',
+      roNumber: roDoc?.roNumber || parsed.roNumber,
+      roId: roDoc?.id,
+      vendor,
+      vendorFull: group?.vendorFull || group?.vendor || vendorFull,
+      description: 'Parts order',
+      qty: parsed.qty,
+      qtyReceived: 0,
+      eta: parsed.eta || null,
+      status: 'ordered',
+      forceNewOrder: true,
+      confidence: 'high',
+    }
+
+    let replaced = false
+    nextActions = nextActions.map(action => {
+      const sameRo = roDoc
+        ? action.roId === roDoc.id || String(action.roNumber ?? '') === String(roDoc.roNumber ?? '')
+        : String(action.roNumber ?? '') === String(parsed.roNumber)
+      if (
+        action.type === 'update_parts_order'
+        && sameRo
+        && (
+          vendorNamesMatch(action.vendor, parsed.rawVendor)
+          || vendorNamesMatch(action.vendorFull, parsed.rawVendor)
+          || vendorNamesMatch(action.vendor, vendor)
+          || vendorNamesMatch(action.vendorFull, vendor)
+        )
+      ) {
+        replaced = true
+        return { ...action, ...normalizedOrder }
+      }
+      return action
+    })
+    if (!replaced) nextActions.push(normalizedOrder)
+  }
+  return nextActions
+}
+
+function escapeRegex(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+const RECEIVED_CONTEXT_RE = /\b(received|recieved|rcvd|got|confirmed|complete|all\s+parts)\b/i
+const WAITING_PARTS_CONTEXT_RE = /\b(wait|waiting|awaiting|short|missing|outstanding|order|ordered|ordering|backorder|backordered|hold|pending)\b/i
+
+function matchWindow(text = '', matchIndex = 0, matchLength = 0, before = 80, after = 80) {
+  const start = Math.max(0, matchIndex - before)
+  const end = Math.min(text.length, matchIndex + matchLength + after)
+  return text.slice(start, end)
+}
+
+function matchSentence(text = '', matchIndex = 0, matchLength = 0) {
+  const before = text.slice(0, matchIndex)
+  const after = text.slice(matchIndex + matchLength)
+  const beforeBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf(';'), before.lastIndexOf('\n'))
+  const afterBreakCandidates = ['.', ';', '\n']
+    .map(mark => after.indexOf(mark))
+    .filter(index => index >= 0)
+  const afterBreak = afterBreakCandidates.length ? Math.min(...afterBreakCandidates) : after.length
+  return text.slice(beforeBreak + 1, matchIndex + matchLength + afterBreak)
+}
+
+function matchLocalContext(text = '', matchIndex = 0, matchLength = 0) {
+  const sentence = matchSentence(text, matchIndex, matchLength)
+  return sentence || matchWindow(text, matchIndex, matchLength)
+}
+
+function isWaitingPartsContext(text = '') {
+  return WAITING_PARTS_CONTEXT_RE.test(text)
+}
+
+function hasReceivedContext(text = '') {
+  return RECEIVED_CONTEXT_RE.test(text)
+}
+
+function noteReceivedQtyForVendor(noteText = '', group = {}) {
+  const names = [group.vendor, group.vendorFull].filter(Boolean)
+  for (const name of names) {
+    const fractionMatch = noteText.match(new RegExp(`${escapeRegex(name)}\\s*\\(\\s*(\\d+)\\s*/\\s*(\\d+)\\s*\\)`, 'i'))
+    if (fractionMatch) {
+      const context = matchLocalContext(noteText, fractionMatch.index ?? 0, fractionMatch[0].length)
+      if (isWaitingPartsContext(context)) continue
+      return {
+        received: numericQty(fractionMatch[1], 0),
+        total: numericQty(fractionMatch[2], group.quantity),
+      }
+    }
+
+    const qtyBeforeMatch = noteText.match(new RegExp(`(\\d+)\\s*(?:pc|pcs|part|parts|piece|pieces)?\\s+(?:from\\s+)?${escapeRegex(name)}\\b`, 'i'))
+    if (qtyBeforeMatch) {
+      const context = matchLocalContext(noteText, qtyBeforeMatch.index ?? 0, qtyBeforeMatch[0].length)
+      if (isWaitingPartsContext(context) || !hasReceivedContext(context)) continue
+      return {
+        received: numericQty(qtyBeforeMatch[1], group.quantity),
+        total: group.quantity,
+      }
+    }
+  }
+  const normalizedNote = normalizeVendorName(noteText)
+  const groupKeys = [...new Set([group.vendor, group.vendorFull].map(normalizeVendorName).filter(Boolean))]
+  for (const groupKey of groupKeys) {
+    if (!normalizedNote.includes(groupKey)) continue
+    const fuzzyVendor = groupKey
+      .split(' ')
+      .filter(Boolean)
+      .map(escapeRegex)
+      .join('[\\W_]+')
+    const fuzzyMatch = noteText.match(new RegExp(`\\b${fuzzyVendor}\\b(?:[\\W_]+\\w+){0,4}?[\\W_]*\\(\\s*(\\d+)\\s*/\\s*(\\d+)\\s*\\)`, 'i'))
+    if (fuzzyMatch) {
+      const context = matchLocalContext(noteText, fuzzyMatch.index ?? 0, fuzzyMatch[0].length)
+      if (isWaitingPartsContext(context)) continue
+      return {
+        received: numericQty(fuzzyMatch[1], 0),
+        total: numericQty(fuzzyMatch[2], group.quantity),
+      }
+    }
+    const bareFractionMatch = noteText.match(new RegExp(`\\b${fuzzyVendor}\\b(?:[\\W_]+\\w+){0,4}?[\\W_]+(\\d+)\\s*/\\s*(\\d+)`, 'i'))
+    if (bareFractionMatch) {
+      const context = matchLocalContext(noteText, bareFractionMatch.index ?? 0, bareFractionMatch[0].length)
+      if (isWaitingPartsContext(context)) continue
+      return {
+        received: numericQty(bareFractionMatch[1], 0),
+        total: numericQty(bareFractionMatch[2], group.quantity),
+      }
+    }
+  }
+  return null
+}
+
+function normalizeReceivedFromNoteActions(rawActions = [], ros = []) {
+  const actions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
+  const generated = []
+
+  actions.forEach(action => {
+    if (action.type !== 'add_note') return
+    const roDoc = findRoForAction(ros, action)
+    const orders = Array.isArray(roDoc?.partsOrders) ? roDoc.partsOrders : []
+    if (!roDoc || !orders.length) return
+
+    const noteText = `${action.note ?? ''} ${action.notes ?? ''} ${action.description ?? ''}`
+    if (!/\b(received|recieved|rcvd|got)\b/i.test(noteText)) return
+
+    mergePartsOrdersForAction(orders).forEach(group => {
+      const qty = noteReceivedQtyForVendor(noteText, group)
+      if (!qty?.received) return
+      const alreadyHasReceivedAction = actions.concat(generated).some(existing =>
+        existing.type === 'log_parts_received'
+        && String(existing.roNumber ?? '') === String(roDoc.roNumber ?? '')
+        && actionVendorsMatch(existing, group)
+      )
+      if (alreadyHasReceivedAction) return
+
+      const total = qty.total || group.quantity
+      generated.push({
+        type: 'log_parts_received',
+        roNumber: roDoc.roNumber,
+        vendor: group.vendor,
+        vendorFull: group.vendorFull || '',
+        qtyReceived: Math.min(qty.received, total || qty.received),
+        totalQty: total,
+        receiveMode: 'set',
+        currentQtyReceived: group.received,
+        nextQtyReceived: Math.min(qty.received, total || qty.received),
+        confidence: 'high',
+      })
+    })
+  })
+
+  return generated.length ? [...actions, ...generated] : actions
+}
+
+function normalizeNoReplacementPartsActions(rawActions = [], inputText = '', ros = []) {
+  const text = String(inputText || '')
+  if (!/\b(no|none|not\s+needed|does\s+not\s+need|doesn't\s+need|without)\b/i.test(text)) return rawActions
+  if (!/\b(repl(?:acement)?|replace(?:ment)?|parts?|part)\b/i.test(text)) return rawActions
+  if (/\b(order(?:ed)?|eta|received|rcvd|got|short|except|return|wrong|exchange)\b/i.test(text)) return rawActions
+
+  const roNumber = extractRoNumber(text, ros)
+  if (!roNumber) return rawActions
+  const roDoc = ros.find(ro => String(ro.roNumber ?? '') === String(roNumber))
+  if (!roDoc) return rawActions
+
+  const filtered = rawActions
+    .map(action => ({ ...action, type: action.type ?? action.action }))
+    .filter(action => {
+      if (String(action.roNumber ?? '') !== String(roNumber)) return true
+      return !['update_parts_order', 'log_parts_received', 'update_parts_status', 'add_note'].includes(action.type)
+    })
+
+  return [
+    ...filtered,
+    {
+      type: 'update_parts_status',
+      roNumber,
+      partsStatus: 'all_received',
+      noReplacementPartsNeeded: true,
+      confidence: 'high',
+    },
+    {
+      type: 'add_note',
+      roNumber,
+      note: 'No replacement parts needed for this repair.',
+      confidence: 'high',
+    },
+  ]
+}
+
 function normalizeRejectedPartsActions(rawActions = [], inputText = '') {
   const text = String(inputText || '')
   if (!/\b(reject|rejected|wrong|incorrect|exchange|return)\b/i.test(text)) return rawActions
@@ -373,6 +1005,12 @@ function normalizeRejectedPartsActions(rawActions = [], inputText = '') {
 
     const receivedQty = numericQty(action.qtyReceived ?? action.receivedQty, 0)
     const rejectedQty = numericQty(matchingReturn.qty ?? matchingReturn.quantity, 1)
+    const shipmentQty = numericQty(action.totalQty ?? action.qty, 0)
+    const actionText = `${action.note ?? ''} ${action.notes ?? ''} ${action.description ?? ''}`
+    const alreadyUsableQty = /\b(usable|accepted|good)\b/i.test(actionText)
+      || (shipmentQty > 0 && receivedQty + rejectedQty <= shipmentQty)
+
+    if (alreadyUsableQty) return [action]
     if (receivedQty <= rejectedQty) return []
 
     return [{
@@ -414,8 +1052,56 @@ function normalizePartsReceivedIncrements(rawActions = [], inputText = '', ros =
       receiveMode: useFinalCount ? 'set' : 'increment',
       currentQtyReceived: currentReceived,
       nextQtyReceived: nextReceived,
-      totalQty: action.totalQty ?? action.qty ?? orderQty,
+      totalQty: orderQty || (action.totalQty ?? action.qty),
     }
+  })
+}
+
+function dedupePartsOrderActions(rawActions = []) {
+  const bestByKey = new Map()
+  const output = []
+
+  for (const action of rawActions) {
+    if (action.type !== 'update_parts_order') {
+      output.push(action)
+      continue
+    }
+
+    const vendorKey = normalizeVendorName(action.vendorFull || action.vendor).replace(/\s+/g, '')
+    const key = `${action.roId || action.roNumber || ''}:${vendorKey}`
+    if (!vendorKey) {
+      output.push(action)
+      continue
+    }
+
+    const existingIndex = bestByKey.get(key)
+    if (existingIndex === undefined) {
+      bestByKey.set(key, output.length)
+      output.push(action)
+      continue
+    }
+
+    output[existingIndex] = mergePreferredPartsOrderActions(output[existingIndex], action)
+  }
+
+  return output
+}
+
+function removePartsOrdersCoveredByReceipts(rawActions = []) {
+  const actions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
+  const receiptActions = actions.filter(action =>
+    action.type === 'log_parts_received'
+    && (action.vendor || action.vendorFull)
+    && numericQty(action.qtyReceived ?? action.receivedQty ?? action.nextQtyReceived, 0) > 0
+  )
+  if (!receiptActions.length) return actions
+
+  return actions.filter(action => {
+    if (action.type !== 'update_parts_order') return true
+    return !receiptActions.some(receipt =>
+      String(receipt.roId || receipt.roNumber || '') === String(action.roId || action.roNumber || '')
+      && (actionVendorsMatch(action, receipt) || actionVendorsMatchIgnoringParsingMetadata(action, receipt))
+    )
   })
 }
 
@@ -434,14 +1120,36 @@ function shouldHideResolvedBodyTechClarification(clarification = '', resultActio
 }
 
 function normalizeBodyWorkflowActions(rawActions = [], inputText = '', ros = [], employees = []) {
-  const partsNormalizedActions = normalizePartsReceivedIncrements(
-    normalizeRejectedPartsActions(
-      rawActions.map(action => ({ ...action, type: action.type ?? action.action })),
+  const baseActions = normalizeReceivedFromNoteActions(
+    normalizeWaitingPartsOrderActions(
+      normalizeReceivedAllFromVendorActions(
+        normalizeReceivedAllExceptActions(
+          normalizeNoReplacementPartsActions(
+            rawActions.map(action => ({ ...action, type: action.type ?? action.action })),
+            inputText,
+            ros,
+          ),
+          inputText,
+          ros,
+        ),
+        inputText,
+        ros,
+      ),
       inputText,
+      ros,
     ),
-    inputText,
     ros,
   )
+  const partsNormalizedActions = dedupePartsOrderActions(removePartsOrdersCoveredByReceipts(
+    normalizePartsReceivedIncrements(
+      normalizeRejectedPartsActions(
+        baseActions,
+        inputText,
+      ),
+      inputText,
+      ros,
+    )
+  ))
   const actions = normalizeBodyAssigneeDefaults(
     partsNormalizedActions,
     inputText,
@@ -527,6 +1235,148 @@ function normalizeBodyWorkflowActions(rawActions = [], inputText = '', ros = [],
     })
   }
   return [...normalized, ...extras]
+}
+
+function paintReadyStatusForRo(roDoc) {
+  const current = roDoc?.status || ''
+  if (['checked_in', 'teardown', 'waiting_parts', 'body_work', 'body_complete'].includes(current)) return 'paint_prep'
+  return ''
+}
+
+function looksLikePrimaryPaintAction(action = {}, inputText = '') {
+  const text = `${inputText} ${action.title || ''} ${action.description || ''} ${action.phase || ''} ${action.status || ''}`.toLowerCase()
+  return /\b(prep\s*(?:&|and)?\s*paint|paint\s*prep|ready\s*(?:for|to).*paint|paint\s*complete|in\s*paint|reassy|reassembly)\b/i.test(text)
+}
+
+function paintSecondaryPhase(action = {}, inputText = '') {
+  const text = `${inputText} ${action.title || ''} ${action.description || ''} ${action.phase || ''}`.toLowerCase()
+  if (/\b(mask|masking|sand|sanding|tape|taping|cover|prep|primer|prime|scuff|edge|clean)\b/i.test(text)) return 'paint_prep'
+  if (/\b(color\s*match|colour\s*match|blend|spray|paint|booth|clear|clearcoat|refinish)\b/i.test(text)) return 'paint'
+  return 'paint_prep'
+}
+
+function normalizePaintWorkflowActions(rawActions = [], inputText = '', ros = [], employees = []) {
+  const actions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
+  const extras = []
+
+  const addPaintPrimaries = (roDoc) => {
+    if (!roDoc?.id) return
+    const paintTeam = {
+      painter: employees.find(e => e.role === 'painter'),
+      helper: employees.find(e => e.role === 'paint_helper'),
+    }
+    extras.push({
+      type: 'assign_task',
+      roId: roDoc.id,
+      roNumber: roDoc.roNumber,
+      assigneeName: paintTeam.helper?.name || 'Paint Helper',
+      assigneeUid: paintTeam.helper?.uid || '',
+      title: 'Paint Prep',
+      phase: 'paint_prep',
+      category: 'paint',
+      taskKind: 'primary',
+      autoGenerated: true,
+      autoReason: 'paint_ready',
+    })
+    extras.push({
+      type: 'assign_task',
+      roId: roDoc.id,
+      roNumber: roDoc.roNumber,
+      assigneeName: paintTeam.painter?.name || 'Painter',
+      assigneeUid: paintTeam.painter?.uid || '',
+      title: 'Paint',
+      phase: 'paint',
+      category: 'paint',
+      taskKind: 'primary',
+      autoGenerated: true,
+      autoReason: 'paint_ready',
+    })
+  }
+
+  for (const action of actions) {
+    const roDoc = findRoForAction(ros, action)
+    if (!roDoc) continue
+    if (action.type === 'assign_painter') addPaintPrimaries(roDoc)
+    if (action.type === 'assign_task') {
+      const assignee = action.assigneeUid
+        ? findEmployeeByUid(employees, action.assigneeUid)
+        : findEmployeeByName(employees, action.assigneeName)
+      if (assignee?.role === 'painter' || assignee?.role === 'paint_helper') {
+        addPaintPrimaries(roDoc)
+        if (looksLikePrimaryPaintAction(action, inputText)) {
+          continue
+        }
+        action.phase = paintSecondaryPhase(action, inputText)
+        action.category = 'paint'
+        action.taskKind = 'secondary'
+        action.parentPhase = action.phase
+      }
+    }
+    if (action.type === 'update_status' && ['paint_prep', 'in_paint', 'paint_complete', 'reassembly'].includes(action.status)) {
+      addPaintPrimaries(roDoc)
+    }
+  }
+
+  for (const roDoc of ros) {
+    if (!sameRoActionText(actions, roDoc.roNumber)) continue
+    if (!looksLikePrimaryPaintAction({}, inputText)) continue
+    addPaintPrimaries(roDoc)
+    const nextStatus = paintReadyStatusForRo(roDoc)
+    if (nextStatus && !actions.some(action => action.type === 'update_status' && String(action.roNumber ?? '') === String(roDoc.roNumber ?? ''))) {
+      extras.push({ type: 'update_status', roId: roDoc.id, roNumber: roDoc.roNumber, status: nextStatus, autoGenerated: true, autoReason: 'paint_ready' })
+    }
+  }
+
+  const seen = new Set()
+  return [...actions, ...extras].filter(action => {
+    let actionIdentity = `${action.phase || action.status || ''}:${action.taskKind || ''}`
+    if (action.type === 'update_parts_order') {
+      actionIdentity = `${normalizeVendorName(action.vendorFull || action.vendor).replace(/\s+/g, '')}:${action.description || ''}:${action.eta || ''}`
+    } else if (action.type === 'log_parts_received') {
+      actionIdentity = `${normalizeVendorName(action.vendorFull || action.vendor).replace(/\s+/g, '')}:${action.qtyReceived ?? action.receivedQty ?? ''}:${action.totalQty ?? action.qty ?? ''}`
+    } else if (action.type === 'log_parts_return') {
+      actionIdentity = `${normalizeVendorName(action.vendorFull || action.vendor).replace(/\s+/g, '')}:${action.qty ?? action.quantity ?? ''}:${action.reason || action.description || ''}`
+    }
+    const key = `${action.type}:${action.roId || action.roNumber}:${actionIdentity}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function impliedCompletedPhasesForStatus(status) {
+  const map = {
+    paint_prep: ['body'],
+    in_paint: ['body', 'paint_prep'],
+    paint_complete: ['body', 'paint_prep', 'paint'],
+    reassembly: ['body', 'paint_prep', 'paint'],
+  }
+  return map[status] || []
+}
+
+function completePhaseTasksPromise(roId, phase) {
+  const PHASE_CATEGORY = { teardown: 'body', body: 'body', paint_prep: 'paint', paint: 'paint', reassembly: 'body', sublet: 'sublet', detail: 'detail' }
+  const PHASE_TITLE_RE = { teardown: /teardown/i, body: /body work|repair/i, paint_prep: /paint.?prep|prep/i, paint: /paint/i, reassembly: /reassembl/i, sublet: /sublet/i, detail: /detail|qc/i }
+  return getDocs(query(collection(db, 'tasks'), where('roId', '==', roId), where('phase', '==', phase)))
+    .then(async snap => {
+      let pending = snap.docs.filter(d => d.data().status !== 'completed')
+      if (pending.length === 0) {
+        const cat = PHASE_CATEGORY[phase]
+        const re = PHASE_TITLE_RE[phase]
+        if (cat) {
+          const fallback = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roId), where('category', '==', cat)))
+          pending = fallback.docs.filter(d => {
+            const data = d.data()
+            return data.status !== 'completed' && (!re || re.test(data.title ?? ''))
+          })
+        }
+      }
+      return Promise.all(pending.map(d => updateDoc(doc(db, 'tasks', d.id), {
+        status: 'completed',
+        completedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })))
+    })
 }
 
 function mentionsAuthorization(text = '') {
@@ -792,14 +1642,20 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
     switch (draft.type) {
       case 'add_note':            return <span className="text-gray-700 dark:text-zinc-200">"{draft.note}"</span>
       case 'update_status':       return <span className="text-purple-700 dark:text-purple-300 font-medium">{STATUS_MAP[draft.status]?.label ?? draft.status}</span>
-      case 'update_parts_status': return <span className="text-yellow-700 dark:text-amber-300 font-medium">{PARTS_STATUSES.find(p => p.key === draft.partsStatus)?.label ?? draft.partsStatus}</span>
+      case 'update_parts_status': return (
+        <span className="text-yellow-700 dark:text-amber-300 font-medium">
+          {draft.noReplacementPartsNeeded ? 'No Repl Parts Needed' : PARTS_STATUSES.find(p => p.key === draft.partsStatus)?.label ?? draft.partsStatus}
+        </span>
+      )
       case 'update_parts_order':
         return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: {draft.description || 'Parts order'} ({draft.qty ?? draft.quantity ?? '?'} pc{Number(draft.qty ?? draft.quantity) === 1 ? '' : 's'}{draft.eta ? `, ETA ${draft.eta}` : ''})</span>
-      case 'log_parts_received':
+      case 'log_parts_received': {
+        const etaSuffix = draft.eta ? `, ETA ${fmtShortDate(draft.eta)}` : ''
         if (draft.receiveMode === 'increment' && numericQty(draft.currentQtyReceived, 0)) {
-          return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: add {draft.qtyReceived ?? draft.receivedQty ?? '?'} received ({draft.currentQtyReceived}/{draft.totalQty ?? draft.qty ?? '?'} -&gt; {draft.nextQtyReceived}/{draft.totalQty ?? draft.qty ?? '?'}){draft.note ? ` - ${draft.note}` : ''}</span>
+          return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: add {draft.qtyReceived ?? draft.receivedQty ?? '?'} received ({draft.currentQtyReceived}/{draft.totalQty ?? draft.qty ?? '?'} -&gt; {draft.nextQtyReceived}/{draft.totalQty ?? draft.qty ?? '?'}){etaSuffix}{draft.note ? ` - ${draft.note}` : ''}</span>
         }
-        return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: received {draft.nextQtyReceived ?? draft.qtyReceived ?? draft.receivedQty ?? '?'} / {draft.totalQty ?? draft.qty ?? '?'}{draft.note ? ` - ${draft.note}` : ''}</span>
+        return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: received {draft.nextQtyReceived ?? draft.qtyReceived ?? draft.receivedQty ?? '?'} / {draft.totalQty ?? draft.qty ?? '?'}{etaSuffix}{draft.note ? ` - ${draft.note}` : ''}</span>
+      }
       case 'log_parts_return':
         return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: return {draft.qty ?? draft.quantity ?? 1} pc{Number(draft.qty ?? draft.quantity) === 1 ? '' : 's'} - {draft.reason || draft.description || 'Return part'}</span>
       case 'update_car_status':   return <span className="text-gray-800 dark:text-zinc-100"><strong>{CAR_STATUS_MAP[draft.carStatus]?.label ?? draft.carStatus}</strong></span>
@@ -898,8 +1754,10 @@ function actionSummary(action) {
       return `Note: ${action.note || 'Missing note'}`
     case 'update_status':
       return `Status -> ${STATUS_MAP[action.status]?.label ?? action.status ?? 'Missing'}`
-    case 'update_parts_status':
-      return `Parts status -> ${PARTS_STATUSES.find(p => p.key === action.partsStatus)?.label ?? action.partsStatus ?? 'Missing'}`
+      case 'update_parts_status':
+      return action.noReplacementPartsNeeded
+        ? 'No Repl Parts Needed'
+        : `Parts status -> ${PARTS_STATUSES.find(p => p.key === action.partsStatus)?.label ?? action.partsStatus ?? 'Missing'}`
     case 'update_parts_order':
       return `Order parts from ${action.vendor || 'Missing vendor'} (${action.qty ?? action.quantity ?? 'Missing qty'} pcs, ETA ${action.eta || 'Missing'})`
     case 'log_parts_received':
@@ -1076,19 +1934,28 @@ function CameraModal({ onDone, onClose }) {
   }, [])
 
   useEffect(() => {
-    navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+    const constraints = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 2560 },
+        height: { ideal: 1440 },
+      },
+      audio: false,
+    }
+    navigator.mediaDevices?.getUserMedia(constraints)
+      .catch(() => navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' }, audio: false }))
       .then(stream => { streamRef.current = stream; if (videoRef.current) videoRef.current.srcObject = stream; setReady(true) })
       .catch(() => setErr('无法访问相机，请检查权限'))
     return () => streamRef.current?.getTracks().forEach(t => t.stop())
   }, [])
 
-  const snap = () => {
+  const snap = async () => {
     const v = videoRef.current; if (!v || !ready) return
-    const MAX = 1280; let w = v.videoWidth, h = v.videoHeight
-    if (w > MAX || h > MAX) { if (w > h) { h = Math.round(h*MAX/w); w = MAX } else { w = Math.round(w*MAX/h); h = MAX } }
-    const c = document.createElement('canvas'); c.width = w; c.height = h
-    c.getContext('2d').drawImage(v, 0, 0, w, h)
-    c.toBlob(blob => { const preview = URL.createObjectURL(blob); setShots(p => [...p, { blob, preview, name:`cam_${Date.now()}.jpg` }]) }, 'image/jpeg', 0.65)
+    const blob = await compressVideoFrame(v)
+    if (!blob) return
+    playShutterSound()
+    const preview = URL.createObjectURL(blob)
+    setShots(p => [...p, { blob, preview, name:`cam_${Date.now()}.jpg` }])
   }
 
   const remove = (idx) => setShots(prev => { URL.revokeObjectURL(prev[idx].preview); return prev.filter((_,i) => i!==idx) })
@@ -1135,7 +2002,7 @@ function CameraModal({ onDone, onClose }) {
         </button>
       </div>
 
-      <input ref={libRef} type="file" accept="image/*" multiple style={{ display:'none' }} onChange={e => { Array.from(e.target.files).forEach(f => { const img=new Image(), u=URL.createObjectURL(f); img.onload=()=>{ URL.revokeObjectURL(u); const MAX=1280; let w=img.width,h=img.height; if(w>MAX||h>MAX){if(w>h){h=Math.round(h*MAX/w);w=MAX}else{w=Math.round(w*MAX/h);h=MAX}} const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);c.toBlob(blob=>setShots(p=>[...p,{blob,preview:URL.createObjectURL(blob),name:f.name}]),'image/jpeg',0.65)}; img.src=u }); e.target.value='' }} />
+      <input ref={libRef} type="file" accept="image/*" multiple style={{ display:'none' }} onChange={async e => { const files = Array.from(e.target.files); e.target.value=''; for (const f of files) { const blob = await compressImageFile(f); if (blob) setShots(p=>[...p,{blob,preview:URL.createObjectURL(blob),name:f.name}]) } }} />
     </div>
   )
 }
@@ -1171,10 +2038,135 @@ function looksLikePartsManagerEtaInput(inputText = '') {
   if (!/\b(eta|due|arriv|received|rcvd|back\s*order|backorder|return|exchange|wrong|short|qty|quantity|pc|pcs|piece|pieces)\b/i.test(text)) {
     return false
   }
-  if (/\b(customer|completion|complete|delivery|deliver|pickup|pick\s*up|ready|target|promise|promised|shop eta|vehicle eta|call|called|update customer)\b/i.test(text)) {
+  if (looksLikeShopRepairEtaInput(text)) {
     return false
   }
   return /\b(part|parts|vendor|dealer|dealership|bumper|fender|headlight|lamp|grille|hood|door|mirror|sensor|bracket|cover|reinforcement|absorber|molding|radiator|condenser|wheel|blend|keystone|pac|lkq|toyota|ford|hyundai|kia|tesla|colley)\b/i.test(text)
+}
+
+function looksLikeShopRepairEtaInput(inputText = '') {
+  const text = String(inputText || '').toLowerCase()
+  return /\b(customer|completion|complete|delivery|deliver|pickup|pick\s*up|ready|target|promise|promised|shop\s*eta|vehicle\s*eta|repair\s*eta|shop\s*repair\s*eta|repair\s*due|due\s*date|call|called|update customer)\b/i.test(text)
+}
+
+function parseShortDate(value = '') {
+  const match = String(value).match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/)
+  if (!match) return ''
+  const year = match[3]
+    ? Number(match[3].length === 2 ? `20${match[3]}` : match[3])
+    : new Date().getFullYear()
+  const month = String(Number(match[1])).padStart(2, '0')
+  const day = String(Number(match[2])).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function canonicalParsedVendorLabel(value = '') {
+  const cleaned = String(value || '').replace(/\s+/g, ' ').trim()
+  const key = normalizeVendorName(cleaned)
+  if (key === 'keystone') return 'Keystone'
+  if (key === 'santa margarita toyota') return 'Santa Margarita Toyota'
+  if (cleaned && cleaned === cleaned.toUpperCase()) {
+    return cleaned.toLowerCase().replace(/\b\w/g, char => char.toUpperCase())
+  }
+  return cleaned
+}
+
+function extractExplicitPartsOrderVendors(inputText = '') {
+  return extractPartsOrderCandidates(inputText).map(order => ({
+    roNumber: order.roNumber,
+    vendor: canonicalParsedVendorLabel(order.vendor),
+    qty: order.qty,
+    eta: order.eta,
+  }))
+}
+
+function applyExplicitPartsOrderFields(action, order) {
+  return {
+    ...action,
+    vendor: order.vendor,
+    vendorFull: order.vendor,
+    ...(order.qty ? { qty: order.qty } : {}),
+    ...(order.eta ? { eta: order.eta } : {}),
+  }
+}
+
+function preserveExplicitPartsOrderVendors(parsed, inputText = '') {
+  if (!parsed?.actions?.length) return parsed
+  const explicitOrders = extractExplicitPartsOrderVendors(inputText)
+  if (!explicitOrders.length) return parsed
+
+  const used = new Set()
+  const allCandidatesFor = (action) => explicitOrders
+    .map((order, index) => ({ order, index }))
+    .filter(({ order }) => {
+      return !order.roNumber || !action.roNumber || String(order.roNumber) === String(action.roNumber)
+    })
+  const candidatesFor = (action) => allCandidatesFor(action)
+    .filter(({ index }) => !used.has(index))
+
+  const actions = parsed.actions.map(action => {
+    if (action?.type !== 'update_parts_order') return action
+
+    const candidates = candidatesFor(action)
+    if (!candidates.length) return action
+
+    const matching = candidates.find(({ order }) =>
+      vendorNamesMatch(action.vendor, order.vendor) || vendorNamesMatch(action.vendorFull, order.vendor)
+    )
+    if (matching) {
+      used.add(matching.index)
+      return applyExplicitPartsOrderFields(action, matching.order)
+    }
+
+    const noisyMatching = allCandidatesFor(action).find(({ order }) =>
+      vendorsMatchIgnoringParsingMetadata(action.vendor, order.vendor)
+      || vendorsMatchIgnoringParsingMetadata(action.vendorFull, order.vendor)
+    )
+    if (noisyMatching) {
+      used.add(noisyMatching.index)
+      return applyExplicitPartsOrderFields(action, noisyMatching.order)
+    }
+
+    const replacement = candidates[0]
+    used.add(replacement.index)
+    return applyExplicitPartsOrderFields(action, replacement.order)
+  })
+
+  return { ...parsed, actions }
+}
+
+function parseBatchPartsOrders(inputText = '') {
+  return extractPartsOrderCandidates(inputText)
+    .filter(order => order.roNumber)
+    .map(order => {
+      const vendor = canonicalParsedVendorLabel(order.vendor)
+      return {
+        type: 'update_parts_order',
+        roNumber: order.roNumber,
+        vendor,
+        vendorFull: vendor,
+        description: 'Parts order',
+        qty: order.qty,
+        qtyReceived: 0,
+        eta: order.eta,
+        status: 'ordered',
+        confidence: 'high',
+      }
+    })
+}
+
+function mergeBatchPartsOrders(parsed, inputText = '') {
+  if (!parsed?.actions?.length) return parsed
+  const inferredOrders = parseBatchPartsOrders(inputText)
+  if (!inferredOrders.length) return parsed
+  const hasVendor = (order) => parsed.actions.some(action =>
+    action?.type === 'update_parts_order'
+    && String(action.roNumber ?? '') === String(order.roNumber ?? '')
+    && (vendorNamesMatch(action.vendor, order.vendor) || vendorNamesMatch(action.vendorFull, order.vendor))
+  )
+  const missingOrders = inferredOrders.filter(order => !hasVendor(order))
+  if (!missingOrders.length) return parsed
+  return { ...parsed, actions: [...parsed.actions, ...missingOrders] }
 }
 
 function applyPartsManagerParsePreference(parsed, sourceRole, inputText = '') {
@@ -1202,7 +2194,28 @@ function applyPartsManagerParsePreference(parsed, sourceRole, inputText = '') {
   }
 }
 
-export default function AIInputBox({ ros = [], employees = [], sourceRole = null }) {
+function prepareParsedResult(parsed, sourceRole, inputText = '') {
+  const parseContextText = [inputText, parsed?.translation].filter(Boolean).join('\n')
+  const withInferredStructuredActions = parsed?.actions
+    ? { ...parsed, actions: inferStructuredActionsFromText(parsed.actions, parseContextText) }
+    : parsed
+  const withExplicitPartOrderVendors = preserveExplicitPartsOrderVendors(withInferredStructuredActions, parseContextText)
+  return mergeBatchPartsOrders(
+    applyPartsManagerParsePreference(withExplicitPartOrderVendors, sourceRole, parseContextText),
+    parseContextText,
+  )
+}
+
+export default function AIInputBox({
+  ros = [],
+  employees = [],
+  sourceRole = null,
+  compact = false,
+  sharedDraftKey = null,
+  compactSubtitle = 'Parts ETA / received',
+  compactPlaceholder = 'Quick parts update, e.g. RO9584 Chevy dealer ETA 5/28',
+  fullPlaceholder = 'e.g. "RO9448 dropped off 4-25, w/o rental, ordered parts thru PT eta 4-29"',
+}) {
   const { user } = useAuth()
   const toast    = useToast()
 
@@ -1239,10 +2252,67 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
   const analyserRef       = useRef(null)
   const levelAnimRef      = useRef(null)
   const recordTimerRef    = useRef(null)
+  const instanceId        = useRef(`gib-${Math.random().toString(36).slice(2)}`)
+  const lastSharedPayload = useRef('')
+
+  useEffect(() => {
+    if (!sharedDraftKey) return
+    try {
+      const savedRaw = localStorage.getItem(sharedDraftKey) || '{}'
+      lastSharedPayload.current = savedRaw
+      const saved = JSON.parse(savedRaw)
+      if (typeof saved.text === 'string') setText(saved.text)
+      if (saved.result) setResult(saved.result)
+      if (Array.isArray(saved.actions)) setActions(saved.actions)
+    } catch { /* ignore bad shared draft */ }
+
+    const onDraftUpdate = (event) => {
+      if (event.detail?.key !== sharedDraftKey) return
+      if (event.detail?.source === instanceId.current) return
+      const next = event.detail?.payload || {}
+      const serialized = JSON.stringify(next)
+      if (serialized === lastSharedPayload.current) return
+      lastSharedPayload.current = serialized
+      if (typeof next.text === 'string') setText(next.text)
+      setResult(next.result || null)
+      setActions(Array.isArray(next.actions) ? next.actions : [])
+      setApplied(false)
+    }
+
+    window.addEventListener('gib-draft-update', onDraftUpdate)
+    return () => window.removeEventListener('gib-draft-update', onDraftUpdate)
+  }, [sharedDraftKey])
+
+  useEffect(() => {
+    if (!sharedDraftKey) return
+    const payload = { text, result, actions }
+    const serialized = JSON.stringify(payload)
+    if (serialized === lastSharedPayload.current) return
+    lastSharedPayload.current = serialized
+    try {
+      if (!text.trim() && !result && actions.length === 0) {
+        localStorage.removeItem(sharedDraftKey)
+      } else {
+        localStorage.setItem(sharedDraftKey, serialized)
+      }
+    } catch { /* ignore storage errors */ }
+    window.dispatchEvent(new CustomEvent('gib-draft-update', {
+      detail: { key: sharedDraftKey, source: instanceId.current, payload },
+    }))
+  }, [sharedDraftKey, text, result, actions])
 
   // Sync actions from result whenever result changes
   useEffect(() => {
-    if (result?.actions) setActions(normalizeBodyWorkflowActions(result.actions, submittedText.current || text, ros, employees))
+    if (result?.actions) {
+      const inputText = submittedText.current || text
+      const prepared = prepareParsedResult(result, sourceRole, inputText)
+      setActions(normalizePaintWorkflowActions(
+        normalizeBodyWorkflowActions(prepared.actions, inputText, ros, employees),
+        inputText,
+        ros,
+        employees,
+      ))
+    }
   }, [result, ros, employees, text])
 
   useEffect(() => {
@@ -1287,7 +2357,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
         if (!key) return
         const parsed = await parseShopInput({ text, ros, employees, images: [], sourceRole })
         if (!parsed.raw) {
-          setResult(applyPartsManagerParsePreference(parsed, sourceRole, text))
+          setResult(prepareParsedResult(parsed, sourceRole, text))
           submittedText.current = text
         }
       } catch { /* silent — user can re-submit manually */ }
@@ -1381,31 +2451,9 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
     }
   }
 
-  // ── Image handling ────────────────────────────────────────────────────────
-  // Compress to max 1920px JPEG 0.82 quality — dramatically reduces upload size/time
-  const compressImage = (file) => new Promise((resolve) => {
-    const img = new Image()
-    const objUrl = URL.createObjectURL(file)
-    img.onload = () => {
-      URL.revokeObjectURL(objUrl)
-      const MAX = 1280
-      let { width, height } = img
-      if (width > MAX || height > MAX) {
-        if (width > height) { height = Math.round(height * MAX / width); width = MAX }
-        else                { width = Math.round(width  * MAX / height); height = MAX }
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width; canvas.height = height
-      canvas.getContext('2d').drawImage(img, 0, 0, width, height)
-      canvas.toBlob(resolve, 'image/jpeg', 0.65)
-    }
-    img.onerror = () => { URL.revokeObjectURL(objUrl); resolve(file) } // fallback: use original
-    img.src = objUrl
-  })
-
   const readImageFile = (file) => {
     if (!file.type.startsWith('image/')) return
-    compressImage(file).then(blob => {
+    compressImageFile(file).then(blob => {
       const preview = URL.createObjectURL(blob)
       setImages(prev => [...prev, { blob, preview, name: file.name }])
     })
@@ -1525,7 +2573,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
       if (!key) { setNoKey(true); setLoading(false); return }
       const parsed = await parseShopInput({ text, ros, employees, images: [], sourceRole })
       if (parsed.raw) throw new Error('AI returned unexpected format. Please rephrase.')
-      setResult(applyPartsManagerParsePreference(parsed, sourceRole, text))
+      setResult(prepareParsedResult(parsed, sourceRole, text))
       rememberHistory(text)
       submittedText.current = text
     } catch (err) {
@@ -1542,6 +2590,9 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
     if (!actions.length && images.length === 0) return
     setApplying(true)
 
+    // Outer guard: any throw in action-bucketing (Step 1/2) happens BEFORE the
+    // inner try below, so without this the button would stay stuck on "Applying…".
+    try {
     const stamp  = format(new Date(), 'MM/dd HH:mm')
     const author = employees.find(e => e.uid === user.uid)?.name ?? user.email
     const now    = new Date().toISOString()
@@ -1551,10 +2602,17 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
     const roMap = new Map() // roId → { roDoc, fields, changeLogEntries }
     const standaloneTaskPromises = []
     const createdTaskRefs = []
-    const addTask = (data) => addDoc(collection(db, 'tasks'), data).then(ref => {
-      createdTaskRefs.push(ref)
-      return ref
-    })
+    const addTask = (data) => {
+      // Firestore rejects `undefined` field values — strip them defensively.
+      const clean = {}
+      for (const k of Object.keys(data)) {
+        if (data[k] !== undefined) clean[k] = data[k]
+      }
+      return addDoc(collection(db, 'tasks'), clean).then(ref => {
+        createdTaskRefs.push(ref)
+        return ref
+      })
+    }
 
     const getEntry = (roDoc) => {
       if (!roMap.has(roDoc.id)) {
@@ -1604,33 +2662,31 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
           break
         }
         case 'update_status': {
+          if (action.status === 'body_work' && !releaseHasBodyTech(roDoc, entry.fields, actions, employees)) {
+            setError(BODY_RELEASE_ERROR)
+            setApplying(false)
+            return
+          }
           entry.fields.status = action.status
           entry.changeLogEntries.push({ type: 'update_status', value: action.status, by: author, at: now, source: 'gib' })
-          // Mirror ROBoard: create downstream tasks when status advances
-          const downstreamTemplates = getDownstreamTasks(action.status, roDoc)
-          for (const tmpl of downstreamTemplates) {
-            let assignTo = tmpl.assignedToUid
-            if (!assignTo && tmpl.assignedToRole) {
-              const emp = employees.find(e => e.role === tmpl.assignedToRole)
-              assignTo = emp?.uid ?? null
-            }
-            if (assignTo) {
-              const assigneeName = employees.find(e => e.uid === assignTo)?.name ?? ''
-              entry.taskPromises.push(addTask({
-                roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
-                assignedTo: assignTo, assignedBy: user.uid, assignedByName: author, assignedToName: assigneeName,
-                assignedAt: serverTimestamp(),
-                title: tmpl.title, phase: tmpl.phase, autoTriggered: true,
-                source: 'auto',
-                priority: dueDateToPriority(roDoc),
-                dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
-                status: 'pending', createdAt: serverTimestamp(),
-              }))
-            }
-          }
+          impliedCompletedPhasesForStatus(action.status).forEach(phase => {
+            entry.taskPromises.push(completePhaseTasksPromise(roDoc.id, phase))
+          })
+          await addDownstreamTasksForEntry({ entry, status: action.status, roDoc, employees, user, author, addTask })
           break
         }
         case 'update_parts_status':
+          if (action.noReplacementPartsNeeded) {
+            entry.fields.partsStatus = 'all_received'
+            entry.fields.partsOrders = []
+            entry.fields.noReplacementPartsNeeded = true
+            entry.fields.partsSubtasks = {
+              ...(roDoc.partsSubtasks || {}),
+              verifiedAllReceived: true,
+            }
+            entry.changeLogEntries.push({ type: 'update_parts_status', value: 'all_received', label: 'No replacement parts needed', by: author, at: now, source: 'gib' })
+            break
+          }
           if (action.partsStatus && action.partsStatus !== 'not_ordered') {
             const orders = currentPartsOrders(roDoc, entry)
             if (!orders.length) {
@@ -1663,6 +2719,10 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
           const orders = currentPartsOrders(roDoc, entry)
           const qty = numericQty(action.qty ?? action.quantity, 0) || null
           let matched = false
+          const explicitQtyReceived = action.qtyReceived ?? action.receivedQty
+          const qtyReceived = explicitQtyReceived === 0 || explicitQtyReceived === '0'
+            ? 0
+            : numericQty(explicitQtyReceived, 0)
           const order = {
             id: newRecordId('parts_order'),
             vendor: (action.vendor || '').trim(),
@@ -1671,21 +2731,21 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
             qty,
             status: action.status || 'ordered',
             eta: action.eta || null,
-            qtyReceived: numericQty(action.qtyReceived ?? action.receivedQty, 0),
+            qtyReceived,
             orderedAt: now,
             orderedBy: user.uid,
             receivedAt: null,
             notes: action.notes || '',
           }
           const nextOrders = orders.map(existing => {
-            if (matched || !orderMatchesVendor(existing, action.vendor, action.vendorFull)) return existing
+            if (action.forceNewOrder || matched || !orderMatchesVendor(existing, action.vendor, action.vendorFull)) return existing
             matched = true
             const existingQty = numericQty(existing.qty ?? existing.quantity, 0)
             const nextQty = qty || existingQty || null
             const etaOnlyUpdate = Boolean(action.eta)
               && !qty
               && !(action.description || '').trim()
-              && !numericQty(action.qtyReceived ?? action.receivedQty, 0)
+              && !qtyReceived
             return {
               ...existing,
               vendor: existing.vendor || order.vendor,
@@ -1694,12 +2754,16 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
               qty: nextQty,
               status: etaOnlyUpdate ? (existing.status || 'ordered') : (action.status || existing.status || 'ordered'),
               eta: action.eta || existing.eta || null,
-              qtyReceived: numericQty(action.qtyReceived ?? action.receivedQty, numericQty(existing.qtyReceived ?? existing.receivedQty, 0)),
+              qtyReceived: explicitQtyReceived === undefined || explicitQtyReceived === null
+                ? numericQty(existing.qtyReceived ?? existing.receivedQty, 0)
+                : qtyReceived,
               notes: action.notes || existing.notes || '',
             }
           })
           if (!matched) nextOrders.push(order)
           entry.fields.partsOrders = nextOrders
+          entry.fields.noReplacementPartsNeeded = false
+          entry.fields['partsSubtasks.verifiedAllReceived'] = false
           entry.fields.partsStatus = calculatePartsStatus(nextOrders, roDoc.partsStatus)
           entry.changeLogEntries.push({ type: 'update_parts_order', value: order.vendor || 'Missing vendor', label: action.eta ? `ETA ${action.eta}` : order.description, by: author, at: now, source: 'gib' })
           break
@@ -1727,6 +2791,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
               qty,
               qtyReceived: nextReceived,
               status: qty && nextReceived >= qty ? 'received' : 'partial',
+              eta: action.eta || order.eta || null,
               receivedAt: qty && nextReceived >= qty ? now : order.receivedAt ?? null,
               notes: action.note || order.notes || '',
             }
@@ -1748,6 +2813,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
             })
           }
           entry.fields.partsOrders = nextOrders
+          entry.fields.noReplacementPartsNeeded = false
           entry.fields.partsStatus = calculatePartsStatus(nextOrders, roDoc.partsStatus)
           if (entry.fields.partsStatus === 'all_received') {
             entry.fields['partsSubtasks.verifiedAllReceived'] = true
@@ -1781,6 +2847,10 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
             notes: action.notes || '',
           }
           entry.fields.partsReturns = [...returns, ret]
+          if (ret.needsReplacement) {
+            entry.fields.noReplacementPartsNeeded = false
+            entry.fields['partsSubtasks.verifiedAllReceived'] = false
+          }
           prependRoNote(entry, roDoc, `[${stamp} - ${author}] Parts return logged: ${ret.vendor} ${ret.qty} pc${ret.qty === 1 ? '' : 's'}${ret.reason ? ` - ${ret.reason}` : ''}.`)
           entry.changeLogEntries.push({ type: 'log_parts_return', value: ret.vendor, label: ret.reason, by: author, at: now, source: 'gib' })
           break
@@ -1812,6 +2882,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
             const roActionText = sameRoActionText(actions, action.roNumber)
             const orders = currentPartsOrders(roDoc, entry)
             const isPartsEtaUpdate = /\b(parts?|vendor|dealer|dealership|eta)\b/i.test(roActionText)
+              && !looksLikeShopRepairEtaInput(roActionText)
               && orders.some(order => orderMentionedInText(order, roActionText))
             if (isPartsEtaUpdate) {
               let updated = false
@@ -1873,23 +2944,6 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
           if (assignee) {
             entry.fields.assignedPainter = assignee.uid
             entry.changeLogEntries.push({ type: 'assign_painter', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
-            const roDueDate = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
-            entry.taskPromises.push(addTask({
-              roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
-              assignedTo: assignee.uid, assignedBy: user.uid, assignedByName: author,
-              assignedToName: assignee.name ?? '',
-              title: 'Paint preparation & paint job',
-              description: '',
-              phase: 'paint_prep',
-              category: 'paint',
-              partsStatus: roDoc.partsStatus ?? '',
-              priority: dueDateToPriority(roDoc),
-              dueDate: roDueDate,
-              status: 'pending',
-              source: 'gib',
-              autoTriggered: false,
-              createdAt: serverTimestamp(),
-            }))
           }
           break
         }
@@ -1907,14 +2961,20 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
             setApplying(false)
             return
           }
+          if ((isBodyTask || isSecondaryBodyTask) && assignee.role !== 'body_man') {
+            setError(`Body tasks can only be assigned to employees with the Body Technician role. "${assignee.name}" is ${assignee.role || 'not a body technician'}.`)
+            setApplying(false)
+            return
+          }
           const roDueDate  = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
           const bodyCore = isBodyTask ? bodyTaskCore(action, roActionText) : null
           if (isBodyTask || isSecondaryBodyTask) entry.fields.assignedBodyMan = assignee.uid
+          const isPaintAssignee = assignee.role === 'painter' || assignee.role === 'paint_helper'
           const taskBase = {
             roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
             assignedTo: assignee.uid, assignedBy: user.uid, assignedByName: author,
             assignedToName: assignee.name ?? '',
-            category: (isBodyTask || isSecondaryBodyTask) ? 'body' : '',
+            category: (isBodyTask || isSecondaryBodyTask) ? 'body' : isPaintAssignee ? 'paint' : '',
             partsStatus: roDoc.partsStatus ?? '',
             priority: dueDateToPriority(roDoc),
             dueDate: roDueDate,
@@ -1922,6 +2982,41 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
             source: 'gib',
             autoTriggered: false,
             createdAt: serverTimestamp(),
+          }
+          if (isPaintAssignee && action.taskKind === 'primary') {
+            const tmpl = {
+              title: action.phase === 'paint_prep' ? 'Paint Prep' : 'Paint',
+              phase: action.phase === 'paint_prep' ? 'paint_prep' : 'paint',
+              category: 'paint',
+              taskKind: 'primary',
+            }
+            if (!(await hasOpenTaskForTemplate(roDoc.id, tmpl))) {
+              entry.taskPromises.push(addTask({
+                ...taskBase,
+                title: tmpl.title,
+                description: '',
+                phase: tmpl.phase,
+                category: 'paint',
+                taskKind: 'primary',
+                autoTriggered: true,
+              }))
+            }
+            break
+          }
+          if (isPaintAssignee && !isBodyTask && !isSecondaryBodyTask) {
+            const detail = taskTitleFromAction(action, '').trim()
+            const phase = action.phase === 'paint_prep' || action.phase === 'paint'
+              ? action.phase
+              : paintSecondaryPhase(action, roActionText)
+            entry.taskPromises.push(addTask({
+              ...taskBase,
+              title: detail || action.title || 'Paint reminder',
+              description: action.description || '',
+              phase,
+              taskKind: 'secondary',
+              parentPhase: phase,
+            }))
+            break
           }
           if (isSecondaryBodyTask) {
             const detail = taskTitleFromAction(action, '').trim()
@@ -1965,35 +3060,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
               ? `${noteLine}\n${entry.fields.notes}`
               : `${noteLine}\n${roDoc.notes ?? ''}`
             entry.changeLogEntries.push({ type: 'complete_phase', value: phase, label: `${phase} phase complete`, by: author, at: now, source: 'gib' })
-            const downstreamTemplates = getDownstreamTasks(suggestion.nextStatus, { ...roDoc, ...entry.fields })
-            for (const tmpl of downstreamTemplates) {
-              let assignTo = tmpl.assignedToUid
-              if (!assignTo && tmpl.assignedToRole) {
-                const emp = employees.find(e => e.role === tmpl.assignedToRole)
-                assignTo = emp?.uid ?? null
-              }
-              if (assignTo) {
-                const assigneeName = employees.find(e => e.uid === assignTo)?.name ?? ''
-                entry.taskPromises.push(addTask({
-                  roId: roDoc.id,
-                  roNumber: roDoc.roNumber,
-                  vehicleInfo: roDoc.vehicle,
-                  assignedTo: assignTo,
-                  assignedBy: user.uid,
-                  assignedByName: author,
-                  assignedToName: assigneeName,
-                  assignedAt: serverTimestamp(),
-                  title: tmpl.title,
-                  phase: tmpl.phase,
-                  autoTriggered: true,
-                  source: 'auto',
-                  priority: dueDateToPriority(roDoc),
-                  dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
-                  status: 'pending',
-                  createdAt: serverTimestamp(),
-                }))
-              }
-            }
+            await addDownstreamTasksForEntry({ entry, status: suggestion.nextStatus, roDoc, employees, user, author, addTask })
           }
           // Mark all tasks for this RO + phase as completed.
           // Primary query: tasks with the phase field (new tasks created after this fix).
@@ -2039,38 +3106,15 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
         && partsAreActionable(partsStatus)
         && ['teardown', 'waiting_parts'].includes(currentStatus)
       if (shouldReleaseRepair) {
+        if (!releaseHasBodyTech(roDoc, entry.fields, actions, employees)) {
+          setError(BODY_RELEASE_ERROR)
+          setApplying(false)
+          return
+        }
         entry.fields.status = 'body_work'
         prependRoNote(entry, roDoc, `[${stamp} - ${author}] Authorization and parts status confirmed. Repair task released to body technician.`)
         entry.changeLogEntries.push({ type: 'auto_release_repair', value: 'body_work', label: 'Repair task released', by: author, at: now, source: 'auto' })
-        const downstreamTemplates = getDownstreamTasks('body_work', { ...roDoc, ...entry.fields })
-        for (const tmpl of downstreamTemplates) {
-          let assignTo = tmpl.assignedToUid
-          if (!assignTo && tmpl.assignedToRole) {
-            const emp = employees.find(e => e.role === tmpl.assignedToRole)
-            assignTo = emp?.uid ?? null
-          }
-          if (assignTo) {
-            const assigneeName = employees.find(e => e.uid === assignTo)?.name ?? ''
-            entry.taskPromises.push(addTask({
-              roId: roDoc.id,
-              roNumber: roDoc.roNumber,
-              vehicleInfo: roDoc.vehicle,
-              assignedTo: assignTo,
-              assignedBy: user.uid,
-              assignedByName: author,
-              assignedToName: assigneeName,
-              assignedAt: serverTimestamp(),
-              title: tmpl.title,
-              phase: tmpl.phase,
-              autoTriggered: true,
-              source: 'auto',
-              priority: dueDateToPriority(roDoc),
-              dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
-              status: 'pending',
-              createdAt: serverTimestamp(),
-            }))
-          }
-        }
+        await addDownstreamTasksForEntry({ entry, status: 'body_work', roDoc, employees, user, author, addTask })
       }
     }
 
@@ -2098,7 +3142,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
 
     // ── Step 3: await everything ───────────────────────────────────────────────
     try {
-      await Promise.all(firestorePromises)
+      await withApplyTimeout(Promise.all(firestorePromises))
 
       // ── Toasts ──────────────────────────────────────────────────────────────
       if (actions.length > 0) {
@@ -2124,6 +3168,12 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
       setError('Apply failed: ' + err.message)
     } finally {
       setApplying(false)   // ALWAYS unblock the button, even on error
+    }
+    } catch (err) {
+      // Catches throws from Step 1/2 (action bucketing) that escape the inner try.
+      console.error('[handleApply:outer]', err)
+      setError('Apply failed: ' + err.message)
+      setApplying(false)
     }
   }
 
@@ -2154,6 +3204,151 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
     } finally {
       setUndoing(false)
     }
+  }
+
+  if (compact) {
+    return (
+      <>
+        {showPhotoSheet && (
+          <PhotoSheet
+            onCamera={() => { setShowPhotoSheet(false); setTimeout(() => setShowCamera(true), 50) }}
+            onLibrary={() => { setShowPhotoSheet(false); setTimeout(() => fileInputRef.current?.click(), 50) }}
+            onClose={() => setShowPhotoSheet(false)}
+          />
+        )}
+        {showCamera && (
+          <CameraModal
+            onDone={(shots) => { setImages(prev => [...prev, ...shots]); setShowCamera(false) }}
+            onClose={() => setShowCamera(false)}
+          />
+        )}
+        <div className="rounded-xl border border-blue-200 bg-white/95 p-2.5 shadow-xl shadow-black/10 backdrop-blur dark:border-blue-800 dark:bg-zinc-900/95">
+          <form onSubmit={handleSubmit} className="flex items-center gap-2">
+            <div className="hidden w-[112px] shrink-0 md:block">
+              <p className="text-xs font-bold uppercase leading-tight tracking-wide text-gray-700 dark:text-zinc-200">Quick Update</p>
+              <p className="truncate text-[11px] leading-tight text-gray-400 dark:text-zinc-500">{compactSubtitle}</p>
+            </div>
+            <MentionTextarea
+              value={text}
+              onChange={e => setText(e.target.value)}
+              candidates={mentionCandidates}
+              dropdownPlacement="inside"
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
+                  e.preventDefault()
+                  if (canSubmit) handleSubmit(e)
+                }
+              }}
+              placeholder={compactPlaceholder}
+              rows={1}
+              className="h-[44px] min-h-[44px] w-full resize-none overflow-hidden rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm leading-7 text-gray-900 placeholder-gray-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-gray-100 dark:placeholder-zinc-600"
+              disabled={loading || applying}
+            />
+            <button
+              type="button"
+              onClick={toggleVoice}
+              disabled={isTranscribing}
+              title="Voice"
+              className={`flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-lg border transition-colors ${
+                listening
+                  ? 'border-red-500 bg-red-500 text-white'
+                  : isTranscribing
+                  ? 'border-purple-300 bg-purple-100 text-purple-600 dark:border-purple-700 dark:bg-purple-950/40'
+                  : 'border-gray-300 bg-white text-gray-500 hover:border-blue-400 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400'
+              }`}
+            >
+              {isTranscribing
+                ? <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
+                : <IconMic active={listening} />
+              }
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              title="Photos"
+              className="relative flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-lg border border-gray-300 bg-white text-gray-500 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+            >
+              <IconImage />
+              {images.length > 0 && (
+                <span className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-blue-600 text-[10px] font-bold text-white">
+                  {images.length}
+                </span>
+              )}
+            </button>
+            <button
+              type="submit"
+              disabled={!canSubmit}
+              className="h-[42px] shrink-0 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
+            >
+              {loading ? 'Parsing...' : applying ? 'Applying...' : images.length > 0 ? 'Upload' : 'Submit'}
+            </button>
+            <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileChange} />
+            <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileChange} />
+          </form>
+
+          {images.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {images.map((img, i) => (
+                <div key={i} className="relative h-12 w-12 overflow-hidden rounded-lg border border-blue-200 dark:border-blue-900">
+                  <img src={img.preview} alt={img.name} className="h-full w-full object-cover" />
+                  <button type="button" onClick={() => removeImage(i)} className="absolute inset-0 flex items-center justify-center bg-black/60 text-white opacity-0 transition-opacity hover:opacity-100">
+                    <IconX2 />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+          {visibleClarification && (
+            <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+              ? {result.needsClarification}
+            </div>
+          )}
+          {actions.length > 0 && !applied && (
+            <div className="mt-2 space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-zinc-400">
+                {actions.length} action{actions.length > 1 ? 's' : ''} to confirm
+              </p>
+              <div className="max-h-[42vh] overflow-y-auto pr-1">
+                {reviewGroups.map(group => (
+                  <ActionReviewGroup
+                    key={group.key}
+                    group={group}
+                    employees={employees}
+                    ros={ros}
+                    onChangeAt={(idx, updated) => setActions(prev => prev.map((a, i) => i === idx ? updated : a))}
+                    onDeleteAt={(idx) => setActions(prev => prev.filter((_, i) => i !== idx))}
+                  />
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleApply}
+                  disabled={applying || actions.length === 0}
+                  className="rounded-lg bg-green-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-50"
+                >
+                  {applying ? 'Applying...' : `Apply ${actions.length}`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setResult(null); setActions([]); setImages([]) }}
+                  className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {applied && (
+            <div className="mt-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+              All updates applied successfully.
+            </div>
+          )}
+        </div>
+      </>
+    )
   }
 
   return (
@@ -2262,7 +3457,7 @@ export default function AIInputBox({ ros = [], employees = [], sourceRole = null
           }}
           placeholder={images.length > 0
             ? 'RO number + photo type, e.g. "9556 check-in" or "9556 in progress photos"'
-            : 'e.g. "RO9448 dropped off 4-25, w/o rental, ordered parts thru PT eta 4-29"'}
+            : fullPlaceholder}
           rows={4}
           className="w-full min-h-[118px] px-4 py-3 mb-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-base sm:text-sm leading-relaxed bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800 resize-none transition-colors"
           disabled={loading || applying}

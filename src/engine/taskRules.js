@@ -11,7 +11,9 @@ const PHASE_NEXT_STATUS = {
     ? { nextStatus: 'body_work',      noteText: 'Teardown complete. Parts already received. Ready for body work.' }
     : { nextStatus: 'waiting_parts',  noteText: 'Teardown complete. Waiting on parts — estimator to order.' },
   waiting_parts: (ro) => ({ nextStatus: 'body_work', noteText: 'Parts received. Ready for body work.' }),
-  body:       (ro) => ({ nextStatus: 'body_complete',  noteText: 'Body work complete.' }),
+  body:       (ro) => ro.needsPaint === false
+    ? { nextStatus: 'reassembly',    noteText: 'Body work complete. No paint required. Ready for reassembly.' }
+    : { nextStatus: 'body_complete', noteText: 'Body work complete.' },
   paint_prep: (ro) => ({ nextStatus: 'in_paint',       noteText: 'Paint prep complete. Vehicle in paint.' }),
   paint:      (ro) => ({ nextStatus: 'paint_complete', noteText: 'Paint complete.' }),
   reassembly: (ro) => ro.needsSublet === false
@@ -48,6 +50,31 @@ export function getSuggestedNextStatus(completedPhase, roData) {
   return fn(roData)
 }
 
+function paintPrimaryTasks(roData, options = {}) {
+  return [
+    {
+      title:          'Paint Prep',
+      phase:          'paint_prep',
+      category:       'paint',
+      taskKind:       'primary',
+      assignedToUid:  roData.assignedPaintHelper || null,
+      assignedToRole: roData.assignedPaintHelper ? null : 'paint_helper',
+      setRoField:     'assignedPaintHelper',
+      statusBackfill: options.statusBackfill || false,
+    },
+    {
+      title:          'Paint',
+      phase:          'paint',
+      category:       'paint',
+      taskKind:       'primary',
+      assignedToUid:  roData.assignedPainter || null,
+      assignedToRole: roData.assignedPainter ? null : 'painter',
+      noAssigneeNote: roData.assignedPainter ? null : 'No painter assigned. Please assign a painter.',
+      statusBackfill: options.statusBackfill || false,
+    },
+  ]
+}
+
 // Downstream task templates keyed by the status the RO just moved INTO
 const DOWNSTREAM_TASK_RULES = {
   teardown: (roData) => [{
@@ -57,15 +84,30 @@ const DOWNSTREAM_TASK_RULES = {
     assignedToRole: roData.assignedBodyMan ? null : 'body_man',
   }],
 
-  body_complete: (roData) => [{
-    title:         'Paint prep & paint job',
-    phase:         'paint_prep',
-    assignedToUid: roData.assignedPainter || null,
-    assignedToRole: roData.assignedPainter ? null : 'production_manager',
-    noAssigneeNote: roData.assignedPainter ? null : 'No painter assigned. Please assign a painter.',
-  }],
+  body_complete: (roData) => {
+    if (roData.needsPaint === false) return []
+    return paintPrimaryTasks(roData)
+  },
+
+  paint_prep: (roData) => {
+    if (roData.needsPaint === false) return []
+    return paintPrimaryTasks(roData, { statusBackfill: true })
+  },
+
+  in_paint: (roData) => {
+    if (roData.needsPaint === false) return []
+    return paintPrimaryTasks(roData, { statusBackfill: true })
+  },
 
   paint_complete: (roData) => [{
+    title:         'Reassembly',
+    phase:         'reassembly',
+    assignedToUid: roData.assignedBodyMan || null,
+    assignedToRole: roData.assignedBodyMan ? null : 'body_man',
+  }],
+
+  // Covers the !needsPaint shortcut path: body work complete → straight to reassembly
+  reassembly: (roData) => [{
     title:         'Reassembly',
     phase:         'reassembly',
     assignedToUid: roData.assignedBodyMan || null,
@@ -79,14 +121,6 @@ const DOWNSTREAM_TASK_RULES = {
     assignedToRole: 'production_manager',
   }],
 
-  // Estimator is responsible for ordering parts once teardown reveals what's needed
-  waiting_parts: (roData) => [{
-    title:         'Order parts',
-    phase:         'waiting_parts',
-    assignedToUid: roData.assignedEstimator || null,
-    assignedToRole: roData.assignedEstimator ? null : 'estimator',
-  }],
-
   body_work: (roData) => [{
     title:         'Repair',
     phase:         'body',
@@ -94,12 +128,20 @@ const DOWNSTREAM_TASK_RULES = {
     assignedToRole: roData.assignedBodyMan ? null : 'body_man',
   }],
 
-  detail: (roData) => [{
-    title:         'QC / Final detail',
-    phase:         'detail',
-    assignedToUid: roData.assignedBodyMan || null,
-    assignedToRole: roData.assignedBodyMan ? null : 'body_man',
-  }],
+  detail: (roData) => [
+    {
+      title:          'QC inspection',
+      phase:          'detail',
+      assignedToUid:  null,
+      assignedToRole: 'production_manager',
+    },
+    {
+      title:          'Final delivery prep',
+      phase:          'detail',
+      assignedToUid:  roData.assignedEstimator || null,
+      assignedToRole: roData.assignedEstimator ? null : 'estimator',
+    },
+  ],
 }
 
 /**

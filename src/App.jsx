@@ -9,6 +9,7 @@ import RODetail      from './pages/RODetail'
 import AddEditRO     from './pages/AddEditRO'
 import TaskBoard     from './pages/TaskBoard'
 import MobileWorkerTaskView from './pages/MobileWorkerTaskView'
+import MobilePainterTaskView from './pages/MobilePainterTaskView'
 import PartsManagerView from './pages/PartsManagerView'
 import Admin         from './pages/Admin'
 import MeetingImport from './pages/MeetingImport'
@@ -17,7 +18,7 @@ import Chat          from './pages/Chat'
 import UpdatePage    from './pages/UpdatePage'
 import MobileScreen  from './pages/MobileScreen'
 import { ToastProvider } from './components/Toast'
-import { MANAGER_ROLES, ROLES, WORKER_ROLES } from './constants/roles'
+import { MANAGER_ROLES, PARTS_PAGE_ROLES, ROLES, WORKER_ROLES } from './constants/roles'
 
 function AppRoutes() {
   const { user, role } = useAuth()
@@ -47,16 +48,16 @@ function AppRoutes() {
       <Route path="/tasks" element={
         <ProtectedRoute>
           <Layout>
-            {role === 'parts_manager'
-              ? <PartsManagerView />
-              : WORKER_ROLES.includes(role)
+            {role === ROLES.BODY_MAN
               ? <MobileWorkerTaskView />
+              : (role === ROLES.PAINTER || role === ROLES.PAINT_HELPER)
+              ? <MobilePainterTaskView />
               : <TaskBoard />}
           </Layout>
         </ProtectedRoute>
       } />
       <Route path="/parts" element={
-        <ProtectedRoute allowedRoles={[...MANAGER_ROLES, ROLES.PARTS_MANAGER]}>
+        <ProtectedRoute allowedRoles={PARTS_PAGE_ROLES}>
           <Layout><PartsManagerView /></Layout>
         </ProtectedRoute>
       } />

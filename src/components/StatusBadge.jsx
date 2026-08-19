@@ -42,12 +42,12 @@ export function StatusBadge({ status }) {
 }
 
 // ── Parts Status Badge ────────────────────────────────────────────────────────
-export function PartsStatusBadge({ status }) {
+export function PartsStatusBadge({ status, label }) {
   const s = PARTS_STATUSES.find(p => p.key === status)
   if (!s) return <span className="text-xs text-gray-400 dark:text-zinc-600">—</span>
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${s.color}`}>
-      {s.label}
+      {label || s.label}
     </span>
   )
 }

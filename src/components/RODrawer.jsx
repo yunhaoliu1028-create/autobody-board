@@ -2,7 +2,7 @@
 // Right-side slide-in panel showing Notes + Tasks for a selected RO.
 // Triggered by clicking a kanban card or list row.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import {
   doc, updateDoc, deleteDoc, addDoc, collection, onSnapshot,
@@ -10,9 +10,13 @@ import {
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
+import { useToast } from './Toast'
 import { StatusBadge, PartsStatusBadge } from './StatusBadge'
-import { MANAGER_ROLES, PARTS_STATUSES } from '../constants/roles'
-import DailyNotesLog from './DailyNotesLog'
+import AttachmentGallery from './AttachmentGallery'
+import { EDIT_RO_ROLES, MANAGER_ROLES, PARTS_STATUSES } from '../constants/roles'
+import DailyNotesLog, { parseNoteLines } from './DailyNotesLog'
+import { buildUndoNoteUpdate } from '../utils/noteUndo'
+import { summarizeDayNotes, getApiKey } from '../hooks/useAI'
 import { format } from 'date-fns'
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -28,12 +32,28 @@ const TASK_STATUS  = {
   completed:   'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300',
 }
 
+function AttachedPhotosPanel({ attachments = [], roNumber }) {
+  const photos = attachments.filter(att => att?.url)
+
+  if (!photos.length) {
+    return (
+      <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center dark:border-zinc-800">
+        <p className="text-sm font-medium text-gray-500 dark:text-zinc-400">No attached photos yet.</p>
+      </div>
+    )
+  }
+
+  return <AttachmentGallery attachments={photos} roNumber={roNumber} columns="grid-cols-2" />
+}
+
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 export default function RODrawer({ ro, employees, onClose }) {
   const { role, user } = useAuth()
+  const toast = useToast()
   const isManager = MANAGER_ROLES.includes(role)
   const isShopManager = role === 'shop_manager'
+  const canUndoNotes = EDIT_RO_ROLES.includes(role) || role === 'parts_manager'
 
   const [tab,          setTab]          = useState('notes')
   const [tasks,        setTasks]        = useState([])
@@ -45,6 +65,9 @@ export default function RODrawer({ ro, employees, onClose }) {
   const [taskPriority, setTaskPriority] = useState('medium')
   const [savingTask,   setSavingTask]   = useState(false)
   const [maintenanceBusy, setMaintenanceBusy] = useState('')
+  const [showMaintenance, setShowMaintenance] = useState(false)
+  const [refreshingNotes, setRefreshingNotes] = useState(false)
+  const autoSummaryRuns = useRef(new Set())
 
   // Load tasks for this RO
   useEffect(() => {
@@ -177,11 +200,94 @@ export default function RODrawer({ ro, employees, onClose }) {
     }
   }
 
+  const undoNoteLine = async (line) => {
+    if (!canUndoNotes) return
+    const ok = window.confirm(`Undo this RO note?\n\nThe note will be removed. If a matching status change can be safely identified, it will be rolled back too.`)
+    if (!ok) return
+    setMaintenanceBusy('undo')
+    try {
+      const { updates } = buildUndoNoteUpdate(ro, line)
+      await updateDoc(doc(db, 'ros', ro.id), updates)
+    } finally {
+      setMaintenanceBusy('')
+    }
+  }
+
+  const refreshNoteSummaries = async ({ overwriteExisting = true, showAlert = true } = {}) => {
+    if (!ro?.id || refreshingNotes) return
+    const todayMmdd = format(new Date(), 'MM/dd')
+    const todayYear = new Date().getFullYear()
+    const existing = Array.isArray(ro.noteSummaries) ? ro.noteSummaries : []
+    const existingDates = new Set(existing.map(s => s.date))
+    const groups = new Map()
+
+    for (const line of parseNoteLines(ro.notes ?? '')) {
+      const m = line.match(/^\[(\d{2}\/\d{2})/)
+      if (!m || m[1] === todayMmdd) continue
+      const [mm, dd] = m[1].split('/')
+      const candidate = new Date(todayYear, parseInt(mm, 10) - 1, parseInt(dd, 10))
+      const year = candidate > new Date(Date.now() + 86400000) ? todayYear - 1 : todayYear
+      const isoDate = `${year}-${mm}-${dd}`
+      if (!overwriteExisting && existingDates.has(isoDate)) continue
+      if (!groups.has(m[1])) groups.set(m[1], { isoDate, lines: [] })
+      groups.get(m[1]).lines.push(line)
+    }
+
+    if (!groups.size) return
+
+    try {
+      setRefreshingNotes(true)
+      const apiKey = await getApiKey().catch(() => null)
+      if (!apiKey) {
+        if (showAlert) window.alert('AI summary refresh is not configured on this device.')
+        return
+      }
+
+      const nextSummaries = overwriteExisting ? [] : [...existing]
+      for (const [mmdd, { isoDate, lines }] of groups.entries()) {
+        const result = await summarizeDayNotes({
+          vehicle: ro.vehicle ?? `RO${ro.roNumber}`,
+          dateLabel: mmdd,
+          noteLines: lines,
+        })
+        nextSummaries.push({
+          date: isoDate,
+          bullets: result.bullets,
+          generatedAt: new Date().toISOString(),
+        })
+      }
+
+      await updateDoc(doc(db, 'ros', ro.id), {
+        noteSummaries: nextSummaries,
+        updatedAt: serverTimestamp(),
+      })
+      toast.success('Note summaries updated')
+    } catch (err) {
+      if (err.message === 'NO_API_KEY') {
+        toast.error('AI key not configured — go to Settings to add your Anthropic key')
+      } else {
+        toast.error('Summary failed: ' + err.message)
+      }
+    } finally {
+      setRefreshingNotes(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!ro?.id || tab !== 'notes') return
+    const todayMmdd = format(new Date(), 'MM/dd')
+    const runKey = `${ro.id}:${todayMmdd}`
+    if (autoSummaryRuns.current.has(runKey)) return
+    autoSummaryRuns.current.add(runKey)
+    refreshNoteSummaries({ overwriteExisting: false, showAlert: false })
+  }, [ro?.id, tab]) // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!ro) return null
 
   const noteCount = (ro.notes ?? '').split('\n').filter(l => /^\[[^\]]+\]/.test(l)).length
   const openTasks = tasks.filter(t => t.status !== 'completed').length
   const empOptions   = Object.entries(employees)
+  const attachedPhotos = Array.isArray(ro.attachments) ? ro.attachments.filter(att => att?.url) : []
 
   return (
     <>
@@ -242,7 +348,7 @@ export default function RODrawer({ ro, employees, onClose }) {
         <div className="flex border-b border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900">
           {[
             { key: 'notes', label: 'Notes',  badge: noteCount },
-            { key: 'tasks', label: 'Tasks',  badge: openTasks },
+            { key: 'photos', label: 'Attached Photos',  badge: attachedPhotos.length },
           ].map(t => (
             <button
               key={t.key}
@@ -282,15 +388,38 @@ export default function RODrawer({ ro, employees, onClose }) {
                 >
                   Add
                 </button>
+                {isShopManager && (
+                  <button
+                    type="button"
+                    onClick={() => setShowMaintenance(v => !v)}
+                    title={showMaintenance ? 'Hide manager tools' : 'Show manager tools'}
+                    aria-label={showMaintenance ? 'Hide manager tools' : 'Show manager tools'}
+                    className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors ${
+                      showMaintenance
+                        ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300'
+                        : 'border-gray-300 bg-white text-gray-400 hover:border-amber-300 hover:text-amber-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-500 dark:hover:border-amber-800 dark:hover:text-amber-300'
+                    }`}
+                  >
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M10.3 4.3l.6-1.3h2.2l.6 1.3 1.5.6 1.3-.5 1.6 1.6-.5 1.3.6 1.5 1.3.6v2.2l-1.3.6-.6 1.5.5 1.3-1.6 1.6-1.3-.5-1.5.6-.6 1.3h-2.2l-.6-1.3-1.5-.6-1.3.5-1.6-1.6.5-1.3-.6-1.5-1.3-.6V9.4l1.3-.6.6-1.5-.5-1.3 1.6-1.6 1.3.5 1.5-.6z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9a3 3 0 100 6 3 3 0 000-6z" />
+                    </svg>
+                  </button>
+                )}
               </form>
 
               <DailyNotesLog
                 noteString={ro.notes ?? ''}
                 noteSummaries={ro.noteSummaries}
                 summarizingDates={null}
+                canUndo={canUndoNotes && !maintenanceBusy}
+                onUndoLine={undoNoteLine}
+                canRefresh={!maintenanceBusy}
+                onRefresh={() => refreshNoteSummaries({ overwriteExisting: true, showAlert: true })}
+                refreshBusy={refreshingNotes}
               />
 
-              {isShopManager && (
+              {isShopManager && showMaintenance && (
                 <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 dark:border-amber-900/60 dark:bg-amber-950/20">
                   <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
                     Manager maintenance
@@ -319,6 +448,11 @@ export default function RODrawer({ ro, employees, onClose }) {
                 </div>
               )}
             </>
+          )}
+
+          {/* Attached photos tab */}
+          {tab === 'photos' && (
+            <AttachedPhotosPanel attachments={attachedPhotos} roNumber={ro.roNumber} />
           )}
 
           {/* Tasks tab */}
