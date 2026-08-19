@@ -6,6 +6,7 @@ import {
   removeCrossRoPartsOrderLeakage,
   vendorsMatchIgnoringParsingMetadata,
 } from './partsOrderParsing.js'
+import { actionDateValidationError } from './dateParsing.js'
 
 const options = {
   defaultYear: 2026,
@@ -146,9 +147,93 @@ test('does not mistake a legitimate vendor containing Complete for receipt langu
 
 test('rejects impossible calendar dates', () => {
   const text = 'RO9448 ordered 1 part from Keystone ETA 2/30'
-  assert.deepEqual(extractPartsOrderCandidates(text, options), [
-    { roNumber: '9448', vendor: 'Keystone', qty: 1, eta: null },
+  const candidates = extractPartsOrderCandidates(text, options)
+  assert.deepEqual(candidates, [
+    { roNumber: '9448', vendor: 'Keystone', qty: 1, eta: null, invalidDate: '2/30' },
   ])
+  assert.equal(
+    actionDateValidationError({ type: 'update_parts_order', ...candidates[0] }),
+    'Invalid date "2/30"',
+  )
+})
+
+test('keeps an invalid vendor ETA from contaminating another vendor in the same RO scope', () => {
+  const text = 'RO9448 parts ordered: 1 from Keystone ETA 2/30, 1 from Amazon ETA 3/2'
+  assert.deepEqual(extractPartsOrderCandidates(text, options), [
+    { roNumber: '9448', vendor: 'Keystone', qty: 1, eta: null, invalidDate: '2/30' },
+    { roNumber: '9448', vendor: 'Amazon', qty: 1, eta: '2026-03-02' },
+  ])
+})
+
+test('does not share a valid vendor ETA without explicit all ETA wording', () => {
+  const text = 'RO9448 parts ordered: 1 from Keystone ETA 3/2, 1 from Amazon'
+  assert.deepEqual(extractPartsOrderCandidates(text, options), [
+    { roNumber: '9448', vendor: 'Keystone', qty: 1, eta: '2026-03-02' },
+    { roNumber: '9448', vendor: 'Amazon', qty: 1, eta: null },
+  ])
+})
+
+test('shares an invalid ETA only when the input explicitly says all ETA', () => {
+  const text = 'RO9448 parts ordered: 1 from Keystone, 1 from Amazon all ETA 2/30'
+  assert.deepEqual(extractPartsOrderCandidates(text, options), [
+    { roNumber: '9448', vendor: 'Keystone', qty: 1, eta: null, invalidDate: '2/30' },
+    { roNumber: '9448', vendor: 'Amazon', qty: 1, eta: null, invalidDate: '2/30' },
+  ])
+})
+
+test('keeps an invalid source marker when a duplicate translation supplies a rolled valid ETA', () => {
+  const text = 'RO9448 ordered 1 part from Keystone ETA 2/30, ordered 1 part from Keystone ETA 3/2'
+  const [candidate] = extractPartsOrderCandidates(text, options)
+  assert.deepEqual(candidate, {
+    roNumber: '9448',
+    vendor: 'Keystone',
+    qty: 1,
+    eta: '2026-03-02',
+    invalidDate: '2/30',
+  })
+  assert.equal(
+    actionDateValidationError({ type: 'update_parts_order', ...candidate }),
+    'Invalid date "2/30"',
+  )
+})
+
+test('preserves invalid ETA evidence for Chinese parts-order fallbacks', () => {
+  for (const text of [
+    'RO9448 从 Keystone 订了一个部件，ETA 2/30',
+    'RO9448 从 Keystone 订部件 ETA 2/30',
+    'RO9448 从 Keystone 下单 ETA 2/30',
+  ]) {
+    const [candidate] = extractPartsOrderCandidates(text, options)
+    assert.deepEqual(candidate, {
+      roNumber: '9448',
+      vendor: 'Keystone',
+      qty: null,
+      eta: null,
+      invalidDate: '2/30',
+    })
+    assert.equal(
+      actionDateValidationError({ type: 'update_parts_order', ...candidate }),
+      'Invalid date "2/30"',
+    )
+  }
+})
+
+test('keeps Chinese vendor dates local when multiple orders share one RO clause', () => {
+  for (const text of [
+    'RO9448 从 Keystone 订了一个部件，ETA 2/30，跟 Amazon 订了一个部件，ETA 3/2',
+    'RO9448 从 Keystone 订了一个部件，然后跟 Amazon 订了一个部件，ETA 3/2',
+    'RO9448 从 Keystone 订了一个部件 跟 Amazon 订了一个部件 ETA 3/2',
+  ]) {
+    const candidates = extractPartsOrderCandidates(text, options)
+    const keystone = candidates.find(candidate => candidate.vendor === 'Keystone')
+    const amazon = candidates.find(candidate => candidate.vendor === 'Amazon')
+    if (text.includes('ETA 2/30')) {
+      assert.deepEqual(keystone, { roNumber: '9448', vendor: 'Keystone', qty: null, eta: null, invalidDate: '2/30' })
+    } else {
+      assert.deepEqual(keystone, { roNumber: '9448', vendor: 'Keystone', qty: null, eta: null })
+    }
+    assert.deepEqual(amazon, { roNumber: '9448', vendor: 'Amazon', qty: null, eta: '2026-03-02' })
+  }
 })
 
 test('matches only parser-added vendor suffixes for defensive reconciliation', () => {

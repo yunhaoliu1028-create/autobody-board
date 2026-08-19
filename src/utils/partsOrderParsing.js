@@ -1,4 +1,5 @@
 import { buildRoInputScopes } from './gibInputScope.js'
+import { findDateToken } from './dateParsing.js'
 
 const NUMBER_WORDS = {
   one: 1,
@@ -11,21 +12,6 @@ const NUMBER_WORDS = {
   eight: 8,
   nine: 9,
   ten: 10,
-}
-
-const MONTHS = {
-  january: 1,
-  february: 2,
-  march: 3,
-  april: 4,
-  may: 5,
-  june: 6,
-  july: 7,
-  august: 8,
-  september: 9,
-  october: 10,
-  november: 11,
-  december: 12,
 }
 
 const ORDER_CONTEXT_RE = /\b(?:order|ordered|ordering)\b|订|訂|下单|下單/iu
@@ -100,31 +86,6 @@ function parseQty(value) {
   return NUMBER_WORDS[String(value || '').toLowerCase()] ?? null
 }
 
-function formatDate(year, month, day) {
-  const y = Number(year)
-  const m = Number(month)
-  const d = Number(day)
-  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return null
-  if (m < 1 || m > 12 || d < 1 || d > 31) return null
-  const fullYear = y < 100 ? 2000 + y : y
-  const candidate = new Date(Date.UTC(fullYear, m - 1, d))
-  if (candidate.getUTCFullYear() !== fullYear || candidate.getUTCMonth() !== m - 1 || candidate.getUTCDate() !== d) return null
-  return `${fullYear}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
-}
-
-function parseDateText(value = '', defaultYear = new Date().getFullYear()) {
-  const text = String(value)
-  const numeric = text.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/)
-  if (numeric) return formatDate(numeric[3] || defaultYear, numeric[1], numeric[2])
-
-  const named = text.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:,?\s+(\d{4}))?\b/i)
-  if (named) return formatDate(named[3] || defaultYear, MONTHS[named[1].toLowerCase()], named[2])
-
-  const chinese = text.match(/(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号號]?/u)
-  if (chinese) return formatDate(chinese[1] || defaultYear, chinese[2], chinese[3])
-  return null
-}
-
 function cleanVendor(value = '') {
   const cleaned = String(value)
     .replace(VENDOR_RECEIPT_FRAGMENT_RE, '')
@@ -145,10 +106,21 @@ function splitOrderScopes(text = '') {
     .filter(Boolean)
 }
 
-function nearbyEta(scope, matchEnd, defaultYear) {
+function nearbyEtaEvidence(scope, matchEnd, defaultYear) {
   const tail = scope.slice(matchEnd, matchEnd + 100)
   const etaContext = tail.match(/^[\s,]*(?:today\s*)?(?:all\s+)?(?:eta|due|arriv(?:e|es|ing|al)?)(.{0,40})/i)
-  return etaContext ? parseDateText(etaContext[0], defaultYear) : null
+  if (!etaContext) return null
+  return findDateToken(etaContext[0], defaultYear)
+}
+
+function nearbyChineseOrderDateEvidence(scope, matchEnd, defaultYear) {
+  const tail = scope.slice(matchEnd, matchEnd + 100)
+  const nextVendorMatch = tail.match(/(?:从|跟)\s*[A-Za-z][A-Za-z0-9&+.' -]*?\s*(?:订|訂|定|下单|下單)/u)
+  const nextVendorBoundary = nextVendorMatch?.index ?? -1
+  const hardBoundary = tail.search(/[.;。；!?！？\n]/u)
+  const boundaries = [nextVendorBoundary, hardBoundary].filter(index => index >= 0)
+  const localClause = boundaries.length ? tail.slice(0, Math.min(...boundaries)) : tail
+  return findDateToken(localClause, defaultYear)
 }
 
 function receiptIntentIsNearest(scope, matchIndex) {
@@ -188,11 +160,14 @@ function mergeCandidateRecords(candidates = []) {
       continue
     }
     const existing = merged[existingIndex]
-    merged[existingIndex] = {
+    const mergedCandidate = {
       ...existing,
       qty: existing.qty || candidate.qty,
       eta: existing.eta || candidate.eta,
     }
+    const invalidDate = existing.invalidDate || candidate.invalidDate
+    if (invalidDate) mergedCandidate.invalidDate = invalidDate
+    merged[existingIndex] = mergedCandidate
   }
   return merged
 }
@@ -212,13 +187,14 @@ function extractPartsOrderCandidatesInScope(
   const candidates = []
   const seen = new Map()
 
-  const push = ({ vendor: rawVendor, qty = null, eta = null, roNumber = defaultRoNumber }) => {
+  const push = ({ vendor: rawVendor, qty = null, eta = null, invalidDate = null, roNumber = defaultRoNumber }) => {
     if (VENDOR_RECEIPT_FRAGMENT_RE.test(String(rawVendor || ''))) return
     const vendor = cleanVendor(rawVendor)
     const vendorKey = normalizeKey(vendor)
     if (!vendorKey) return
     const key = `${roNumber || '*'}:${vendorKey}`
     const next = { roNumber, vendor, qty: parseQty(qty), eta: eta || null }
+    if (invalidDate) next.invalidDate = invalidDate
     const existingIndex = seen.get(key)
     if (existingIndex === undefined) {
       seen.set(key, candidates.length)
@@ -226,45 +202,84 @@ function extractPartsOrderCandidatesInScope(
       return
     }
     const existing = candidates[existingIndex]
-    candidates[existingIndex] = {
+    const mergedCandidate = {
       ...existing,
       qty: existing.qty || next.qty,
       eta: existing.eta || next.eta,
     }
+    const mergedInvalidDate = existing.invalidDate || next.invalidDate
+    if (mergedInvalidDate) mergedCandidate.invalidDate = mergedInvalidDate
+    candidates[existingIndex] = mergedCandidate
   }
 
   for (const scope of splitOrderScopes(text)) {
     if (!ORDER_CONTEXT_RE.test(scope) || RESOLVED_RECEIPT_RE.test(scope) || RESOLVED_CHINESE_RECEIPT_RE.test(scope)) continue
 
     const roNumber = String(scopedRoNumber || candidateRoNumbersFromText(scope)[0] || defaultRoNumber)
-    const scopeEta = parseDateText(scope, defaultYear)
     const scopeCommonEtaMatch = scope.match(/\ball\s+eta\b(.{0,40})/i)
-    const scopeCommonEta = scopeCommonEtaMatch ? parseDateText(scopeCommonEtaMatch[0], defaultYear) : null
+    const scopeCommonEtaEvidence = scopeCommonEtaMatch
+      ? findDateToken(scopeCommonEtaMatch[0], defaultYear)
+      : null
+    const scopeCommonEta = scopeCommonEtaEvidence?.normalized || null
+    const scopeCommonInvalidDate = scopeCommonEtaEvidence && scopeCommonEtaEvidence.normalized === null
+      ? scopeCommonEtaEvidence.raw
+      : null
+
+    const dateFieldsForMatch = (match) => {
+      const nearbyEvidence = nearbyEtaEvidence(
+        scope,
+        (match.index || 0) + match[0].length,
+        defaultYear,
+      )
+      const invalidDate = nearbyEvidence && nearbyEvidence.normalized === null
+        ? nearbyEvidence.raw
+        : scopeCommonInvalidDate
+      return {
+        // A vendor-specific ETA belongs only to the vendor immediately before it.
+        // Share a date across vendors only when the user explicitly says "all ETA".
+        eta: nearbyEvidence?.normalized || scopeCommonEta,
+        invalidDate,
+      }
+    }
 
     const qtyFromVendorRe = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:pc|pcs|part|parts|piece|pieces)?\s+(?:from|via|thru|through)\s+(.+?)(?=\s*(?:,|$|\b(?:and|then)\s+(?:order|ordered|ordering)\b|\ball\s+eta\b|\beta\b|\bdue\b|\barriv(?:e|es|ing|al)?\b))/gi
     for (const match of scope.matchAll(qtyFromVendorRe)) {
       if (receiptIntentIsNearest(scope, match.index || 0)) continue
+      const dateFields = dateFieldsForMatch(match)
       push({
         roNumber,
         qty: match[1],
         vendor: match[2],
-        eta: nearbyEta(scope, (match.index || 0) + match[0].length, defaultYear) || scopeCommonEta || scopeEta,
+        ...dateFields,
       })
     }
 
     const describedOrderRe = /(?:^|[,/]|\band\b)\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+([a-z][a-z0-9 &+.'-]*?)\s+ordered\s+(?:from|via|thru|through)\s+(.+?)(?=\s*(?:,|$|\beta\b|\bdue\b|\barriv(?:e|es|ing|al)?\b))/gi
     for (const match of scope.matchAll(describedOrderRe)) {
-      push({ roNumber, qty: match[1], vendor: match[3], eta: nearbyEta(scope, (match.index || 0) + match[0].length, defaultYear) || scopeCommonEta || scopeEta })
+      push({ roNumber, qty: match[1], vendor: match[3], ...dateFieldsForMatch(match) })
     }
 
     const partsViaVendorRe = /\b(?:order|ordered|ordering)\s+parts?\s+(?:from|via|thru|through)\s+(.+?)(?=\s*(?:,|$|\beta\b|\bdue\b|\barriv(?:e|es|ing|al)?\b))/gi
     for (const match of scope.matchAll(partsViaVendorRe)) {
-      push({ roNumber, vendor: match[1], eta: nearbyEta(scope, (match.index || 0) + match[0].length, defaultYear) || scopeCommonEta || scopeEta })
+      push({ roNumber, vendor: match[1], ...dateFieldsForMatch(match) })
     }
 
     const chineseVendorRe = /(?:从|跟)\s*([A-Za-z][A-Za-z0-9&+.' -]*?)\s*(?:订|訂|定|下单|下單)/gu
     for (const match of scope.matchAll(chineseVendorRe)) {
-      push({ roNumber, vendor: match[1], eta: scopeEta })
+      const nearbyEvidence = nearbyChineseOrderDateEvidence(
+        scope,
+        (match.index || 0) + match[0].length,
+        defaultYear,
+      )
+      const invalidDate = nearbyEvidence && nearbyEvidence.normalized === null
+        ? nearbyEvidence.raw
+        : scopeCommonInvalidDate
+      push({
+        roNumber,
+        vendor: match[1],
+        eta: nearbyEvidence?.normalized || scopeCommonEta,
+        invalidDate,
+      })
     }
   }
 

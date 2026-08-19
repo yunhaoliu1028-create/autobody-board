@@ -13,6 +13,7 @@ import { compressImageFile, compressVideoFrame } from '../utils/imageCompression
 import { playShutterSound } from '../utils/cameraFeedback'
 import { inferStructuredActionsFromText } from '../utils/aiActionInference'
 import { buildRoInputScopes, getRoScopedText } from '../utils/gibInputScope'
+import { actionDateValidationError, findDateToken } from '../utils/dateParsing'
 import {
   extractPartsOrderCandidates,
   mergePreferredPartsOrderActions,
@@ -604,13 +605,11 @@ function parseReceivedAllExcept(inputText = '', scopedRoNumber = '') {
   const afterExcept = text.split(/\bexcept\b/i).pop()?.trim() || ''
 
   const parseEta = (match) => {
-    if (!match) return null
-    const year = match[3]
-      ? Number(match[3].length === 2 ? `20${match[3]}` : match[3])
-      : new Date().getFullYear()
-    const month = String(Number(match[1])).padStart(2, '0')
-    const day = String(Number(match[2])).padStart(2, '0')
-    return `${year}-${month}-${day}`
+    const token = match ? findDateToken(match[0]) : null
+    if (!token) return { eta: null }
+    return token.normalized
+      ? { eta: token.normalized }
+      : { eta: null, invalidDate: token.raw }
   }
 
   const exceptions = []
@@ -625,7 +624,7 @@ function parseReceivedAllExcept(inputText = '', scopedRoNumber = '') {
       .replace(/[.,;:!?]+\s*$/g, '')
       .trim()
     if (shortQty && rawVendor) {
-      exceptions.push({ shortQty, rawVendor, eta: parseEta(etaMatch) })
+      exceptions.push({ shortQty, rawVendor, ...parseEta(etaMatch) })
     }
   }
 
@@ -639,7 +638,7 @@ function parseReceivedAllExcept(inputText = '', scopedRoNumber = '') {
     .replace(/\b(?:is|are|still|pending|missing|short|backorder(?:ed)?|left|remaining)\b/gi, ' ')
     .replace(/[.,;:!?]+\s*$/g, '')
     .trim()
-    if (shortQty && rawVendor) exceptions.push({ shortQty, rawVendor, eta: parseEta(etaMatch) })
+    if (shortQty && rawVendor) exceptions.push({ shortQty, rawVendor, ...parseEta(etaMatch) })
   }
 
   if (!roNumber || !exceptions.length) return null
@@ -681,14 +680,18 @@ function normalizeReceivedAllExceptActions(rawActions = [], inputText = '', ros 
         receiveMode: 'set',
         currentQtyReceived: group.received,
         nextQtyReceived: nextReceived,
-        eta: exception?.eta || undefined,
-        confidence: 'high',
+        eta: exception?.invalidDate ? undefined : exception?.eta || undefined,
+        ...(exception?.invalidDate ? { invalidDate: exception.invalidDate } : {}),
+        confidence: exception?.invalidDate ? 'low' : 'high',
       }
     })
 
   const exceptionSummary = exceptions.map(exception => {
     const label = exception.group.vendor || exception.group.vendorFull || exception.rawVendor
-    return `${label} short ${exception.shortQty} pc${exception.shortQty === 1 ? '' : 's'}${exception.eta ? ` ETA ${fmtShortDate(exception.eta)}` : ''}`
+    const etaSummary = exception.invalidDate
+      ? ` invalid ETA ${exception.invalidDate}`
+      : exception.eta ? ` ETA ${fmtShortDate(exception.eta)}` : ''
+    return `${label} short ${exception.shortQty} pc${exception.shortQty === 1 ? '' : 's'}${etaSummary}`
   }).join('; ')
   generated.push({
     type: 'add_note',
@@ -804,7 +807,7 @@ function parseWaitingPartsOrders(inputText = '', scopedRoNumber = '') {
           roNumber,
           qty,
           rawVendor,
-          eta: parseShortDate(match[3] || ''),
+          ...parseShortDateEvidence(match[3] || ''),
         })
       }
       return matches
@@ -833,10 +836,11 @@ function normalizeWaitingPartsOrderActions(rawActions = [], inputText = '', ros 
       description: 'Parts order',
       qty: parsed.qty,
       qtyReceived: 0,
-      eta: parsed.eta || null,
+      eta: parsed.invalidDate ? null : parsed.eta || null,
+      ...(parsed.invalidDate ? { invalidDate: parsed.invalidDate } : {}),
       status: 'ordered',
       forceNewOrder: true,
-      confidence: 'high',
+      confidence: parsed.invalidDate ? 'low' : 'high',
     }
 
     let replaced = false
@@ -1583,7 +1587,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
             <textarea className={`w-full px-2 py-1.5 text-sm resize-y ${ACTION_FIELD}`} rows={2} placeholder="Description" value={draft.description ?? ''} onChange={e => set({ description: e.target.value })} />
             <div className="grid grid-cols-2 gap-2">
               <input type="number" min="1" className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`} placeholder="Qty" value={draft.qty ?? draft.quantity ?? ''} onChange={e => set({ qty: e.target.value })} />
-              <input type="date" className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`} value={draft.eta ?? ''} onChange={e => set({ eta: e.target.value })} />
+              <input type="date" className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`} value={draft.eta ?? ''} onChange={e => set({ eta: e.target.value, invalidDate: undefined })} />
             </div>
           </div>
         )}
@@ -1595,6 +1599,9 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
               <input type="number" min="0" className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`} placeholder="Received" value={draft.qtyReceived ?? draft.receivedQty ?? ''} onChange={e => set({ qtyReceived: e.target.value })} />
               <input type="number" min="1" className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`} placeholder="Total" value={draft.totalQty ?? ''} onChange={e => set({ totalQty: e.target.value })} />
             </div>
+            <label className="block text-xs text-gray-500 dark:text-zinc-400">ETA (optional)
+              <input type="date" className={`mt-1 w-full px-2 py-1.5 text-sm ${ACTION_FIELD}`} value={draft.eta ?? ''} onChange={e => set({ eta: e.target.value, invalidDate: undefined })} />
+            </label>
             <input className={`w-full px-2 py-1.5 text-sm ${ACTION_FIELD}`} placeholder="Note" value={draft.note ?? ''} onChange={e => set({ note: e.target.value })} />
           </div>
         )}
@@ -1622,7 +1629,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
             type="date"
             className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`}
             value={draft.dropOffDate ?? ''}
-            onChange={e => set({ dropOffDate: e.target.value })}
+            onChange={e => set({ dropOffDate: e.target.value, invalidDate: undefined })}
           />
         )}
 
@@ -1631,7 +1638,7 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
             type="date"
             className={`px-2 py-1.5 text-sm ${ACTION_FIELD}`}
             value={draft.dueDate ?? ''}
-            onChange={e => set({ dueDate: e.target.value })}
+            onChange={e => set({ dueDate: e.target.value, invalidDate: undefined })}
           />
         )}
 
@@ -1712,9 +1719,9 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
         </span>
       )
       case 'update_parts_order':
-        return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: {draft.description || 'Parts order'} ({draft.qty ?? draft.quantity ?? '?'} pc{Number(draft.qty ?? draft.quantity) === 1 ? '' : 's'}{draft.eta ? `, ETA ${draft.eta}` : ''})</span>
+        return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: {draft.description || 'Parts order'} ({draft.qty ?? draft.quantity ?? '?'} pc{Number(draft.qty ?? draft.quantity) === 1 ? '' : 's'}{draft.invalidDate ? `, invalid ETA "${draft.invalidDate}"` : draft.eta ? `, ETA ${draft.eta}` : ''})</span>
       case 'log_parts_received': {
-        const etaSuffix = draft.eta ? `, ETA ${fmtShortDate(draft.eta)}` : ''
+        const etaSuffix = draft.invalidDate ? `, invalid ETA "${draft.invalidDate}"` : draft.eta ? `, ETA ${fmtShortDate(draft.eta)}` : ''
         if (draft.receiveMode === 'increment' && numericQty(draft.currentQtyReceived, 0)) {
           return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: add {draft.qtyReceived ?? draft.receivedQty ?? '?'} received ({draft.currentQtyReceived}/{draft.totalQty ?? draft.qty ?? '?'} -&gt; {draft.nextQtyReceived}/{draft.totalQty ?? draft.qty ?? '?'}){etaSuffix}{draft.note ? ` - ${draft.note}` : ''}</span>
         }
@@ -1723,8 +1730,8 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
       case 'log_parts_return':
         return <span className="text-gray-700 dark:text-zinc-200"><strong>{draft.vendor}</strong>: return {draft.qty ?? draft.quantity ?? 1} pc{Number(draft.qty ?? draft.quantity) === 1 ? '' : 's'} - {draft.reason || draft.description || 'Return part'}</span>
       case 'update_car_status':   return <span className="text-gray-800 dark:text-zinc-100"><strong>{CAR_STATUS_MAP[draft.carStatus]?.label ?? draft.carStatus}</strong></span>
-      case 'update_dropoff_date': return <span className="text-gray-700 dark:text-zinc-200">Drop Off: <strong className="text-gray-900 dark:text-white">{draft.dropOffDate}</strong></span>
-      case 'update_due_date':     return <span className="text-gray-700 dark:text-zinc-200">ETA: <strong className="text-gray-900 dark:text-white">{draft.dueDate}</strong></span>
+      case 'update_dropoff_date': return <span className="text-gray-700 dark:text-zinc-200">Drop Off: <strong className="text-gray-900 dark:text-white">{draft.invalidDate ? `Invalid "${draft.invalidDate}"` : draft.dropOffDate}</strong></span>
+      case 'update_due_date':     return <span className="text-gray-700 dark:text-zinc-200">ETA: <strong className="text-gray-900 dark:text-white">{draft.invalidDate ? `Invalid "${draft.invalidDate}"` : draft.dueDate}</strong></span>
       case 'update_rental':       return <span className="text-gray-800 dark:text-zinc-100">{draft.hasRental ? 'Customer has rental' : 'No rental'}</span>
       case 'complete_phase': {
         const PHASE_LABELS = { checkin: 'Check-In', teardown: 'Teardown', body: 'Body Work', paint_prep: 'Paint Prep', paint: 'Paint', reassembly: 'Reassembly', sublet: 'Sublet / Calibration', detail: 'QC / Detail' }
@@ -1823,7 +1830,7 @@ function actionSummary(action) {
         ? 'No Repl Parts Needed'
         : `Parts status -> ${PARTS_STATUSES.find(p => p.key === action.partsStatus)?.label ?? action.partsStatus ?? 'Missing'}`
     case 'update_parts_order':
-      return `Order parts from ${action.vendor || 'Missing vendor'} (${action.qty ?? action.quantity ?? 'Missing qty'} pcs, ETA ${action.eta || 'Missing'})`
+      return `Order parts from ${action.vendor || 'Missing vendor'} (${action.qty ?? action.quantity ?? 'Missing qty'} pcs, ETA ${action.invalidDate ? `Invalid "${action.invalidDate}"` : action.eta || 'Missing'})`
     case 'log_parts_received':
       return `Received ${action.qtyReceived ?? action.receivedQty ?? 'Missing'} / ${action.totalQty ?? action.qty ?? 'Missing'} from ${action.vendor || 'Missing vendor'}`
     case 'log_parts_return':
@@ -1842,9 +1849,9 @@ function actionSummary(action) {
     case 'update_car_status':
       return `Car status -> ${CAR_STATUS_MAP[action.carStatus]?.label ?? action.carStatus ?? 'Missing'}`
     case 'update_dropoff_date':
-      return `Drop-off date -> ${action.dropOffDate || 'Missing'}`
+      return `Drop-off date -> ${action.invalidDate ? `Invalid "${action.invalidDate}"` : action.dropOffDate || 'Missing'}`
     case 'update_due_date':
-      return `Target date -> ${action.dueDate || 'Missing'}`
+      return `Target date -> ${action.invalidDate ? `Invalid "${action.invalidDate}"` : action.dueDate || 'Missing'}`
     case 'update_rental':
       return action.hasRental ? 'Rental: yes' : 'Rental: no'
     case 'complete_phase':
@@ -2113,15 +2120,12 @@ function looksLikeShopRepairEtaInput(inputText = '') {
   return /\b(customer|completion|complete|delivery|deliver|pickup|pick\s*up|ready|target|promise|promised|shop\s*eta|vehicle\s*eta|repair\s*eta|shop\s*repair\s*eta|repair\s*due|due\s*date|call|called|update customer)\b/i.test(text)
 }
 
-function parseShortDate(value = '') {
-  const match = String(value).match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/)
-  if (!match) return ''
-  const year = match[3]
-    ? Number(match[3].length === 2 ? `20${match[3]}` : match[3])
-    : new Date().getFullYear()
-  const month = String(Number(match[1])).padStart(2, '0')
-  const day = String(Number(match[2])).padStart(2, '0')
-  return `${year}-${month}-${day}`
+function parseShortDateEvidence(value = '') {
+  const token = findDateToken(value)
+  if (!token) return { eta: '' }
+  return token.normalized
+    ? { eta: token.normalized }
+    : { eta: '', invalidDate: token.raw }
 }
 
 function canonicalParsedVendorLabel(value = '') {
@@ -2141,16 +2145,24 @@ function extractExplicitPartsOrderVendors(inputText = '', knownRoNumbers = []) {
     vendor: canonicalParsedVendorLabel(order.vendor),
     qty: order.qty,
     eta: order.eta,
+    ...(order.invalidDate ? { invalidDate: order.invalidDate } : {}),
   }))
 }
 
 function applyExplicitPartsOrderFields(action, order) {
+  let validatedAction = action
+  if (order.invalidDate) {
+    validatedAction = { ...action, eta: '', invalidDate: order.invalidDate, confidence: 'low' }
+  } else if (order.eta) {
+    const { invalidDate: _invalidDate, ...rest } = action
+    validatedAction = rest
+  }
   return {
-    ...action,
+    ...validatedAction,
     vendor: order.vendor,
     vendorFull: order.vendor,
     ...(order.qty ? { qty: order.qty } : {}),
-    ...(order.eta ? { eta: order.eta } : {}),
+    ...(order.eta && !order.invalidDate ? { eta: order.eta } : {}),
   }
 }
 
@@ -2218,9 +2230,10 @@ function parseBatchPartsOrders(inputText = '', knownRoNumbers = []) {
         description: 'Parts order',
         qty: order.qty,
         qtyReceived: 0,
-        eta: order.eta,
+        eta: order.invalidDate ? '' : order.eta,
+        ...(order.invalidDate ? { invalidDate: order.invalidDate } : {}),
         status: 'ordered',
-        confidence: 'high',
+        confidence: order.invalidDate ? 'low' : 'high',
       }
     })
 }
@@ -2268,6 +2281,7 @@ function applyPartsManagerParsePreference(parsed, sourceRole, inputText = '', kn
         eta: action.dueDate,
         status: 'ordered',
         confidence: action.confidence || 'medium',
+        ...(action.invalidDate ? { invalidDate: action.invalidDate } : {}),
       }
     }),
   }
@@ -2668,6 +2682,13 @@ export default function AIInputBox({
   // ── Apply actions + upload images ─────────────────────────────────────────
   const handleApply = async () => {
     if (!actions.length && images.length === 0) return
+    const invalidDateAction = actions.find(action => actionDateValidationError(action))
+    if (invalidDateAction) {
+      const roLabel = invalidDateAction.roNumber ? ` for RO #${invalidDateAction.roNumber}` : ''
+      setError(`${actionDateValidationError(invalidDateAction)}${roLabel}. Edit or remove that action before applying.`)
+      return
+    }
+    setError('')
     setApplying(true)
 
     // Outer guard: any throw in action-bucketing (Step 1/2) happens BEFORE the

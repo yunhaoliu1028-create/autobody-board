@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-19 - Codex** Added strict, vendor-scoped GIB calendar validation and blocked invalid target, drop-off, and parts dates before Apply. → [session below](#session-august-19-2026-codex--gib-strict-date-validation)
 - **2026-08-19 - Codex** Isolated GIB inference, workflow normalization, and parts fallback parsing by RO scope to prevent multi-RO context leakage. → [session below](#session-august-19-2026-codex--gib-per-ro-scope-isolation)
 - **2026-08-18 - Codex** Hardened GIB parts-order parsing against received-order false positives, vendor/date contamination, and weaker duplicate actions, then deployed it to Firebase Hosting. → [session below](#session-august-18-2026-codex--gib-parts-order-parser-hardening)
 - **2026-07-01 - Codex** Simplified the Production Board revenue card controls with a single month title dropdown and a three-dot actions menu.
@@ -133,6 +134,28 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 19, 2026 (Codex) — GIB Strict Date Validation
+
+**Status:** Implemented, repeatedly red-teamed by independent sub-agents, and verified on an isolated branch. Not yet deployed.
+
+Changed:
+- Added one strict calendar parser for ISO, US numeric, English-month, and Chinese dates, including leap-year and impossible-date rejection without JavaScript rollover.
+- Preserved the user's invalid source token on target-date, drop-off, parts-order, and parts-received actions so the preview can explain and edit the problem.
+- Blocked Apply before any write when an action contains an invalid date; choosing a valid date in the action editor clears the block.
+- Scoped parts ETA evidence by RO, vendor, and receipt-versus-order intent, including compact `and`, `/`, `&`, and `+` vendor separators and overlapping vendor names.
+- Kept dates local to each English or Chinese vendor clause; shared ETAs apply only when the input explicitly says `all ETA`.
+- Preserved invalid ETA evidence through deterministic parts fallbacks, duplicate/translation merges, Parts Manager conversion, and the post-inference received-except/waiting-order parsers.
+- Added Chinese target, drop-off, and parts date context plus bilingual and multi-vendor regression coverage.
+
+Verification:
+- `npm.cmd run test:gib-scope` — 30/30 passing.
+- `npm.cmd run test:parts-parser` — 24/24 passing.
+- `npm.cmd run build` — production build succeeded; only the existing large-chunk warning remains.
+- Independent sub-agent release-gate review — final PASS, with no reproducible date-domain P0/P1 findings.
+- No Firebase deployment was performed in this step; the live site remained unchanged.
 
 ---
 
