@@ -15,6 +15,12 @@ import { inferStructuredActionsFromText } from '../utils/aiActionInference'
 import { buildRoInputScopes, getRoScopedText } from '../utils/gibInputScope'
 import { actionDateValidationError, findDateToken } from '../utils/dateParsing'
 import {
+  actionTargetsRo,
+  normalizeActionRoNumber,
+  reconcileEditedActionIdentity,
+  resolveRoForAction,
+} from '../utils/actionIdentity'
+import {
   extractPartsOrderCandidates,
   mergePreferredPartsOrderActions,
   removeCrossRoPartsOrderLeakage,
@@ -208,6 +214,17 @@ function findEmployeeByUid(employees, uid = '') {
   if (Array.isArray(employees)) return employees.find(emp => emp.uid === uid) ?? null
   const name = employees?.[uid]
   return name ? { uid, name, role: '' } : null
+}
+
+function resolveActionAssignee(employees, action = {}, preferredRole = null) {
+  if (Object.prototype.hasOwnProperty.call(action, 'assigneeName')) {
+    const assigneeName = String(action.assigneeName || '').trim()
+    if (!assigneeName) return null
+    return findEmployeeByName(employees, assigneeName, preferredRole)
+  }
+  const assignee = findEmployeeByUid(employees, action.assigneeUid)
+  if (preferredRole && assignee?.role !== preferredRole) return null
+  return assignee
 }
 
 function isBodyTaskAction(action) {
@@ -436,7 +453,9 @@ function hasAssignedBodyTech(roDoc, pendingFields = {}, employees = []) {
 }
 
 function roNumberForAction(action = {}, ros = []) {
-  if (action.roNumber != null) return String(action.roNumber)
+  if (Object.prototype.hasOwnProperty.call(action, 'roNumber')) {
+    return normalizeActionRoNumber(action.roNumber)
+  }
   return String(ros.find(ro => ro.id === action.roId)?.roNumber ?? '')
 }
 
@@ -481,11 +500,9 @@ function normalizeActionsPerRoScope(rawActions = [], inputText = '', ros = [], n
 
 function actionAssignsBodyTech(action, roDoc, employees = []) {
   if (action.type !== 'assign_body_man') return false
-  const assignee = action.assigneeUid
-    ? findEmployeeByUid(employees, action.assigneeUid)
-    : findEmployeeByName(employees, action.assigneeName, 'body_man')
+  const assignee = resolveActionAssignee(employees, action, 'body_man')
   if (!roDoc || assignee?.role !== 'body_man') return false
-  return action.roId === roDoc.id || String(action.roNumber ?? '') === String(roDoc.roNumber ?? '')
+  return actionTargetsRo(action, roDoc)
 }
 
 function releaseHasBodyTech(roDoc, pendingFields = {}, actions = [], employees = []) {
@@ -566,13 +583,9 @@ function inputExplicitlyMentionsAssignee(inputText = '', assigneeName = '') {
   return parts.every(part => input.includes(part))
 }
 
-function findRoForAction(ros = [], action = {}) {
-  return ros.find(ro => ro.id === action.roId || String(ro.roNumber ?? '') === String(action.roNumber ?? ''))
-}
-
 function normalizeBodyAssigneeDefaults(actions = [], inputText = '', ros = [], employees = []) {
   return actions.flatMap(action => {
-    const roDoc = findRoForAction(ros, action)
+    const roDoc = resolveRoForAction(ros, action)
     const existingBodyTech = resolveBodyTech(roDoc, employees)
     if (!existingBodyTech.uid && !existingBodyTech.name) return [action]
 
@@ -846,7 +859,7 @@ function normalizeWaitingPartsOrderActions(rawActions = [], inputText = '', ros 
     let replaced = false
     nextActions = nextActions.map(action => {
       const sameRo = roDoc
-        ? action.roId === roDoc.id || String(action.roNumber ?? '') === String(roDoc.roNumber ?? '')
+        ? actionTargetsRo(action, roDoc)
         : String(action.roNumber ?? '') === String(parsed.roNumber)
       if (
         action.type === 'update_parts_order'
@@ -965,7 +978,7 @@ function normalizeReceivedFromNoteActions(rawActions = [], ros = []) {
 
   actions.forEach(action => {
     if (action.type !== 'add_note') return
-    const roDoc = findRoForAction(ros, action)
+    const roDoc = resolveRoForAction(ros, action)
     const orders = Array.isArray(roDoc?.partsOrders) ? roDoc.partsOrders : []
     if (!roDoc || !orders.length) return
 
@@ -1084,7 +1097,7 @@ function normalizePartsReceivedIncrements(rawActions = [], inputText = '', ros =
   const useFinalCount = inputUsesFinalReceivedCount(inputText)
   return rawActions.map(action => {
     if (action.type !== 'log_parts_received') return action
-    const roDoc = findRoForAction(ros, action)
+    const roDoc = resolveRoForAction(ros, action)
     const orders = Array.isArray(roDoc?.partsOrders) ? roDoc.partsOrders : []
     const order = orders.find(item => orderMatchesVendor(item, action.vendor, action.vendorFull))
     if (!order) return action
@@ -1161,7 +1174,7 @@ function shouldHideResolvedBodyTechClarification(clarification = '', resultActio
   if (!/body technician|body tech|bodyman|body man|defaulted/i.test(clarification)) return false
   return resultActions.some(rawAction => {
     const action = { ...rawAction, type: rawAction.type ?? rawAction.action }
-    const roDoc = findRoForAction(ros, action)
+    const roDoc = resolveRoForAction(ros, action)
     const existingBodyTech = resolveBodyTech(roDoc, employees)
     if (!existingBodyTech.uid && !existingBodyTech.name) return false
     if (!action.assigneeName) return true
@@ -1263,11 +1276,12 @@ function normalizeBodyWorkflowActionsForScope(rawActions = [], inputText = '', r
     if (action.type !== 'assign_body_man') continue
     const phase = bodyPhaseFromActionsForRo(normalized, action.roNumber, inputText)
     if (!phase) continue
+    const assignee = resolveActionAssignee(employees, action, 'body_man')
     addPrimaryTaskIfMissing({
       roNumber: action.roNumber,
       roId: action.roId,
-      assigneeName: action.assigneeName,
-      assigneeUid: action.assigneeUid || findEmployeeByName(employees, action.assigneeName, 'body_man')?.uid || '',
+      assigneeName: assignee?.name || action.assigneeName,
+      assigneeUid: assignee?.uid || '',
       phase,
       priority: action.priority || 'medium',
       autoReason: 'assign_body_man',
@@ -1278,7 +1292,7 @@ function normalizeBodyWorkflowActionsForScope(rawActions = [], inputText = '', r
     if (!['update_status', 'complete_phase'].includes(action.type)) continue
     const phase = bodyPhaseFromText(`${action.status ?? ''} ${action.phase ?? ''}`)
     if (!phase) continue
-    const roDoc = ros.find(ro => ro.id === action.roId || String(ro.roNumber ?? '') === String(action.roNumber ?? ''))
+    const roDoc = resolveRoForAction(ros, action)
     const bodyTech = resolveBodyTech(roDoc, employees)
     addPrimaryTaskIfMissing({
       roNumber: action.roNumber || roDoc?.roNumber,
@@ -1356,13 +1370,11 @@ function normalizePaintWorkflowActionsForScope(rawActions = [], inputText = '', 
   }
 
   for (const action of actions) {
-    const roDoc = findRoForAction(ros, action)
+    const roDoc = resolveRoForAction(ros, action)
     if (!roDoc) continue
     if (action.type === 'assign_painter') addPaintPrimaries(roDoc)
     if (action.type === 'assign_task') {
-      const assignee = action.assigneeUid
-        ? findEmployeeByUid(employees, action.assigneeUid)
-        : findEmployeeByName(employees, action.assigneeName)
+      const assignee = resolveActionAssignee(employees, action)
       if (assignee?.role === 'painter' || assignee?.role === 'paint_helper') {
         addPaintPrimaries(roDoc)
         if (looksLikePrimaryPaintAction(action, inputText)) {
@@ -1528,7 +1540,10 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
 
   const meta = ACTION_LABELS[draft.type] ?? { icon: '•', label: draft.type, color: 'bg-gray-50 border-gray-200' }
 
-  const save = () => { onChange(draft); setEditing(false) }
+  const save = () => {
+    onChange(reconcileEditedActionIdentity(draft, action))
+    setEditing(false)
+  }
   const set  = (patch) => setDraft(prev => ({ ...prev, ...patch }))
 
   // ── Edit form ──────────────────────────────────────────────────────────────
@@ -1864,7 +1879,7 @@ function actionSummary(action) {
 function groupActionsForPreview(actions, ros) {
   const groups = new Map()
   actions.forEach((action, index) => {
-    const roDoc = ros.find(r => r.id === action.roId || r.roNumber === action.roNumber)
+    const roDoc = resolveRoForAction(ros, action)
     const key = roDoc?.id || (action.roNumber ? `ro-${action.roNumber}` : 'standalone')
     if (!groups.has(key)) {
       groups.set(key, {
@@ -2724,7 +2739,7 @@ export default function AIInputBox({
     }
 
     for (const action of actions) {
-      const roDoc = ros.find(r => r.id === action.roId || r.roNumber === action.roNumber)
+      const roDoc = resolveRoForAction(ros, action)
       if (!roDoc) {
         if (action.type === 'assign_task') {
           const assignee = findEmployeeByName(employees, action.assigneeName)
@@ -3006,48 +3021,54 @@ export default function AIInputBox({
           entry.changeLogEntries.push({ type: 'update_rental', value: String(action.hasRental), by: author, at: now, source: 'gib' })
           break
         case 'assign_body_man': {
-          const assignee = findEmployeeByName(employees, action.assigneeName, 'body_man')
-          if (assignee) {
-            entry.fields.assignedBodyMan = assignee.uid
-            entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
-            const actionInput = scopedInputForRo(submittedInput, action.roNumber, actions, ros)
-            const phase = bodyPhaseFromActionsForRo(actions, action.roNumber, actionInput)
-            const hasExplicitPrimaryBodyTask = actions.some(other =>
-              other !== action
-              && other.type === 'assign_task'
-              && String(other.roNumber ?? '') === String(action.roNumber ?? '')
-              && normalizeName(other.assigneeName) === normalizeName(action.assigneeName)
-              && isExplicitPrimaryBodyTaskAction(other)
-            )
-            if (phase && !hasExplicitPrimaryBodyTask) {
-              const roDueDate = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
-              entry.taskPromises.push(addTask({
-                roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
-                assignedTo: assignee.uid, assignedBy: user.uid, assignedByName: author,
-                assignedToName: assignee.name ?? '',
-                title: bodyPhaseTitle(phase),
-                description: '',
-                phase,
-                category: 'body',
-                partsStatus: roDoc.partsStatus ?? '',
-                priority: dueDateToPriority(roDoc),
-                dueDate: roDueDate,
-                status: 'pending',
-                source: 'gib',
-                autoTriggered: true,
-                taskKind: 'primary',
-                createdAt: serverTimestamp(),
-              }))
-            }
+          const assignee = resolveActionAssignee(employees, action, 'body_man')
+          if (!assignee) {
+            setError(`Could not match body technician "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid body technician.`)
+            setApplying(false)
+            return
+          }
+          entry.fields.assignedBodyMan = assignee.uid
+          entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
+          const actionInput = scopedInputForRo(submittedInput, action.roNumber, actions, ros)
+          const phase = bodyPhaseFromActionsForRo(actions, action.roNumber, actionInput)
+          const hasExplicitPrimaryBodyTask = actions.some(other =>
+            other !== action
+            && other.type === 'assign_task'
+            && String(other.roNumber ?? '') === String(action.roNumber ?? '')
+            && normalizeName(other.assigneeName) === normalizeName(action.assigneeName)
+            && isExplicitPrimaryBodyTaskAction(other)
+          )
+          if (phase && !hasExplicitPrimaryBodyTask) {
+            const roDueDate = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
+            entry.taskPromises.push(addTask({
+              roId: roDoc.id, roNumber: roDoc.roNumber, vehicleInfo: roDoc.vehicle,
+              assignedTo: assignee.uid, assignedBy: user.uid, assignedByName: author,
+              assignedToName: assignee.name ?? '',
+              title: bodyPhaseTitle(phase),
+              description: '',
+              phase,
+              category: 'body',
+              partsStatus: roDoc.partsStatus ?? '',
+              priority: dueDateToPriority(roDoc),
+              dueDate: roDueDate,
+              status: 'pending',
+              source: 'gib',
+              autoTriggered: true,
+              taskKind: 'primary',
+              createdAt: serverTimestamp(),
+            }))
           }
           break
         }
         case 'assign_painter': {
-          const assignee = findEmployeeByName(employees, action.assigneeName, 'painter')
-          if (assignee) {
-            entry.fields.assignedPainter = assignee.uid
-            entry.changeLogEntries.push({ type: 'assign_painter', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
+          const assignee = resolveActionAssignee(employees, action, 'painter')
+          if (!assignee) {
+            setError(`Could not match painter "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid painter.`)
+            setApplying(false)
+            return
           }
+          entry.fields.assignedPainter = assignee.uid
+          entry.changeLogEntries.push({ type: 'assign_painter', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
           break
         }
         case 'assign_task': {
@@ -3057,9 +3078,11 @@ export default function AIInputBox({
           const isSecondaryBodyTask = action.taskKind === 'secondary'
             || (!isExplicitPrimaryBodyTaskAction(action) && contextPhase && looksLikeSecondaryBodyTaskStrict(action, roActionText))
           const isBodyTask = !isSecondaryBodyTask && isBodyTaskAction(action)
-          const assignee = action.assigneeUid
-            ? findEmployeeByUid(employees, action.assigneeUid)
-            : findEmployeeByName(employees, action.assigneeName, (isBodyTask || isSecondaryBodyTask) ? 'body_man' : null)
+          const assignee = resolveActionAssignee(
+            employees,
+            action,
+            (isBodyTask || isSecondaryBodyTask) ? 'body_man' : null,
+          )
           if (!assignee) {
             setError(`Could not match task assignee "${action.assigneeName}". Edit the suggested action and choose a valid employee name.`)
             setApplying(false)

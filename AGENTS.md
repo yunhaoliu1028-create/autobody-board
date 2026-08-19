@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-19 - Codex** Made visible GIB action RO and assignee fields authoritative so stale hidden IDs cannot redirect writes or assignments. → [session below](#session-august-19-2026-codex--gib-action-identity-safety)
 - **2026-08-19 - Codex** Added strict, vendor-scoped GIB calendar validation and blocked invalid target, drop-off, and parts dates before Apply. → [session below](#session-august-19-2026-codex--gib-strict-date-validation)
 - **2026-08-19 - Codex** Isolated GIB inference, workflow normalization, and parts fallback parsing by RO scope to prevent multi-RO context leakage. → [session below](#session-august-19-2026-codex--gib-per-ro-scope-isolation)
 - **2026-08-18 - Codex** Hardened GIB parts-order parsing against received-order false positives, vendor/date contamination, and weaker duplicate actions, then deployed it to Firebase Hosting. → [session below](#session-august-18-2026-codex--gib-parts-order-parser-hardening)
@@ -134,6 +135,28 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 19, 2026 (Codex) — GIB Action Identity Safety
+
+**Status:** Implemented and independently reviewed on the isolated Draft PR branch. Not deployed to production.
+
+Changed:
+- Added one shared action identity resolver so a visible RO number always overrides a conflicting hidden `roId` across normalization, preview, release checks, and Apply.
+- Made an explicitly blank or unknown visible RO/assignee block hidden-ID fallback; legacy actions that entirely lack the visible field retain ID-only compatibility.
+- Cleared stale `roId` and `assigneeUid` values when action cards are edited, including when the visible value is cleared.
+- Unified body-tech, painter, and task assignment resolution; unmatched or wrong-role assignments now stop Apply instead of silently succeeding.
+- Added regression coverage for conflicting, unknown, blank-visible, and legacy ID-only action identities.
+
+Verification:
+- `npm.cmd run test:gib-scope` — 40/40 passing.
+- `npm.cmd run test:parts-parser` — 24/24 passing.
+- `npm.cmd run build` — production build succeeded; only the existing large-chunk warning remains.
+- Independent sub-agent review — PASS, with no P0/P1/P2 findings after the UID-only Apply correction.
+
+Deployment:
+- No Firebase deploy was run; the live site remained unchanged while staff were using it.
 
 ---
 
