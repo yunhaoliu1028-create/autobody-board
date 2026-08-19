@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
-import { doc, updateDoc, deleteField, getDocs, query, where, collection, serverTimestamp, arrayUnion, arrayRemove, writeBatch } from 'firebase/firestore'
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { doc, updateDoc, deleteField, getDocFromServer, getDocs, query, where, collection, serverTimestamp, arrayUnion, arrayRemove, writeBatch } from 'firebase/firestore'
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
@@ -21,6 +21,23 @@ import {
   resolveRoForAction,
 } from '../utils/actionIdentity'
 import { selectPendingPhaseTaskItems, taskMatchesOpenTemplate } from '../utils/gibTaskPlanning'
+import {
+  GIB_DRAFT_SCHEMA_VERSION,
+  isGibDraftPayloadForOwner,
+  isGibDraftLifecycleCurrent,
+  isGibDraftMutationLocked,
+  isGibPlanStale,
+  resultMetadataWithoutActions,
+  recoverGibAttemptAfterReload,
+  shouldAcceptGibParseResponse,
+} from '../utils/gibDraftState'
+import {
+  buildGibOperationIdentity,
+  createGibDraftNonce,
+  gibOperationLimitError,
+  gibTaskDocumentId,
+  operationLedgerMatches,
+} from '../utils/gibOperation'
 import {
   extractPartsOrderCandidates,
   mergePreferredPartsOrderActions,
@@ -1540,7 +1557,7 @@ const ACTION_LABELS = {
 }
 
 const ACTION_FIELD = 'border border-gray-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-950 text-gray-900 dark:text-zinc-100 placeholder-gray-400 dark:placeholder-zinc-600'
-const GIB_HISTORY_KEY = 'autobody.gib.history.v1'
+const GIB_HISTORY_KEY_PREFIX = 'autobody.gib.history.v2'
 
 // ── Inline-editable action card ───────────────────────────────────────────────
 function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
@@ -2019,6 +2036,7 @@ function CameraModal({ onDone, onClose }) {
   const videoRef  = useRef(null)
   const streamRef = useRef(null)
   const libRef    = useRef(null)
+  const cameraDisposedRef = useRef(false)
   const [shots, setShots] = useState([])
   const [ready, setReady] = useState(false)
   const [err,   setErr]   = useState('')
@@ -2032,6 +2050,8 @@ function CameraModal({ onDone, onClose }) {
   }, [])
 
   useEffect(() => {
+    let disposed = false
+    cameraDisposedRef.current = false
     const constraints = {
       video: {
         facingMode: { ideal: 'environment' },
@@ -2040,17 +2060,42 @@ function CameraModal({ onDone, onClose }) {
       },
       audio: false,
     }
-    navigator.mediaDevices?.getUserMedia(constraints)
-      .catch(() => navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' }, audio: false }))
-      .then(stream => { streamRef.current = stream; if (videoRef.current) videoRef.current.srcObject = stream; setReady(true) })
-      .catch(() => setErr('无法访问相机，请检查权限'))
-    return () => streamRef.current?.getTracks().forEach(t => t.stop())
+    const stopStream = stream => stream?.getTracks().forEach(track => track.stop())
+    const startCamera = async () => {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera unavailable')
+        let stream
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints)
+        } catch {
+          if (disposed) return
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+        }
+        if (disposed) {
+          stopStream(stream)
+          return
+        }
+        streamRef.current = stream
+        if (videoRef.current) videoRef.current.srcObject = stream
+        setReady(true)
+      } catch {
+        if (!disposed) setErr('无法访问相机，请检查权限')
+      }
+    }
+    startCamera()
+    return () => {
+      disposed = true
+      cameraDisposedRef.current = true
+      stopStream(streamRef.current)
+      streamRef.current = null
+      if (videoRef.current) videoRef.current.srcObject = null
+    }
   }, [])
 
   const snap = async () => {
     const v = videoRef.current; if (!v || !ready) return
     const blob = await compressVideoFrame(v)
-    if (!blob) return
+    if (!blob || cameraDisposedRef.current) return
     playShutterSound()
     const preview = URL.createObjectURL(blob)
     setShots(p => [...p, { blob, preview, name:`cam_${Date.now()}.jpg` }])
@@ -2100,7 +2145,7 @@ function CameraModal({ onDone, onClose }) {
         </button>
       </div>
 
-      <input ref={libRef} type="file" accept="image/*" multiple style={{ display:'none' }} onChange={async e => { const files = Array.from(e.target.files); e.target.value=''; for (const f of files) { const blob = await compressImageFile(f); if (blob) setShots(p=>[...p,{blob,preview:URL.createObjectURL(blob),name:f.name}]) } }} />
+      <input ref={libRef} type="file" accept="image/*" multiple style={{ display:'none' }} onChange={async e => { const files = Array.from(e.target.files); e.target.value=''; for (const f of files) { const blob = await compressImageFile(f); if (blob && !cameraDisposedRef.current) setShots(p=>[...p,{blob,preview:URL.createObjectURL(blob),name:f.name}]) } }} />
     </div>
   )
 }
@@ -2327,12 +2372,26 @@ function prepareParsedResult(parsed, sourceRole, inputText = '', knownRoNumbers 
   )
 }
 
+function prepareReviewedPlan(parsed, sourceRole, inputText, knownRoNumbers, ros, employees) {
+  const prepared = prepareParsedResult(parsed, sourceRole, inputText, knownRoNumbers)
+  const reviewedActions = normalizePaintWorkflowActions(
+    normalizeBodyWorkflowActions(prepared?.actions || [], inputText, ros, employees),
+    inputText,
+    ros,
+    employees,
+  )
+  const resultMetadata = resultMetadataWithoutActions(prepared)
+  return { resultMetadata, reviewedActions }
+}
+
 export default function AIInputBox({
   ros = [],
   employees = [],
   sourceRole = null,
   compact = false,
   sharedDraftKey = null,
+  draftScope = 'general',
+  autoReparseOwner = true,
   compactSubtitle = 'Parts ETA / received',
   compactPlaceholder = 'Quick parts update, e.g. RO9584 Chevy dealer ETA 5/28',
   fullPlaceholder = 'e.g. "RO9448 dropped off 4-25, w/o rental, ordered parts thru PT eta 4-29"',
@@ -2361,11 +2420,26 @@ export default function AIInputBox({
   const [history,         setHistory]         = useState([])
   const [recentApplied,   setRecentApplied]   = useState(null)
   const [undoing,         setUndoing]         = useState(false)
+  const [draftNonce,      setDraftNonce]      = useState('')
+  const [operationAttempt, setOperationAttempt] = useState(null)
+  const [hydratedStorageKey, setHydratedStorageKey] = useState(null)
+  const [autoReparseRequested, setAutoReparseRequested] = useState(false)
 
   const fileInputRef      = useRef(null)   // gallery picker
   const cameraRef         = useRef(null)   // camera capture
   const submittedText     = useRef('')     // text that produced the current AI result
+  const latestText        = useRef('')
   const reparseTimer      = useRef(null)
+  const parseRequestRevision = useRef(0)
+  const activeReparseRevision = useRef(0)
+  const actionRevision    = useRef(0)
+  const operationAttemptRef = useRef(null)
+  const draftLifecycleRef = useRef({ ownerUid: null, draftStorageKey: null, generation: 0 })
+  const voiceLifecycleRef = useRef(null)
+  const applyInvocationRef = useRef(null)
+  const submitInvocationRef = useRef(null)
+  const undoInvocationRef = useRef(null)
+  const photoActionTimerRef = useRef(null)
   // Whisper voice refs
   const mediaRecorderRef  = useRef(null)
   const audioChunksRef    = useRef([])
@@ -2376,89 +2450,245 @@ export default function AIInputBox({
   const instanceId        = useRef(`gib-${Math.random().toString(36).slice(2)}`)
   const lastSharedPayload = useRef('')
 
+  const effectiveDraftScope = sharedDraftKey || draftScope || sourceRole || 'general'
+  const draftStorageKey = user?.uid
+    ? `gib-draft-v2:${import.meta.env.VITE_FIREBASE_PROJECT_ID || 'default'}:${user.uid}:${effectiveDraftScope}`
+    : null
+  const draftHydratedForOwner = Boolean(
+    draftStorageKey && hydratedStorageKey === draftStorageKey,
+  )
+  const historyStorageKey = user?.uid
+    ? `${GIB_HISTORY_KEY_PREFIX}:${import.meta.env.VITE_FIREBASE_PROJECT_ID || 'default'}:${user.uid}`
+    : null
+
+  useLayoutEffect(() => {
+    const previous = draftLifecycleRef.current
+    if (previous.ownerUid === (user?.uid || null) && previous.draftStorageKey === draftStorageKey) return
+    draftLifecycleRef.current = {
+      ownerUid: user?.uid || null,
+      draftStorageKey,
+      generation: previous.generation + 1,
+    }
+  }, [draftStorageKey, user?.uid])
+
   useEffect(() => {
-    if (!sharedDraftKey) return
+    latestText.current = text
+  }, [text])
+
+  useEffect(() => {
+    operationAttemptRef.current = operationAttempt
+  }, [operationAttempt])
+
+  useEffect(() => {
+    setHydratedStorageKey(null)
+    clearTimeout(reparseTimer.current)
+    clearTimeout(photoActionTimerRef.current)
+    latestText.current = ''
+    submittedText.current = ''
+    parseRequestRevision.current += 1
+    actionRevision.current += 1
+    activeReparseRevision.current = 0
+    setText('')
+    setResult(null)
+    setActions([])
+    setReparse(false)
+    setError('')
+    setLoading(false)
+    setApplying(false)
+    setApplied(false)
+    setNoKey(false)
+    setIsTranscribing(false)
+    setDraftNonce('')
+    operationAttemptRef.current = null
+    setOperationAttempt(null)
+    setAutoReparseRequested(false)
+    applyInvocationRef.current = null
+    submitInvocationRef.current = null
+    undoInvocationRef.current = null
+    setRecentApplied(null)
+    setUndoing(false)
+    setImages(previous => {
+      previous.forEach(image => URL.revokeObjectURL(image?.preview))
+      return []
+    })
+    setShowPhotoSheet(false)
+    setShowCamera(false)
+    setShowHistory(false)
+    setUploadProgress({ done: 0, total: 0 })
+    const recorder = mediaRecorderRef.current
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.ondataavailable = null
+      recorder.onstop = null
+      try { recorder.stop() } catch { /* already stopping */ }
+      recorder.stream?.getTracks().forEach(track => track.stop())
+    }
+    mediaRecorderRef.current = null
+    voiceLifecycleRef.current = null
+    audioChunksRef.current = []
+    clearInterval(recordTimerRef.current)
+    cancelAnimationFrame(levelAnimRef.current)
+    audioContextRef.current?.close().catch(() => {})
+    setListening(false)
+    setRecordSecs(0)
+    setAudioLevel(0)
+    if (!draftStorageKey || !user?.uid) return
+
+    const applyPayload = (payload, { recoverInFlight = false } = {}) => {
+      if (!isGibDraftPayloadForOwner(payload, user.uid)) return
+      if (typeof payload.text === 'string') {
+        latestText.current = payload.text
+        setText(payload.text)
+      }
+      setResult(resultMetadataWithoutActions(payload.result))
+      setActions(Array.isArray(payload.actions) ? payload.actions : [])
+      setDraftNonce(typeof payload.draftNonce === 'string' ? payload.draftNonce : '')
+      submittedText.current = typeof payload.submittedInput === 'string' ? payload.submittedInput : ''
+      const savedAttempt = payload.operationAttempt || null
+      const nextAttempt = recoverInFlight ? recoverGibAttemptAfterReload(savedAttempt) : savedAttempt
+      operationAttemptRef.current = nextAttempt
+      setOperationAttempt(nextAttempt)
+      setAutoReparseRequested(Boolean(payload.autoReparseRequested))
+      actionRevision.current += 1
+      parseRequestRevision.current += 1
+      activeReparseRevision.current = 0
+      setReparse(false)
+      setApplied(false)
+    }
+
     try {
-      const savedRaw = localStorage.getItem(sharedDraftKey) || '{}'
+      const savedRaw = localStorage.getItem(draftStorageKey) || '{}'
       lastSharedPayload.current = savedRaw
-      const saved = JSON.parse(savedRaw)
-      if (typeof saved.text === 'string') setText(saved.text)
-      if (saved.result) setResult(saved.result)
-      if (Array.isArray(saved.actions)) setActions(saved.actions)
+      applyPayload(JSON.parse(savedRaw), { recoverInFlight: true })
     } catch { /* ignore bad shared draft */ }
+    setHydratedStorageKey(draftStorageKey)
 
     const onDraftUpdate = (event) => {
-      if (event.detail?.key !== sharedDraftKey) return
+      if (event.detail?.key !== draftStorageKey) return
       if (event.detail?.source === instanceId.current) return
       const next = event.detail?.payload || {}
       const serialized = JSON.stringify(next)
       if (serialized === lastSharedPayload.current) return
       lastSharedPayload.current = serialized
-      if (typeof next.text === 'string') setText(next.text)
-      setResult(next.result || null)
-      setActions(Array.isArray(next.actions) ? next.actions : [])
-      setApplied(false)
+      applyPayload(next)
+    }
+
+    const onStorage = (event) => {
+      if (event.key !== draftStorageKey) return
+      if (!event.newValue) {
+        lastSharedPayload.current = ''
+        latestText.current = ''
+        submittedText.current = ''
+        setText('')
+        setResult(null)
+        setActions([])
+        setDraftNonce('')
+        operationAttemptRef.current = null
+        setOperationAttempt(null)
+        setAutoReparseRequested(false)
+        actionRevision.current += 1
+        parseRequestRevision.current += 1
+        activeReparseRevision.current = 0
+        setReparse(false)
+        return
+      }
+      if (event.newValue === lastSharedPayload.current) return
+      try {
+        lastSharedPayload.current = event.newValue
+        applyPayload(JSON.parse(event.newValue))
+      } catch { /* ignore bad cross-tab draft */ }
     }
 
     window.addEventListener('gib-draft-update', onDraftUpdate)
-    return () => window.removeEventListener('gib-draft-update', onDraftUpdate)
-  }, [sharedDraftKey])
+    window.addEventListener('storage', onStorage)
+    return () => {
+      clearTimeout(photoActionTimerRef.current)
+      window.removeEventListener('gib-draft-update', onDraftUpdate)
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [draftStorageKey, user?.uid])
 
   useEffect(() => {
-    if (!sharedDraftKey) return
-    const payload = { text, result, actions }
+    if (
+      !draftStorageKey
+      || hydratedStorageKey !== draftStorageKey
+      || !user?.uid
+    ) return
+    const payload = {
+      schemaVersion: GIB_DRAFT_SCHEMA_VERSION,
+      ownerUid: user.uid,
+      surface: effectiveDraftScope,
+      text,
+      result,
+      actions,
+      draftNonce,
+      submittedInput: submittedText.current,
+      operationAttempt,
+      autoReparseRequested,
+    }
     const serialized = JSON.stringify(payload)
     if (serialized === lastSharedPayload.current) return
     lastSharedPayload.current = serialized
     try {
-      if (!text.trim() && !result && actions.length === 0) {
-        localStorage.removeItem(sharedDraftKey)
+      if (!text.trim() && !result && actions.length === 0 && !operationAttempt) {
+        localStorage.removeItem(draftStorageKey)
       } else {
-        localStorage.setItem(sharedDraftKey, serialized)
+        localStorage.setItem(draftStorageKey, serialized)
       }
     } catch { /* ignore storage errors */ }
     window.dispatchEvent(new CustomEvent('gib-draft-update', {
-      detail: { key: sharedDraftKey, source: instanceId.current, payload },
+      detail: { key: draftStorageKey, source: instanceId.current, payload },
     }))
-  }, [sharedDraftKey, text, result, actions])
+  }, [
+    actions,
+    autoReparseRequested,
+    draftNonce,
+    draftStorageKey,
+    effectiveDraftScope,
+    hydratedStorageKey,
+    operationAttempt,
+    result,
+    text,
+    user?.uid,
+  ])
 
-  // Sync actions from result whenever result changes
   useEffect(() => {
-    if (result?.actions) {
-      const inputText = submittedText.current || text
-      const prepared = prepareParsedResult(result, sourceRole, inputText, ros.map(ro => ro.roNumber))
-      setActions(normalizePaintWorkflowActions(
-        normalizeBodyWorkflowActions(prepared.actions, inputText, ros, employees),
-        inputText,
-        ros,
-        employees,
-      ))
+    if (!historyStorageKey) {
+      setHistory([])
+      return
     }
-  }, [result, ros, employees, text])
-
-  useEffect(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(GIB_HISTORY_KEY) || '[]')
+      const saved = JSON.parse(localStorage.getItem(historyStorageKey) || '[]')
       setHistory(Array.isArray(saved) ? saved : [])
     } catch {
       setHistory([])
     }
-  }, [])
+  }, [historyStorageKey])
 
   const rememberHistory = (value) => {
     const entry = value.trim()
     if (!entry) return
     setHistory(prev => {
       const next = [entry, ...prev.filter(item => item !== entry)].slice(0, 12)
-      localStorage.setItem(GIB_HISTORY_KEY, JSON.stringify(next))
+      if (historyStorageKey) localStorage.setItem(historyStorageKey, JSON.stringify(next))
       return next
     })
   }
 
   const useHistoryItem = (value) => {
+    if (isGibDraftMutationLocked(operationAttempt)) return
+    clearTimeout(reparseTimer.current)
+    activeReparseRevision.current = 0
+    setReparse(false)
+    setAutoReparseRequested(false)
+    latestText.current = value
     setText(value)
     setResult(null)
     setActions([])
+    setDraftNonce('')
+    setOperationAttempt(null)
+    submittedText.current = ''
+    actionRevision.current += 1
+    parseRequestRevision.current += 1
     setApplied(false)
     setShowHistory(false)
   }
@@ -2467,34 +2697,73 @@ export default function AIInputBox({
   // Debounce 1.2s — silently refresh action cards without full spinner
   useEffect(() => {
     if (!result || images.length > 0 || loading || applying) return
+    if (isGibDraftMutationLocked(operationAttempt)) return
+    if (!autoReparseOwner || !autoReparseRequested) return
     if (text.trim() === submittedText.current.trim()) return
     if (text.trim().length < 6) return
 
     clearTimeout(reparseTimer.current)
+    const requestText = text
+    const requestRevision = ++parseRequestRevision.current
+    const requestActionRevision = actionRevision.current
     reparseTimer.current = setTimeout(async () => {
       try {
+        activeReparseRevision.current = requestRevision
         setReparse(true)
         const key = await getApiKey()
         if (!key) return
-        const parsed = await parseShopInput({ text, ros, employees, images: [], sourceRole })
-        if (!parsed.raw) {
-          setResult(prepareParsedResult(parsed, sourceRole, text, ros.map(ro => ro.roNumber)))
-          submittedText.current = text
-        }
+        const parsed = await parseShopInput({ text: requestText, ros, employees, images: [], sourceRole })
+        if (parsed.raw) return
+        if (!shouldAcceptGibParseResponse({
+          requestRevision,
+          currentRequestRevision: parseRequestRevision.current,
+          requestActionRevision,
+          currentActionRevision: actionRevision.current,
+          requestText,
+          currentText: latestText.current,
+        })) return
+
+        const { resultMetadata, reviewedActions } = prepareReviewedPlan(
+          parsed,
+          sourceRole,
+          requestText,
+          ros.map(ro => ro.roNumber),
+          ros,
+          employees,
+        )
+        submittedText.current = requestText
+        setResult(resultMetadata)
+        setActions(reviewedActions)
+        setDraftNonce(prev => prev || createGibDraftNonce())
+        setOperationAttempt(null)
+        setAutoReparseRequested(false)
+        actionRevision.current += 1
       } catch { /* silent — user can re-submit manually */ }
-      finally { setReparse(false) }
+      finally {
+        if (activeReparseRevision.current === requestRevision) {
+          activeReparseRevision.current = 0
+          setReparse(false)
+        }
+      }
     }, 1200)
 
     return () => clearTimeout(reparseTimer.current)
-  }, [text, sourceRole])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [text, sourceRole, operationAttempt?.status, autoReparseOwner, autoReparseRequested])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Voice input — Whisper (OpenAI) ───────────────────────────────────────
   // Records audio via MediaRecorder, sends to Whisper on stop.
   // Whisper auto-detects language — Chinese / English / Spanish mixed works perfectly.
   const toggleVoice = async () => {
+    const voiceLifecycle = listening && voiceLifecycleRef.current
+      ? { ...voiceLifecycleRef.current }
+      : { ...draftLifecycleRef.current }
+    const voiceUiIsCurrent = () => isGibDraftLifecycleCurrent(draftLifecycleRef.current, voiceLifecycle)
+    const draftMutationLocked = () => isGibDraftMutationLocked(operationAttemptRef.current)
+    if (draftMutationLocked() && !listening) return
+
     // ── STOP recording → send to Whisper ──────────────────────────────────
     if (listening) {
-      setListening(false)
+      if (voiceUiIsCurrent()) setListening(false)
 
       // Stop timers & audio analysis
       clearInterval(recordTimerRef.current)
@@ -2512,22 +2781,28 @@ export default function AIInputBox({
         mr.stream.getTracks().forEach(t => t.stop())
       })
 
-      if (!blob || blob.size < 1000) return  // too short / empty
+      if (!voiceUiIsCurrent() || !blob || blob.size < 1000) return  // too short / empty
 
       setIsTranscribing(true)
       try {
         const transcript = await transcribeWithWhisper(blob)
-        if (transcript.trim()) {
-          setText(prev => prev.trimEnd() ? prev.trimEnd() + ' ' + transcript.trim() : transcript.trim())
+        if (voiceUiIsCurrent() && transcript.trim() && !draftMutationLocked()) {
+          setAutoReparseRequested(true)
+          setText(prev => {
+            const next = prev.trimEnd() ? prev.trimEnd() + ' ' + transcript.trim() : transcript.trim()
+            latestText.current = next
+            return next
+          })
         }
       } catch (err) {
+        if (!voiceUiIsCurrent()) return
         if (err.message === 'NO_OPENAI_KEY') {
           setError('Add your OpenAI API key in Settings to use voice input.')
         } else {
           setError('Transcription failed: ' + err.message)
         }
       } finally {
-        setIsTranscribing(false)
+        if (voiceUiIsCurrent()) setIsTranscribing(false)
       }
       return
     }
@@ -2535,6 +2810,10 @@ export default function AIInputBox({
     // ── START recording ────────────────────────────────────────────────────
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      if (!voiceUiIsCurrent()) {
+        stream.getTracks().forEach(track => track.stop())
+        return
+      }
 
       // Audio level analyzer (drives the animated bars)
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
@@ -2565,30 +2844,38 @@ export default function AIInputBox({
       mr.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data) }
       mr.start(250)  // collect chunks every 250ms so onstop gets everything
       mediaRecorderRef.current = mr
+      voiceLifecycleRef.current = voiceLifecycle
 
       setListening(true)
     } catch (err) {
-      setError('Microphone access denied — please allow microphone in browser settings.')
+      if (voiceUiIsCurrent()) setError('Microphone access denied — please allow microphone in browser settings.')
     }
   }
 
   const readImageFile = (file) => {
     if (!file.type.startsWith('image/')) return
+    const imageLifecycle = { ...draftLifecycleRef.current }
     compressImageFile(file).then(blob => {
+      if (!isGibDraftLifecycleCurrent(draftLifecycleRef.current, imageLifecycle)) return
+      if (isGibDraftMutationLocked(operationAttemptRef.current)) return
       const preview = URL.createObjectURL(blob)
       setImages(prev => [...prev, { blob, preview, name: file.name }])
     })
   }
 
   const handleFileChange = (e) => {
+    if (isGibDraftMutationLocked(operationAttemptRef.current)) return
     Array.from(e.target.files).forEach(readImageFile)
     e.target.value = ''  // reset so same file can be re-selected
   }
 
-  const removeImage = (idx) => setImages(prev => {
-    URL.revokeObjectURL(prev[idx]?.preview)  // free memory
-    return prev.filter((_, i) => i !== idx)
-  })
+  const removeImage = (idx) => {
+    if (isGibDraftMutationLocked(operationAttemptRef.current)) return
+    setImages(prev => {
+      URL.revokeObjectURL(prev[idx]?.preview)  // free memory
+      return prev.filter((_, i) => i !== idx)
+    })
+  }
 
   // ── Upload one blob via uploadBytesResumable with stall detection ────────────
   // If no bytes transfer for STALL_MS, we cancel and reject.
@@ -2621,17 +2908,22 @@ export default function AIInputBox({
   // ── Submit ────────────────────────────────────────────────────────────────
   // ── Direct image upload — no AI, just regex RO# + keyword label ─────────────
   const handleDirectImageUpload = async () => {
-    setLoading(true); setError('')
-    setUploadProgress({ done: 0, total: images.length })
+    const uploadLifecycle = { ...draftLifecycleRef.current }
+    const uploadUiIsCurrent = () => isGibDraftLifecycleCurrent(draftLifecycleRef.current, uploadLifecycle)
+    const setUploadLoading = value => { if (uploadUiIsCurrent()) setLoading(value) }
+    const setUploadError = value => { if (uploadUiIsCurrent()) setError(value) }
+    const setUploadStatus = value => { if (uploadUiIsCurrent()) setUploadProgress(value) }
+    setUploadLoading(true); setUploadError('')
+    setUploadStatus({ done: 0, total: images.length })
     const roNumber = extractRoNumber(text, ros)
     if (!roNumber) {
-      setError('Include an RO number, e.g. "9556 check-in photos"')
-      setLoading(false); return
+      setUploadError('Include an RO number, e.g. "9556 check-in photos"')
+      setUploadLoading(false); return
     }
     const roDoc = ros.find(r => r.roNumber === roNumber)
     if (!roDoc) {
-      setError(`RO #${roNumber} not found`)
-      setLoading(false); return
+      setUploadError(`RO #${roNumber} not found`)
+      setUploadLoading(false); return
     }
     const { label: typeLabel, slug: typeSlug } = detectPhotoType(text)
     const author = employees.find(e => e.uid === user.uid)?.name ?? user.email
@@ -2652,7 +2944,7 @@ export default function AIInputBox({
         const url = await getDownloadURL(sRef)
 
         attachments.push({ url, name: `${typeSlug}_${padded}`, label: typeLabel, uploadedAt: now })
-        setUploadProgress({ done: idx + 1, total: images.length })
+        setUploadStatus({ done: idx + 1, total: images.length })
       }
 
       // Write attachments + auto-note in one updateDoc
@@ -2664,71 +2956,275 @@ export default function AIInputBox({
         updatedAt:   serverTimestamp(),
       })
 
-      toast.success(`${n} ${typeLabel} photo${n !== 1 ? 's' : ''} → RO #${roNumber}`)
-      rememberHistory(text)
-      setText(''); setImages([])
+      if (uploadUiIsCurrent()) {
+        toast.success(`${n} ${typeLabel} photo${n !== 1 ? 's' : ''} → RO #${roNumber}`)
+        rememberHistory(text)
+        setText(''); setImages([])
+      }
     } catch (err) {
       console.error('[AIInputBox] Direct upload failed:', err)
-      setError('Upload failed: ' + err.message)
+      setUploadError('Upload failed: ' + err.message)
     } finally {
-      setLoading(false)
-      setUploadProgress({ done: 0, total: 0 })
+      setUploadLoading(false)
+      setUploadStatus({ done: 0, total: 0 })
     }
   }
 
   // ── Submit: images → direct upload; text-only → AI parse ─────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (!draftHydratedForOwner) return
+    const submitLifecycle = { ...draftLifecycleRef.current }
+    const submitUiIsCurrent = () => isGibDraftLifecycleCurrent(draftLifecycleRef.current, submitLifecycle)
     if (!text.trim() && images.length === 0) return
+    if (submitInvocationRef.current) return
+    const submitInvocationToken = Symbol('gib-submit')
+    submitInvocationRef.current = submitInvocationToken
 
     // Images present → bypass AI entirely: regex RO# + auto-label + upload
     if (images.length > 0) {
-      await handleDirectImageUpload()
+      try {
+        await handleDirectImageUpload()
+      } finally {
+        if (submitInvocationRef.current === submitInvocationToken) submitInvocationRef.current = null
+      }
       return
     }
 
     // Text-only → Claude AI parsing
-    setLoading(true); setError(''); setResult(null); setApplied(false)
+    const requestText = text
+    const requestRevision = ++parseRequestRevision.current
+    const nextDraftNonce = createGibDraftNonce()
+    clearTimeout(reparseTimer.current)
+    activeReparseRevision.current = 0
+    setAutoReparseRequested(false)
+    setReparse(false)
+    setLoading(true); setError(''); setResult(null); setActions([]); setApplied(false)
+    setDraftNonce(nextDraftNonce)
+    setOperationAttempt(null)
+    actionRevision.current += 1
+    const requestActionRevision = actionRevision.current
     try {
       const key = await getApiKey()
-      if (!key) { setNoKey(true); setLoading(false); return }
-      const parsed = await parseShopInput({ text, ros, employees, images: [], sourceRole })
+      if (!key) {
+        if (submitUiIsCurrent()) { setNoKey(true); setLoading(false) }
+        return
+      }
+      const parsed = await parseShopInput({ text: requestText, ros, employees, images: [], sourceRole })
       if (parsed.raw) throw new Error('AI returned unexpected format. Please rephrase.')
-      setResult(prepareParsedResult(parsed, sourceRole, text, ros.map(ro => ro.roNumber)))
-      rememberHistory(text)
-      submittedText.current = text
+      if (!submitUiIsCurrent() || !shouldAcceptGibParseResponse({
+        requestRevision,
+        currentRequestRevision: parseRequestRevision.current,
+        requestActionRevision,
+        currentActionRevision: actionRevision.current,
+        requestText,
+        currentText: latestText.current,
+      })) return
+
+      const { resultMetadata, reviewedActions } = prepareReviewedPlan(
+        parsed,
+        sourceRole,
+        requestText,
+        ros.map(ro => ro.roNumber),
+        ros,
+        employees,
+      )
+      submittedText.current = requestText
+      setResult(resultMetadata)
+      setActions(reviewedActions)
+      actionRevision.current += 1
+      rememberHistory(requestText)
     } catch (err) {
+      if (!submitUiIsCurrent()) return
       if (err.message === 'NO_API_KEY')  { setNoKey(true); return }
       if (err.message === 'INVALID_KEY') { setError('API key is invalid. Please update it in Settings.'); return }
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (submitUiIsCurrent()) setLoading(false)
+      if (submitInvocationRef.current === submitInvocationToken) submitInvocationRef.current = null
     }
   }
 
   // ── Apply actions + upload images ─────────────────────────────────────────
   const handleApply = async () => {
+    if (!draftHydratedForOwner) return
+    const applyLifecycle = { ...draftLifecycleRef.current }
+    const applyUiIsCurrent = () => isGibDraftLifecycleCurrent(draftLifecycleRef.current, applyLifecycle)
+    const setApplyError = value => {
+      if (applyUiIsCurrent()) setError(value)
+    }
+    const setApplyApplying = value => {
+      if (applyUiIsCurrent()) setApplying(value)
+    }
     if (!actions.length && images.length === 0) return
+    if (reparsing || text.trim() !== submittedText.current.trim()) {
+      setApplyError('The input changed after these actions were generated. Wait for the updated actions before applying.')
+      return
+    }
     const invalidDateAction = actions.find(action => actionDateValidationError(action))
     if (invalidDateAction) {
       const roLabel = invalidDateAction.roNumber ? ` for RO #${invalidDateAction.roNumber}` : ''
-      setError(`${actionDateValidationError(invalidDateAction)}${roLabel}. Edit or remove that action before applying.`)
+      setApplyError(`${actionDateValidationError(invalidDateAction)}${roLabel}. Edit or remove that action before applying.`)
       return
     }
-    setError('')
-    setApplying(true)
+    if (['planning', 'committing'].includes(operationAttempt?.status)) {
+      setApplyError('This GIB draft is already being applied in another view. Wait for it to finish before verifying.')
+      return
+    }
+
+    const applyActions = JSON.parse(JSON.stringify(actions))
+    const submittedInput = submittedText.current || text
+    const priorUnconfirmedAttempt = operationAttempt?.status === 'unknown' ? operationAttempt : null
+    const publishFrozenAttempt = (attempt, { required = false } = {}) => {
+      if (!draftStorageKey || !user?.uid) {
+        if (required) throw new Error('The reviewed GIB draft could not be saved safely. Sign in again and resubmit it.')
+        return
+      }
+      const payload = {
+        schemaVersion: GIB_DRAFT_SCHEMA_VERSION,
+        ownerUid: user.uid,
+        surface: effectiveDraftScope,
+        text,
+        result,
+        actions: applyActions,
+        draftNonce,
+        submittedInput,
+        operationAttempt: attempt,
+      }
+      const serialized = JSON.stringify(payload)
+      try {
+        localStorage.setItem(draftStorageKey, serialized)
+      } catch (storageError) {
+        if (required) throw new Error(`The reviewed GIB draft could not be saved safely: ${storageError.message}`)
+        return
+      }
+      lastSharedPayload.current = serialized
+      window.dispatchEvent(new CustomEvent('gib-draft-update', {
+        detail: { key: draftStorageKey, source: instanceId.current, payload },
+      }))
+    }
+    const setSharedAttempt = (attempt, options) => {
+      if (applyUiIsCurrent()) {
+        operationAttemptRef.current = attempt
+        setOperationAttempt(attempt)
+      }
+      publishFrozenAttempt(attempt, options)
+    }
+    const unlockSharedAttempt = () => setSharedAttempt(null)
+    const releaseSharedAttempt = () => {
+      if (priorUnconfirmedAttempt) setSharedAttempt(priorUnconfirmedAttempt)
+      else unlockSharedAttempt()
+    }
+
+    if (applyInvocationRef.current) {
+      setApplyError('This GIB draft is already being applied. Wait for it to finish before trying again.')
+      return
+    }
+    const applyInvocationToken = Symbol('gib-apply')
+    applyInvocationRef.current = applyInvocationToken
+    setApplyError('')
+    setApplyApplying(true)
 
     // Outer guard: any throw in action-bucketing (Step 1/2) happens BEFORE the
     // inner try below, so without this the button would stay stuck on "Applying…".
     try {
+    const initialLock = priorUnconfirmedAttempt || {
+      status: 'planning',
+      draftNonce,
+      lockedAt: new Date().toISOString(),
+    }
+    setSharedAttempt(initialLock, { required: true })
     const stamp  = format(new Date(), 'MM/dd HH:mm')
     const author = employees.find(e => e.uid === user.uid)?.name ?? user.email
     const now    = new Date().toISOString()
-    const submittedInput = submittedText.current || text
+    const operationIdentity = await buildGibOperationIdentity({
+      draftNonce,
+      actorUid: user.uid,
+      sourceRole,
+      submittedInput,
+      actions: applyActions,
+    })
+    if (
+      priorUnconfirmedAttempt
+      && (
+        (priorUnconfirmedAttempt.operationId && priorUnconfirmedAttempt.operationId !== operationIdentity.operationId)
+        || (priorUnconfirmedAttempt.planFingerprint && priorUnconfirmedAttempt.planFingerprint !== operationIdentity.planFingerprint)
+      )
+    ) {
+      setApplyError('This draft changed while an earlier Apply is still unconfirmed. Restore the reviewed draft before verifying it.')
+      releaseSharedAttempt()
+      setApplyApplying(false)
+      return
+    }
+    setSharedAttempt({ ...operationIdentity, status: priorUnconfirmedAttempt ? 'unknown' : 'planning' }, { required: true })
+    const operationRef = doc(db, 'gibOperations', user.uid, 'operations', operationIdentity.operationId)
+
+    const completeApplyUi = ({ alreadyApplied = false, competingRevision = false, roRestores = [], taskRefs = [], taskRestores = [] } = {}) => {
+      if (!applyUiIsCurrent()) return
+      const allNums = [...new Set(applyActions.map(action => action.roNumber).filter(Boolean))]
+        .map(number => `#${number}`)
+        .join(', ')
+      if (alreadyApplied) {
+        toast.success(
+          competingRevision
+            ? 'Another view already applied this GIB draft. This stale version was not written.'
+            : 'This GIB update was already applied. No duplicate changes were written.',
+        )
+        setRecentApplied(null)
+      } else if (applyActions.length > 0) {
+        toast.success(`${applyActions.length} update${applyActions.length !== 1 ? 's' : ''} applied to RO ${allNums}`)
+        setRecentApplied({
+          at: new Date().toISOString(),
+          ownerUid: user.uid,
+          draftStorageKey,
+          operationId: operationIdentity.operationId,
+          summary: applyActions.map(actionSummary).slice(0, 4),
+          actionCount: applyActions.length,
+          roRestores,
+          taskRefs,
+          taskRestores,
+        })
+      }
+
+      setApplied(true)
+      setResult(null)
+      setActions([])
+      setText('')
+      latestText.current = ''
+      submittedText.current = ''
+      setDraftNonce('')
+      operationAttemptRef.current = null
+      setOperationAttempt(null)
+      setImages([])
+      actionRevision.current += 1
+      parseRequestRevision.current += 1
+      setTimeout(() => {
+        if (applyUiIsCurrent()) setApplied(false)
+      }, 2500)
+    }
+
+    try {
+      const existingOperation = await getDocFromServer(operationRef)
+      if (existingOperation.exists()) {
+        if (!operationLedgerMatches(existingOperation.data(), operationIdentity, user.uid)) {
+          completeApplyUi({ alreadyApplied: true, competingRevision: true })
+          setApplyError('')
+          setApplyApplying(false)
+          return
+        }
+        completeApplyUi({ alreadyApplied: true })
+        setApplyError('')
+        setApplyApplying(false)
+        return
+      }
+    } catch (preflightError) {
+      // A server read can fail transiently. The create-only ledger in the same
+      // atomic batch remains the authoritative duplicate-write guard.
+    }
 
     // Read task state before planning. No Firestore write is started until every
     // action has been resolved and the complete mutation plan has been validated.
-    const targetedRoIds = actions
+    const targetedRoIds = applyActions
       .map(action => resolveRoForAction(ros, action)?.id)
       .filter(Boolean)
     const taskCatalog = await loadTaskCatalog(targetedRoIds)
@@ -2748,8 +3244,17 @@ export default function AIInputBox({
       for (const k of Object.keys(data)) {
         if (data[k] !== undefined) clean[k] = data[k]
       }
-      const taskRef = doc(collection(db, 'tasks'))
-      const planned = { ref: taskRef, data: clean, isNew: true }
+      const operationTaskIndex = plannedTaskCreates.length
+      const taskRef = doc(db, 'tasks', gibTaskDocumentId(operationIdentity.operationId, operationTaskIndex))
+      const planned = {
+        ref: taskRef,
+        data: {
+          ...clean,
+          gibOperationId: operationIdentity.operationId,
+          gibOperationTaskIndex: operationTaskIndex,
+        },
+        isNew: true,
+      }
       plannedTaskCreates.push(planned)
       if (clean.roId) {
         const tasksForRo = taskCatalog.get(clean.roId) || []
@@ -2766,20 +3271,22 @@ export default function AIInputBox({
       return roMap.get(roDoc.id)
     }
 
-    for (const action of actions) {
+    for (const action of applyActions) {
       const roDoc = resolveRoForAction(ros, action)
       if (!roDoc) {
         if (action.type === 'assign_task') {
           const assignee = resolveActionAssignee(employees, action)
           if (!assignee) {
-            setError(`Could not match task assignee "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid employee name.`)
-            setApplying(false)
+            setApplyError(`Could not match task assignee "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid employee name.`)
+            releaseSharedAttempt()
+            setApplyApplying(false)
             return
           }
           const taskTitle = taskTitleFromAction(action, '').trim()
           if (!taskTitle) {
-            setError('A standalone task is missing its title. Edit or remove that action before applying.')
-            setApplying(false)
+            setApplyError('A standalone task is missing its title. Edit or remove that action before applying.')
+            releaseSharedAttempt()
+            setApplyApplying(false)
             return
           }
           addTask({
@@ -2798,8 +3305,9 @@ export default function AIInputBox({
             createdAt: serverTimestamp(),
           })
         } else {
-          setError(`Could not match RO #${action.roNumber || action.roId || 'Unknown'}. Edit or remove that action before applying.`)
-          setApplying(false)
+          setApplyError(`Could not match RO #${action.roNumber || action.roId || 'Unknown'}. Edit or remove that action before applying.`)
+          releaseSharedAttempt()
+          setApplyApplying(false)
           return
         }
         continue
@@ -2817,9 +3325,10 @@ export default function AIInputBox({
           break
         }
         case 'update_status': {
-          if (action.status === 'body_work' && !releaseHasBodyTech(roDoc, entry.fields, actions, employees)) {
-            setError(BODY_RELEASE_ERROR)
-            setApplying(false)
+          if (action.status === 'body_work' && !releaseHasBodyTech(roDoc, entry.fields, applyActions, employees)) {
+            setApplyError(BODY_RELEASE_ERROR)
+            releaseSharedAttempt()
+            setApplyApplying(false)
             return
           }
           entry.fields.status = action.status
@@ -2973,7 +3482,7 @@ export default function AIInputBox({
           if (entry.fields.partsStatus === 'all_received') {
             entry.fields['partsSubtasks.verifiedAllReceived'] = true
           }
-          const roActionText = sameRoActionText(actions, action.roNumber)
+          const roActionText = sameRoActionText(applyActions, action.roNumber)
           if (/\b(repair\s+parts?|body\s*\/?\s*painter|painter)\b.*\b(deliver|delivered|gave|handed|handoff|handed\s+off)\b|\b(deliver|delivered|gave|handed|handoff|handed\s+off)\b.*\b(repair\s+parts?|body\s*\/?\s*painter|painter)\b/i.test(roActionText)) {
             entry.fields['partsSubtasks.deliveredToRepair'] = true
           }
@@ -3024,7 +3533,7 @@ export default function AIInputBox({
           // Auto-add drop-off note if GIB didn't already include one for this RO.
           // For duplicates: note is still written if it contains new info (time detail etc.)
           // For non-duplicates: always add a note if GIB didn't provide one.
-          const hasDropoffNote = actions.some(a => a.type === 'add_note' && a.roNumber === action.roNumber)
+          const hasDropoffNote = applyActions.some(a => a.type === 'add_note' && a.roNumber === action.roNumber)
           if (!hasDropoffNote && !isDuplicate) {
             const autoNote = `[${stamp} - ${author}] Vehicle dropped off on ${action.dropOffDate}.`
             const prevNotes = entry.fields.notes ?? roDoc.notes ?? ''
@@ -3034,7 +3543,7 @@ export default function AIInputBox({
         }
         case 'update_due_date':
           {
-            const roActionText = sameRoActionText(actions, action.roNumber)
+            const roActionText = sameRoActionText(applyActions, action.roNumber)
             const orders = currentPartsOrders(roDoc, entry)
             const isPartsEtaUpdate = /\b(parts?|vendor|dealer|dealership|eta)\b/i.test(roActionText)
               && !looksLikeShopRepairEtaInput(roActionText)
@@ -3061,15 +3570,16 @@ export default function AIInputBox({
         case 'assign_body_man': {
           const assignee = resolveActionAssignee(employees, action, 'body_man')
           if (!assignee) {
-            setError(`Could not match body technician "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid body technician.`)
-            setApplying(false)
+            setApplyError(`Could not match body technician "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid body technician.`)
+            releaseSharedAttempt()
+            setApplyApplying(false)
             return
           }
           entry.fields.assignedBodyMan = assignee.uid
           entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
-          const actionInput = scopedInputForRo(submittedInput, action.roNumber, actions, ros)
-          const phase = bodyPhaseFromActionsForRo(actions, action.roNumber, actionInput)
-          const hasExplicitPrimaryBodyTask = actions.some(other =>
+          const actionInput = scopedInputForRo(submittedInput, action.roNumber, applyActions, ros)
+          const phase = bodyPhaseFromActionsForRo(applyActions, action.roNumber, actionInput)
+          const hasExplicitPrimaryBodyTask = applyActions.some(other =>
             other !== action
             && other.type === 'assign_task'
             && String(other.roNumber ?? '') === String(action.roNumber ?? '')
@@ -3101,8 +3611,9 @@ export default function AIInputBox({
         case 'assign_painter': {
           const assignee = resolveActionAssignee(employees, action, 'painter')
           if (!assignee) {
-            setError(`Could not match painter "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid painter.`)
-            setApplying(false)
+            setApplyError(`Could not match painter "${action.assigneeName || action.assigneeUid || ''}". Edit the suggested action and choose a valid painter.`)
+            releaseSharedAttempt()
+            setApplyApplying(false)
             return
           }
           entry.fields.assignedPainter = assignee.uid
@@ -3110,8 +3621,8 @@ export default function AIInputBox({
           break
         }
         case 'assign_task': {
-          const actionInput = scopedInputForRo(submittedInput, action.roNumber, actions, ros)
-          const roActionText = `${sameRoActionText(actions, action.roNumber)} ${actionInput}`
+          const actionInput = scopedInputForRo(submittedInput, action.roNumber, applyActions, ros)
+          const roActionText = `${sameRoActionText(applyActions, action.roNumber)} ${actionInput}`
           const contextPhase = bodyPhaseFromText(roActionText)
           const isSecondaryBodyTask = action.taskKind === 'secondary'
             || (!isExplicitPrimaryBodyTaskAction(action) && contextPhase && looksLikeSecondaryBodyTaskStrict(action, roActionText))
@@ -3122,13 +3633,15 @@ export default function AIInputBox({
             (isBodyTask || isSecondaryBodyTask) ? 'body_man' : null,
           )
           if (!assignee) {
-            setError(`Could not match task assignee "${action.assigneeName}". Edit the suggested action and choose a valid employee name.`)
-            setApplying(false)
+            setApplyError(`Could not match task assignee "${action.assigneeName}". Edit the suggested action and choose a valid employee name.`)
+            releaseSharedAttempt()
+            setApplyApplying(false)
             return
           }
           if ((isBodyTask || isSecondaryBodyTask) && assignee.role !== 'body_man') {
-            setError(`Body tasks can only be assigned to employees with the Body Technician role. "${assignee.name}" is ${assignee.role || 'not a body technician'}.`)
-            setApplying(false)
+            setApplyError(`Body tasks can only be assigned to employees with the Body Technician role. "${assignee.name}" is ${assignee.role || 'not a body technician'}.`)
+            releaseSharedAttempt()
+            setApplyApplying(false)
             return
           }
           const roDueDate  = roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null
@@ -3235,8 +3748,8 @@ export default function AIInputBox({
 
     for (const entry of roMap.values()) {
       const roDoc = entry.roDoc
-      const roInput = scopedInputForRo(submittedInput, roDoc.roNumber, actions, ros)
-      const roActionText = `${sameRoActionText(actions, roDoc.roNumber)} ${roInput}`.toLowerCase()
+      const roInput = scopedInputForRo(submittedInput, roDoc.roNumber, applyActions, ros)
+      const roActionText = `${sameRoActionText(applyActions, roDoc.roNumber)} ${roInput}`.toLowerCase()
       if (mentionsAuthorization(roActionText)) {
         entry.fields.customerAuthorized = true
       }
@@ -3247,9 +3760,10 @@ export default function AIInputBox({
         && partsAreActionable(partsStatus)
         && ['teardown', 'waiting_parts'].includes(currentStatus)
       if (shouldReleaseRepair) {
-        if (!releaseHasBodyTech(roDoc, entry.fields, actions, employees)) {
-          setError(BODY_RELEASE_ERROR)
-          setApplying(false)
+        if (!releaseHasBodyTech(roDoc, entry.fields, applyActions, employees)) {
+          setApplyError(BODY_RELEASE_ERROR)
+          releaseSharedAttempt()
+          setApplyApplying(false)
           return
         }
         entry.fields.status = 'body_work'
@@ -3280,12 +3794,25 @@ export default function AIInputBox({
 
     const taskRestores = [...taskUpdates.values()].map(({ ref, restoreFields }) => ({ ref, fields: restoreFields }))
     const createdTaskRefs = plannedTaskCreates.map(item => item.ref)
-    const writeCount = roMap.size + plannedTaskCreates.length + taskUpdates.size
-    if (writeCount > 450) {
-      throw new Error(`This update needs ${writeCount} database writes, which is too large for one safe Apply. Split it into smaller updates.`)
-    }
+    const businessWriteCount = roMap.size + plannedTaskCreates.length + taskUpdates.size
+    const writeCount = businessWriteCount + 1 // immutable operation ledger
+    const limitError = gibOperationLimitError({ actions: applyActions, targetRoIds: targetedRoIds, writeCount })
+    if (limitError) throw new Error(limitError)
 
     const batch = writeBatch(db)
+    batch.set(operationRef, {
+      kind: 'gib_apply',
+      operationId: operationIdentity.operationId,
+      ownerUid: user.uid,
+      planFingerprint: operationIdentity.planFingerprint,
+      schemaVersion: operationIdentity.schemaVersion,
+      sourceRole: sourceRole || '',
+      actionCount: applyActions.length,
+      writeCount,
+      targetRoIds: [...new Set(targetedRoIds)],
+      createdTaskIds: plannedTaskCreates.map(item => item.ref.id),
+      committedAt: serverTimestamp(),
+    })
     for (const { roDoc, fields, changeLogEntries } of roMap.values()) {
       const updates = { ...fields }
       if (changeLogEntries.length) updates.changeLog = arrayUnion(...changeLogEntries)
@@ -3295,79 +3822,177 @@ export default function AIInputBox({
     taskUpdates.forEach(item => batch.update(item.ref, item.fields))
 
     // ── Step 3: one commit — either every mutation succeeds or none do ────────
+    setSharedAttempt({ ...operationIdentity, status: 'committing' }, { required: true })
     try {
       await awaitAtomicCommit(batch.commit(), () => {
-        setError('Apply is still being committed. Do not retry or refresh until it finishes.')
+        setApplyError('Apply is still being committed. Do not retry or refresh until it finishes.')
       })
-      setError('')
-
-      // ── Toasts ──────────────────────────────────────────────────────────────
-      if (actions.length > 0) {
-        const allNums = [...new Set(actions.map(a => a.roNumber).filter(Boolean))].map(n => `#${n}`).join(', ')
-        toast.success(`${actions.length} update${actions.length !== 1 ? 's' : ''} applied to RO ${allNums}`)
-      }
-
-      setApplied(true)
-      setRecentApplied({
-        at: new Date().toISOString(),
-        summary: actions.map(actionSummary).slice(0, 4),
-        actionCount: actions.length,
-        roRestores,
-        taskRefs: createdTaskRefs,
-        taskRestores,
-      })
-      setResult(null)
-      setActions([])
-      setText('')
-      setImages([])
-      setTimeout(() => setApplied(false), 2500)
+      setApplyError('')
+      completeApplyUi({ roRestores, taskRefs: createdTaskRefs, taskRestores })
     } catch (err) {
       console.error('[handleApply]', err)
-      setError('Apply failed: ' + err.message)
+      try {
+        const committedOperation = await getDocFromServer(operationRef)
+        if (committedOperation.exists()) {
+          if (!operationLedgerMatches(committedOperation.data(), operationIdentity, user.uid)) {
+            setApplyError('')
+            completeApplyUi({ alreadyApplied: true, competingRevision: true })
+          } else {
+            setApplyError('')
+            completeApplyUi({ alreadyApplied: true })
+          }
+        } else {
+          setSharedAttempt({ ...operationIdentity, status: 'failed' })
+          setApplyError('Apply failed before the safety record was committed. You can retry this same reviewed draft. ' + err.message)
+        }
+      } catch (confirmationError) {
+        setSharedAttempt({ ...operationIdentity, status: 'unknown' })
+        setApplyError('Apply result could not be confirmed. Keep this draft unchanged and use Apply again to verify it before retrying. ' + confirmationError.message)
+      }
     } finally {
-      setApplying(false)   // ALWAYS unblock the button, even on error
+      setApplyApplying(false)   // ALWAYS unblock the current draft button, even on error
     }
     } catch (err) {
       // Catches throws from Step 1/2 (action bucketing) that escape the inner try.
       console.error('[handleApply:outer]', err)
-      setError('Apply failed: ' + err.message)
-      setApplying(false)
+      if (priorUnconfirmedAttempt) {
+        setSharedAttempt(priorUnconfirmedAttempt)
+        setApplyError('Apply verification failed. The original attempt remains locked; use Verify Apply again when the connection is available. ' + err.message)
+      } else {
+        unlockSharedAttempt()
+        setApplyError('Apply failed: ' + err.message)
+      }
+      setApplyApplying(false)
+    } finally {
+      if (applyInvocationRef.current === applyInvocationToken) applyInvocationRef.current = null
     }
   }
 
-  const canSubmit = (text.trim() || images.length > 0) && !loading && !applying && !isTranscribing
+  const planIsStale = isGibPlanStale(actions, text, submittedText.current)
+  const draftLocked = isGibDraftMutationLocked(operationAttempt)
+  const applyInProgressElsewhere = ['planning', 'committing'].includes(operationAttempt?.status)
+  const canApply = actions.length > 0
+    && draftHydratedForOwner
+    && !applying
+    && !applyInProgressElsewhere
+    && !reparsing
+    && !planIsStale
+  const canSubmit = (text.trim() || images.length > 0)
+    && draftHydratedForOwner
+    && !loading
+    && !applying
+    && !isTranscribing
+    && !draftLocked
+
+  const updateActionAt = (index, updated) => {
+    if (reparsing || draftLocked) return
+    clearTimeout(reparseTimer.current)
+    activeReparseRevision.current = 0
+    setAutoReparseRequested(false)
+    setReparse(false)
+    parseRequestRevision.current += 1
+    actionRevision.current += 1
+    setOperationAttempt(null)
+    setActions(prev => prev.map((action, actionIndex) => actionIndex === index ? updated : action))
+  }
+
+  const deleteActionAt = (index) => {
+    if (reparsing || draftLocked) return
+    clearTimeout(reparseTimer.current)
+    activeReparseRevision.current = 0
+    setAutoReparseRequested(false)
+    setReparse(false)
+    parseRequestRevision.current += 1
+    actionRevision.current += 1
+    setOperationAttempt(null)
+    setActions(prev => prev.filter((_, actionIndex) => actionIndex !== index))
+  }
+
+  const clearDraft = () => {
+    if (applying || reparsing || draftLocked) return
+    clearTimeout(reparseTimer.current)
+    activeReparseRevision.current = 0
+    setAutoReparseRequested(false)
+    setReparse(false)
+    parseRequestRevision.current += 1
+    actionRevision.current += 1
+    submittedText.current = ''
+    latestText.current = text
+    setResult(null)
+    setActions([])
+    setDraftNonce('')
+    setOperationAttempt(null)
+    setImages([])
+  }
+
   const mentionCandidates = useMemo(() => buildMentionCandidates(employees, []), [employees])
   const reviewGroups = useMemo(() => groupActionsForPreview(actions, ros), [actions, ros])
+  const recentAppliedForOwner = recentApplied?.ownerUid === user?.uid
+    && recentApplied?.draftStorageKey === draftStorageKey
+    ? recentApplied
+    : null
   const visibleClarification = result?.needsClarification
-    && !shouldHideResolvedBodyTechClarification(result.needsClarification, result.actions || [], submittedText.current || text, ros, employees)
+    && !shouldHideResolvedBodyTechClarification(result.needsClarification, actions, submittedText.current || text, ros, employees)
     ? result.needsClarification
     : ''
 
   const handleUndoRecent = async () => {
-    if (!recentApplied || undoing) return
+    if (!draftHydratedForOwner || !recentAppliedForOwner || undoing || undoInvocationRef.current) return
+    const undoSnapshot = recentAppliedForOwner
+    const undoLifecycle = { ...draftLifecycleRef.current }
+    const undoUiIsCurrent = () => isGibDraftLifecycleCurrent(draftLifecycleRef.current, undoLifecycle)
+    const undoInvocationToken = Symbol('gib-undo')
+    undoInvocationRef.current = undoInvocationToken
     setUndoing(true)
     setError('')
     try {
       const batch = writeBatch(db)
-      recentApplied.roRestores.forEach(item => batch.update(doc(db, 'ros', item.roId), {
+      undoSnapshot.roRestores.forEach(item => batch.update(doc(db, 'ros', item.roId), {
         ...item.fields,
         ...(item.changeLogEntries?.length ? { changeLog: arrayRemove(...item.changeLogEntries) } : {}),
         updatedAt: serverTimestamp(),
       }))
-      recentApplied.taskRefs.forEach(ref => batch.delete(ref))
-      const taskRestores = recentApplied.taskRestores || []
+      undoSnapshot.taskRefs.forEach(ref => batch.delete(ref))
+      const taskRestores = undoSnapshot.taskRestores || []
       taskRestores.forEach(item => batch.update(item.ref, item.fields))
       await awaitAtomicCommit(batch.commit(), () => {
-        setError('Undo is still being committed. Do not retry or refresh until it finishes.')
+        if (undoUiIsCurrent()) setError('Undo is still being committed. Do not retry or refresh until it finishes.')
       })
-      setError('')
-      toast.success('Last GIB update undone')
-      setRecentApplied(null)
+      if (undoUiIsCurrent()) {
+        setError('')
+        toast.success('Last GIB update undone')
+        setRecentApplied(null)
+      }
     } catch (err) {
-      setError('Undo failed: ' + err.message)
+      if (undoUiIsCurrent()) setError('Undo failed: ' + err.message)
     } finally {
-      setUndoing(false)
+      if (undoUiIsCurrent()) setUndoing(false)
+      if (undoInvocationRef.current === undoInvocationToken) undoInvocationRef.current = null
     }
+  }
+
+  const schedulePhotoAction = action => {
+    const photoLifecycle = { ...draftLifecycleRef.current }
+    setShowPhotoSheet(false)
+    clearTimeout(photoActionTimerRef.current)
+    if (isGibDraftMutationLocked(operationAttemptRef.current)) return
+    photoActionTimerRef.current = setTimeout(() => {
+      photoActionTimerRef.current = null
+      if (!isGibDraftLifecycleCurrent(draftLifecycleRef.current, photoLifecycle)) return
+      if (isGibDraftMutationLocked(operationAttemptRef.current)) return
+      action()
+    }, 50)
+  }
+
+  if (!draftHydratedForOwner) {
+    return (
+      <div
+        aria-busy="true"
+        className="rounded-xl border border-gray-200 bg-white/80 px-4 py-3 text-sm text-gray-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400"
+      >
+        Loading Quick Update…
+      </div>
+    )
   }
 
   if (compact) {
@@ -3375,14 +4000,17 @@ export default function AIInputBox({
       <>
         {showPhotoSheet && (
           <PhotoSheet
-            onCamera={() => { setShowPhotoSheet(false); setTimeout(() => setShowCamera(true), 50) }}
-            onLibrary={() => { setShowPhotoSheet(false); setTimeout(() => fileInputRef.current?.click(), 50) }}
+            onCamera={() => schedulePhotoAction(() => setShowCamera(true))}
+            onLibrary={() => schedulePhotoAction(() => fileInputRef.current?.click())}
             onClose={() => setShowPhotoSheet(false)}
           />
         )}
         {showCamera && (
           <CameraModal
-            onDone={(shots) => { setImages(prev => [...prev, ...shots]); setShowCamera(false) }}
+            onDone={(shots) => {
+              if (!isGibDraftMutationLocked(operationAttemptRef.current)) setImages(prev => [...prev, ...shots])
+              setShowCamera(false)
+            }}
             onClose={() => setShowCamera(false)}
           />
         )}
@@ -3394,7 +4022,7 @@ export default function AIInputBox({
             </div>
             <MentionTextarea
               value={text}
-              onChange={e => setText(e.target.value)}
+              onChange={e => { setAutoReparseRequested(true); latestText.current = e.target.value; setText(e.target.value) }}
               candidates={mentionCandidates}
               dropdownPlacement="inside"
               onKeyDown={e => {
@@ -3406,12 +4034,12 @@ export default function AIInputBox({
               placeholder={compactPlaceholder}
               rows={1}
               className="h-[44px] min-h-[44px] w-full resize-none overflow-hidden rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm leading-7 text-gray-900 placeholder-gray-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-gray-100 dark:placeholder-zinc-600"
-              disabled={loading || applying}
+              disabled={loading || applying || draftLocked}
             />
             <button
               type="button"
               onClick={toggleVoice}
-              disabled={isTranscribing}
+              disabled={isTranscribing || (draftLocked && !listening)}
               title="Voice"
               className={`flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-lg border transition-colors ${
                 listening
@@ -3429,6 +4057,7 @@ export default function AIInputBox({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
+              disabled={draftLocked}
               title="Photos"
               className="relative flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-lg border border-gray-300 bg-white text-gray-500 transition-colors hover:border-blue-400 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
             >
@@ -3446,8 +4075,8 @@ export default function AIInputBox({
             >
               {loading ? 'Parsing...' : applying ? 'Applying...' : images.length > 0 ? 'Upload' : 'Submit'}
             </button>
-            <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileChange} />
-            <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileChange} />
+            <input ref={fileInputRef} type="file" accept="image/*" multiple disabled={draftLocked} className="hidden" onChange={handleFileChange} />
+            <input ref={cameraRef} type="file" accept="image/*" capture="environment" disabled={draftLocked} className="hidden" onChange={handleFileChange} />
           </form>
 
           {images.length > 0 && (
@@ -3455,7 +4084,7 @@ export default function AIInputBox({
               {images.map((img, i) => (
                 <div key={i} className="relative h-12 w-12 overflow-hidden rounded-lg border border-blue-200 dark:border-blue-900">
                   <img src={img.preview} alt={img.name} className="h-full w-full object-cover" />
-                  <button type="button" onClick={() => removeImage(i)} className="absolute inset-0 flex items-center justify-center bg-black/60 text-white opacity-0 transition-opacity hover:opacity-100">
+                  <button type="button" onClick={() => removeImage(i)} disabled={draftLocked} className="absolute inset-0 flex items-center justify-center bg-black/60 text-white opacity-0 transition-opacity hover:opacity-100">
                     <IconX2 />
                   </button>
                 </div>
@@ -3464,6 +4093,9 @@ export default function AIInputBox({
           )}
 
           {error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+          {planIsStale && (
+            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">Input changed — waiting for refreshed actions before Apply.</p>
+          )}
           {visibleClarification && (
             <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
               ? {result.needsClarification}
@@ -3474,15 +4106,15 @@ export default function AIInputBox({
               <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-zinc-400">
                 {actions.length} action{actions.length > 1 ? 's' : ''} to confirm
               </p>
-              <div className="max-h-[42vh] overflow-y-auto pr-1">
+              <div className={`max-h-[42vh] overflow-y-auto pr-1 ${reparsing || draftLocked ? 'pointer-events-none opacity-60' : ''}`}>
                 {reviewGroups.map(group => (
                   <ActionReviewGroup
                     key={group.key}
                     group={group}
                     employees={employees}
                     ros={ros}
-                    onChangeAt={(idx, updated) => setActions(prev => prev.map((a, i) => i === idx ? updated : a))}
-                    onDeleteAt={(idx) => setActions(prev => prev.filter((_, i) => i !== idx))}
+                    onChangeAt={updateActionAt}
+                    onDeleteAt={deleteActionAt}
                   />
                 ))}
               </div>
@@ -3490,14 +4122,15 @@ export default function AIInputBox({
                 <button
                   type="button"
                   onClick={handleApply}
-                  disabled={applying || actions.length === 0}
+                  disabled={!canApply}
                   className="rounded-lg bg-green-600 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-50"
                 >
-                  {applying ? 'Applying...' : `Apply ${actions.length}`}
+                  {applying || applyInProgressElsewhere ? 'Applying...' : operationAttempt?.status === 'unknown' ? 'Verify Apply' : `Apply ${actions.length}`}
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setResult(null); setActions([]); setImages([]) }}
+                  onClick={clearDraft}
+                  disabled={applying || reparsing || draftLocked}
                   className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
                 >
                   Cancel
@@ -3519,14 +4152,17 @@ export default function AIInputBox({
     <>
     {showPhotoSheet && (
       <PhotoSheet
-        onCamera={() => { setShowPhotoSheet(false); setTimeout(() => setShowCamera(true), 50) }}
-        onLibrary={() => { setShowPhotoSheet(false); setTimeout(() => fileInputRef.current?.click(), 50) }}
+        onCamera={() => schedulePhotoAction(() => setShowCamera(true))}
+        onLibrary={() => schedulePhotoAction(() => fileInputRef.current?.click())}
         onClose={() => setShowPhotoSheet(false)}
       />
     )}
     {showCamera && (
       <CameraModal
-        onDone={(shots) => { setImages(prev => [...prev, ...shots]); setShowCamera(false) }}
+        onDone={(shots) => {
+          if (!isGibDraftMutationLocked(operationAttemptRef.current)) setImages(prev => [...prev, ...shots])
+          setShowCamera(false)
+        }}
         onClose={() => setShowCamera(false)}
       />
     )}
@@ -3543,6 +4179,7 @@ export default function AIInputBox({
         <button
           type="button"
           onClick={() => setShowHistory(v => !v)}
+          disabled={draftLocked}
           className={`shrink-0 p-1.5 rounded-lg border text-xs transition-colors ${
             showHistory
               ? 'bg-blue-50 border-blue-300 text-blue-600 dark:bg-blue-950/40 dark:border-blue-700 dark:text-blue-300'
@@ -3561,9 +4198,10 @@ export default function AIInputBox({
             <button
               type="button"
               onClick={() => {
-                localStorage.removeItem(GIB_HISTORY_KEY)
+                if (historyStorageKey) localStorage.removeItem(historyStorageKey)
                 setHistory([])
               }}
+              disabled={draftLocked}
               className="text-xs text-gray-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400"
             >
               Clear
@@ -3578,6 +4216,7 @@ export default function AIInputBox({
                   key={`${idx}-${item}`}
                   type="button"
                   onClick={() => useHistoryItem(item)}
+                  disabled={draftLocked}
                   className="w-full rounded-lg px-2.5 py-2 text-left text-xs text-gray-700 dark:text-zinc-200 hover:bg-gray-50 dark:hover:bg-zinc-800"
                 >
                   <span className="line-clamp-2">{item}</span>
@@ -3597,6 +4236,7 @@ export default function AIInputBox({
               <button
                 type="button"
                 onClick={() => removeImage(i)}
+                disabled={draftLocked}
                 className="absolute inset-0 bg-black/60 text-white opacity-0 group-hover:opacity-100 active:opacity-100 transition-opacity flex items-center justify-center"
               >
                 <IconX2 />
@@ -3610,7 +4250,7 @@ export default function AIInputBox({
         {/* ── Textarea ─────────────────────────────────────────────────── */}
         <MentionTextarea
           value={text}
-          onChange={e => setText(e.target.value)}
+          onChange={e => { setAutoReparseRequested(true); latestText.current = e.target.value; setText(e.target.value) }}
           candidates={mentionCandidates}
           dropdownPlacement="inside"
           onKeyDown={e => {
@@ -3624,7 +4264,7 @@ export default function AIInputBox({
             : fullPlaceholder}
           rows={4}
           className="w-full min-h-[118px] px-4 py-3 mb-3 border border-gray-200 dark:border-zinc-700 rounded-xl text-base sm:text-sm leading-relaxed bg-gray-50 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-zinc-800 resize-none transition-colors"
-          disabled={loading || applying}
+          disabled={loading || applying || draftLocked}
         />
 
         {/* ── Mobile button layout ──────────────────────────────────────── */}
@@ -3635,7 +4275,7 @@ export default function AIInputBox({
             <button
               type="button"
               onClick={toggleVoice}
-              disabled={isTranscribing}
+              disabled={isTranscribing || (draftLocked && !listening)}
               className={`flex items-center justify-center gap-2.5 h-12 rounded-xl border text-sm font-semibold transition-all active:scale-95
                 ${listening
                   ? 'bg-red-500 border-red-400 text-white'
@@ -3676,6 +4316,7 @@ export default function AIInputBox({
             <button
               type="button"
               onClick={() => setShowPhotoSheet(true)}
+              disabled={draftLocked}
               className="relative flex items-center justify-center gap-2.5 h-12 rounded-xl border bg-gray-50 border-gray-200 dark:bg-zinc-800 dark:border-zinc-700 text-gray-600 dark:text-zinc-300 text-sm font-semibold transition-all active:scale-95"
             >
               <IconImage cls="w-5 h-5" />
@@ -3708,7 +4349,7 @@ export default function AIInputBox({
           <button
             type="button"
             onClick={toggleVoice}
-            disabled={isTranscribing}
+            disabled={isTranscribing || (draftLocked && !listening)}
             className={`flex items-center justify-center px-2.5 py-2 rounded-lg border transition-colors shrink-0
               ${listening
                 ? 'bg-red-500 border-red-500 text-white'
@@ -3725,6 +4366,7 @@ export default function AIInputBox({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
+            disabled={draftLocked}
             className="relative flex items-center justify-center px-2.5 py-2 rounded-lg border border-gray-300 dark:border-zinc-700 text-gray-500 dark:text-zinc-400 hover:border-blue-400 hover:text-blue-600 bg-white dark:bg-zinc-800 transition-colors shrink-0"
           >
             <IconImage />
@@ -3759,9 +4401,9 @@ export default function AIInputBox({
         </div>
 
         {/* Gallery picker — multiple select */}
-        <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileChange} />
+        <input ref={fileInputRef} type="file" accept="image/*" multiple disabled={draftLocked} className="hidden" onChange={handleFileChange} />
         {/* Camera capture — opens native camera directly, reset after each shot for re-use */}
-        <input ref={cameraRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileChange} />
+        <input ref={cameraRef} type="file" accept="image/*" capture="environment" disabled={draftLocked} className="hidden" onChange={handleFileChange} />
       </form>
 
       {noKey && (
@@ -3772,6 +4414,9 @@ export default function AIInputBox({
       )}
 
       {error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+      {planIsStale && (
+        <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">Input changed — waiting for refreshed actions before Apply.</p>
+      )}
 
       {result?.translation && (
         <div className="mt-3 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 rounded px-3 py-1.5">
@@ -3800,26 +4445,29 @@ export default function AIInputBox({
               </span>
             )}
           </p>
-          {reviewGroups.map(group => (
-            <ActionReviewGroup
-              key={group.key}
-              group={group}
-              employees={employees}
-              ros={ros}
-              onChangeAt={(idx, updated) => setActions(prev => prev.map((a, i) => i === idx ? updated : a))}
-              onDeleteAt={(idx) => setActions(prev => prev.filter((_, i) => i !== idx))}
-            />
-          ))}
+          <div className={`space-y-2 ${reparsing || draftLocked ? 'pointer-events-none opacity-60' : ''}`}>
+            {reviewGroups.map(group => (
+              <ActionReviewGroup
+                key={group.key}
+                group={group}
+                employees={employees}
+                ros={ros}
+                onChangeAt={updateActionAt}
+                onDeleteAt={deleteActionAt}
+              />
+            ))}
+          </div>
           <div className="flex gap-2 pt-1">
             <button
               onClick={handleApply}
-              disabled={applying || actions.length === 0}
+              disabled={!canApply}
               className="px-4 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
             >
-              {applying ? 'Applying…' : `✓ Apply ${actions.length} Action${actions.length !== 1 ? 's' : ''}`}
+              {applying || applyInProgressElsewhere ? 'Applying…' : operationAttempt?.status === 'unknown' ? 'Verify Apply' : `✓ Apply ${actions.length} Action${actions.length !== 1 ? 's' : ''}`}
             </button>
             <button
-              onClick={() => { setResult(null); setActions([]); setImages([]) }}
+              onClick={clearDraft}
+              disabled={applying || reparsing || draftLocked}
               className="px-3 py-1.5 border border-gray-300 dark:border-zinc-700 text-gray-600 dark:text-zinc-400 text-sm rounded-lg hover:bg-gray-50 dark:hover:bg-zinc-800"
             >
               Cancel
@@ -3834,19 +4482,19 @@ export default function AIInputBox({
         </div>
       )}
 
-      {recentApplied && !actions.length && (
+      {recentAppliedForOwner && !actions.length && (
         <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-900/70">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="text-xs font-semibold text-gray-700 dark:text-zinc-200">
-                Recently applied · {recentApplied.actionCount} action{recentApplied.actionCount === 1 ? '' : 's'}
+                Recently applied · {recentAppliedForOwner.actionCount} action{recentAppliedForOwner.actionCount === 1 ? '' : 's'}
               </p>
               <div className="mt-1 space-y-0.5">
-                {recentApplied.summary.map((item, idx) => (
+                {recentAppliedForOwner.summary.map((item, idx) => (
                   <p key={`${idx}-${item}`} className="truncate text-xs text-gray-500 dark:text-zinc-400">- {item}</p>
                 ))}
-                {recentApplied.actionCount > recentApplied.summary.length && (
-                  <p className="text-xs text-gray-400 dark:text-zinc-500">+ {recentApplied.actionCount - recentApplied.summary.length} more</p>
+                {recentAppliedForOwner.actionCount > recentAppliedForOwner.summary.length && (
+                  <p className="text-xs text-gray-400 dark:text-zinc-500">+ {recentAppliedForOwner.actionCount - recentAppliedForOwner.summary.length} more</p>
                 )}
               </div>
             </div>

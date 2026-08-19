@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-19 - Codex** Added durable per-draft GIB operation ledgers, deterministic task IDs, idempotent retry verification, and owner-scoped async draft lifecycle protection. → [session below](#session-august-19-2026-codex--gib-idempotent-apply-safety)
 - **2026-08-19 - Codex** Made GIB Apply and Undo validate-first atomic Firestore batches so failures cannot leave partial RO or task changes. → [session below](#session-august-19-2026-codex--gib-atomic-apply-and-undo)
 - **2026-08-19 - Codex** Made visible GIB action RO and assignee fields authoritative so stale hidden IDs cannot redirect writes or assignments. → [session below](#session-august-19-2026-codex--gib-action-identity-safety)
 - **2026-08-19 - Codex** Added strict, vendor-scoped GIB calendar validation and blocked invalid target, drop-off, and parts dates before Apply. → [session below](#session-august-19-2026-codex--gib-strict-date-validation)
@@ -136,6 +137,43 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 19, 2026 (Codex) — GIB Idempotent Apply Safety
+
+**Status:** Implemented, red-teamed, and verified on the isolated Draft PR branch. Not deployed to production.
+
+Changed:
+- Added one stable nonce-backed operation ID per reviewed draft plus a SHA-256 plan fingerprint; edited revisions of the same draft now contend for the same immutable safety record instead of becoming independently valid retries.
+- Added an owner-scoped, create-only `gibOperations/{uid}/operations/{operationId}` ledger written in the same atomic batch as every RO/task mutation. A retry, second tab, double click, or lost acknowledgement can verify the ledger without duplicating notes, receipt increments, returns, or tasks.
+- Made GIB-created task document IDs deterministic per operation and enforced client/rules limits of 449 actions, 100 target ROs, and 450 total writes including the ledger.
+- Added explicit outcomes for already-applied plans, competing stale revisions, failed-before-commit attempts, and unconfirmed commits; unknown attempts stay locked until the same reviewed draft is verified.
+- Replaced executable actions inside display metadata with one reviewed action plan, rejected stale parse responses, froze Apply input/actions, and transferred sticky RO Board reparse ownership to the stable full GIB instance.
+- Scoped draft and history storage by Firebase project, user UID, and GIB surface. Hydration now uses render-stable owner keys, clears transient state, and blocks rendering, Submit, Apply, and Undo until the current owner is loaded.
+- Added owner/key/generation lifecycle guards for late Apply, Undo, AI parse, voice transcription, image compression/upload UI, camera/library timers, and camera media streams; callbacks from an old account or surface cannot clear or overwrite the current draft.
+- Added synchronous invocation locks for Apply, Submit, and Undo so same-tick double clicks cannot start parallel UI operations.
+
+Firestore rule assessment for the new ledger path:
+- Owner/manager `get` only; `list`, `update`, and `delete` are denied.
+- Create requires the authenticated owner path, exact allowed fields, bounded counts/lists/strings, a 64-character hex fingerprint, schema version 1, and `committedAt == request.time`.
+- Existing broader project rules were intentionally left unchanged for the later security phase requested by the owner.
+
+Verification:
+- `npm.cmd run test:gib-scope` — 79/79 passing.
+- `npm.cmd run test:parts-parser` — 24/24 passing.
+- `npm.cmd run build` — production build succeeded; only the existing large-chunk warning remains; final asset `index-Cw9WaEbC.js`.
+- Local Vite preview — `/` and `/assets/index-Cw9WaEbC.js` both returned HTTP 200.
+- Firebase CLI rules dry-run — `firestore.rules` compiled successfully; no deployment was performed.
+- Two independent sub-agent release gates — PASS, with no remaining reproducible P0/P1 findings.
+
+Deferred to the next isolated step:
+- Transaction/revision protection against two different legitimate drafts updating the same RO/task from stale snapshots.
+- Durable, concurrency-aware Undo after refresh or another user's later edit.
+- Mounted React/StrictMode deferred-promise tests, Firestore emulator runtime rule tests, camera preview URL cleanup, and cancellation of an upload already in flight after an account/surface switch.
+
+Deployment:
+- No Firebase deploy was run; the live site remained unchanged while staff were using it.
 
 ---
 

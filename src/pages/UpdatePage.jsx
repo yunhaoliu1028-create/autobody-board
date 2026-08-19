@@ -20,7 +20,7 @@ export default function UpdatePage() {
 
   return (
     <div className="pb-4">
-      <AIInputBox ros={ros} employees={employees} />
+      <AIInputBox ros={ros} employees={employees} draftScope="update-page" />
     </div>
   )
 }

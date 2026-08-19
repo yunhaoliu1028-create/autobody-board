@@ -1422,6 +1422,7 @@ export default function TaskBoard() {
             ros={ros}
             employees={employeeRows}
             sourceRole={role}
+            draftScope="task-board"
           />
         </div>
       )}

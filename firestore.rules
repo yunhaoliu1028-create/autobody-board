@@ -62,6 +62,50 @@ service cloud.firestore {
       allow delete: if isAuth() && isManager();
     }
 
+    // ── Immutable GIB operation ledger ──────────────────────────────────────
+    // This create-only sentinel is committed in the same atomic batch as the
+    // RO/task changes. A repeated operation ID therefore makes the entire
+    // duplicate batch fail instead of applying notes/parts/tasks twice.
+    match /gibOperations/{uid}/operations/{operationId} {
+      allow get: if isAuth() && (request.auth.uid == uid || isManager());
+      allow list: if false;
+      allow create: if isAuth()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasAll([
+          'kind', 'operationId', 'ownerUid', 'planFingerprint',
+          'schemaVersion', 'sourceRole', 'actionCount', 'writeCount',
+          'targetRoIds', 'createdTaskIds', 'committedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'kind', 'operationId', 'ownerUid', 'planFingerprint',
+          'schemaVersion', 'sourceRole', 'actionCount', 'writeCount',
+          'targetRoIds', 'createdTaskIds', 'committedAt'
+        ])
+        && request.resource.data.kind == 'gib_apply'
+        && request.resource.data.operationId == operationId
+        && request.resource.data.operationId is string
+        && request.resource.data.operationId.size() >= 30
+        && request.resource.data.operationId.size() <= 120
+        && request.resource.data.ownerUid == uid
+        && request.resource.data.planFingerprint is string
+        && request.resource.data.planFingerprint.matches('^[0-9a-f]{64}$')
+        && request.resource.data.schemaVersion == 1
+        && request.resource.data.sourceRole is string
+        && request.resource.data.sourceRole.size() <= 64
+        && request.resource.data.actionCount is int
+        && request.resource.data.actionCount >= 1
+        && request.resource.data.actionCount <= 449
+        && request.resource.data.writeCount is int
+        && request.resource.data.writeCount >= 1
+        && request.resource.data.writeCount <= 450
+        && request.resource.data.targetRoIds is list
+        && request.resource.data.targetRoIds.size() <= 100
+        && request.resource.data.createdTaskIds is list
+        && request.resource.data.createdTaskIds.size() <= 449
+        && request.resource.data.committedAt == request.time;
+      allow update, delete: if false;
+    }
+
     // ── Chat conversations ────────────────────────────────────────────────────
     match /conversations/{convoId} {
       allow read: if isAuth() && request.auth.uid in resource.data.members;

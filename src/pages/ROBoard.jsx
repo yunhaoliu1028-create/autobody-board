@@ -1854,6 +1854,7 @@ export default function ROBoard() {
         <AIInputBox
           ros={ros}
           employees={employeeList}
+          autoReparseOwner
           sharedDraftKey="ro-board-gib-draft"
           compactSubtitle="RO updates / parts / tasks"
           compactPlaceholder="Quick RO update, e.g. RO9448 dropped off, rental, parts ETA, status..."
@@ -1866,6 +1867,7 @@ export default function ROBoard() {
             ros={ros}
             employees={employeeList}
             compact
+            autoReparseOwner={false}
             sharedDraftKey="ro-board-gib-draft"
             compactSubtitle="RO updates / parts / tasks"
             compactPlaceholder="Quick RO update, e.g. RO9448 dropped off, rental, parts ETA, status..."
