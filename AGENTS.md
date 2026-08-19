@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-19 - Codex** Isolated GIB inference, workflow normalization, and parts fallback parsing by RO scope to prevent multi-RO context leakage. → [session below](#session-august-19-2026-codex--gib-per-ro-scope-isolation)
 - **2026-08-18 - Codex** Hardened GIB parts-order parsing against received-order false positives, vendor/date contamination, and weaker duplicate actions, then deployed it to Firebase Hosting. → [session below](#session-august-18-2026-codex--gib-parts-order-parser-hardening)
 - **2026-07-01 - Codex** Simplified the Production Board revenue card controls with a single month title dropdown and a three-dot actions menu.
 - **2026-07-01 - Codex** Added Production Board month-selectable revenue and CCC delivered report reconciliation for stable delivered dates and final report amounts.
@@ -132,6 +133,29 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 19, 2026 (Codex) — GIB Per-RO Scope Isolation
+
+**Status:** Implemented, independently reviewed, and verified on an isolated branch. Not yet deployed.
+
+Changed:
+- Added explicit per-RO input scopes, including intentional grouped-RO clauses, repeated clauses, bare RO numbers, and Chinese input.
+- Prevented rental, paint-ready, authorization, assignee, body-task, and parts context from being reused across unrelated ROs.
+- Made raw RO-scoped input override conflicting model-generated rental text and fill explicitly grouped ROs even if the model omitted one member.
+- Scoped deterministic parts-order recovery and removed model orders whose vendor is explicitly tied to another RO, while preserving legitimate vendor ETA updates.
+- Bound Apply-time workflow inference to the submitted input snapshot instead of later textarea edits.
+- Added a model instruction that multi-RO facts must remain within their nearest explicit RO clause.
+
+Verification:
+- `npm.cmd run test:gib-scope` — 12/12 passing.
+- `npm.cmd run test:parts-parser` — 18/18 passing.
+- `npm.cmd run build` — production build succeeded; only the existing large-chunk warning remains.
+- Independent sub-agent review — final PASS, with no remaining P0/P1 findings for this step.
+
+Deferred intentionally:
+- Strict date parsing and calendar validation remain the next isolated change; no production deployment was performed in this step.
 
 ---
 

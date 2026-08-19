@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:parts-parser": "node --test src/utils/partsOrderParsing.test.js"
+    "test:parts-parser": "node --test src/utils/partsOrderParsing.test.js",
+    "test:gib-scope": "node --test src/utils/gibInputScope.test.js src/utils/aiActionInference.test.js"
   },
   "dependencies": {
     "date-fns": "^3.6.0",

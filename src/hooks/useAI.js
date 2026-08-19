@@ -455,6 +455,7 @@ FIELD NOTES:
 RULES:
 - ALL output (notes, task titles, descriptions) MUST be written in English, regardless of the input language. The user may speak/type in Chinese, Spanish, or mixed — always produce English output.
 - Match RO numbers flexibly: "9448", "RO9448", "#9448" all work
+- In multi-RO input, bind each fact only to the nearest explicitly named RO clause. Never copy rental, date, status, parts, authorization, assignee, or task details from one RO to another. Share a fact only when the user explicitly groups the RO numbers before that shared fact (for example, "RO9448 and RO9531 both have no rental").
 - For assignees, match partial names (e.g. "David" → the employee named David)
 - When a user updates the vehicle/shop ETA or completion date AND mentions calling the customer, create BOTH update_due_date AND an add_note saying who called and what was communicated.
 - When a user updates a parts vendor ETA (examples: "dealer eta change to 5-14", "K&P eta 5/15", "Puente Hills Hyundai ETA changed"), emit update_parts_order with that vendor/dealer and eta. Do NOT emit update_due_date for vendor ETA changes.

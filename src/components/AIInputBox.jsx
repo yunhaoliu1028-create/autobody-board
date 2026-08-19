@@ -12,9 +12,11 @@ import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
 import { compressImageFile, compressVideoFrame } from '../utils/imageCompression'
 import { playShutterSound } from '../utils/cameraFeedback'
 import { inferStructuredActionsFromText } from '../utils/aiActionInference'
+import { buildRoInputScopes, getRoScopedText } from '../utils/gibInputScope'
 import {
   extractPartsOrderCandidates,
   mergePreferredPartsOrderActions,
+  removeCrossRoPartsOrderLeakage,
   vendorsMatchIgnoringParsingMetadata,
 } from '../utils/partsOrderParsing'
 
@@ -432,6 +434,50 @@ function hasAssignedBodyTech(roDoc, pendingFields = {}, employees = []) {
   return resolveBodyTech(roDoc, employees).source === 'assignedBodyMan'
 }
 
+function roNumberForAction(action = {}, ros = []) {
+  if (action.roNumber != null) return String(action.roNumber)
+  return String(ros.find(ro => ro.id === action.roId)?.roNumber ?? '')
+}
+
+function scopedInputForRo(inputText = '', roNumber, actions = [], ros = []) {
+  const actionRoNumbers = actions.map(action => roNumberForAction(action, ros)).filter(Boolean)
+  const candidateRoNumbers = [...ros.map(ro => ro.roNumber), ...actionRoNumbers]
+  return getRoScopedText(inputText, roNumber, candidateRoNumbers, actionRoNumbers)
+}
+
+function normalizeActionsPerRoScope(rawActions = [], inputText = '', ros = [], normalizeScope) {
+  const actions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
+  const actionRoNumbers = actions.map(action => roNumberForAction(action, ros)).filter(Boolean)
+  const candidateRoNumbers = [...ros.map(ro => ro.roNumber), ...actionRoNumbers]
+  const scopes = buildRoInputScopes(inputText, candidateRoNumbers)
+  const groups = new Map()
+  const unscoped = []
+
+  for (const action of actions) {
+    const roNumber = roNumberForAction(action, ros)
+    if (!roNumber) {
+      unscoped.push(action)
+      continue
+    }
+    const group = groups.get(roNumber) || []
+    group.push(action)
+    groups.set(roNumber, group)
+  }
+
+  const normalized = []
+  for (const [roNumber, group] of groups) {
+    const scopedText = scopes.get(roNumber)
+      || (scopes.size === 0 && groups.size === 1 ? inputText : '')
+    normalized.push(...normalizeScope(group, scopedText, roNumber))
+  }
+
+  if (unscoped.length) {
+    const unscopedText = scopes.size === 0 && groups.size <= 1 ? inputText : ''
+    normalized.push(...normalizeScope(unscoped, unscopedText, ''))
+  }
+  return normalized
+}
+
 function actionAssignsBodyTech(action, roDoc, employees = []) {
   if (action.type !== 'assign_body_man') return false
   const assignee = action.assigneeUid
@@ -547,14 +593,14 @@ function normalizeBodyAssigneeDefaults(actions = [], inputText = '', ros = [], e
   })
 }
 
-function parseReceivedAllExcept(inputText = '') {
+function parseReceivedAllExcept(inputText = '', scopedRoNumber = '') {
   const text = String(inputText || '')
   if (!/\b(received|recieved|rcvd|got)\b/i.test(text) || !/\b(all|everything)\b/i.test(text) || !/\bexcept\b/i.test(text)) {
     return null
   }
 
   const roMatch = text.match(/\b(?:ro\s*#?|#)?\s*(\d{4,})\b/i)
-  const roNumber = roMatch?.[1] || ''
+  const roNumber = String(scopedRoNumber || roMatch?.[1] || '')
   const afterExcept = text.split(/\bexcept\b/i).pop()?.trim() || ''
 
   const parseEta = (match) => {
@@ -600,8 +646,8 @@ function parseReceivedAllExcept(inputText = '') {
   return { roNumber, exceptions }
 }
 
-function normalizeReceivedAllExceptActions(rawActions = [], inputText = '', ros = []) {
-  const parsed = parseReceivedAllExcept(inputText)
+function normalizeReceivedAllExceptActions(rawActions = [], inputText = '', ros = [], scopedRoNumber = '') {
+  const parsed = parseReceivedAllExcept(inputText, scopedRoNumber)
   if (!parsed) return rawActions
 
   const roDoc = ros.find(ro => String(ro.roNumber ?? '') === String(parsed.roNumber))
@@ -658,7 +704,7 @@ function normalizeReceivedAllExceptActions(rawActions = [], inputText = '', ros 
   return [...filtered, ...generated]
 }
 
-function parseReceivedAllFromVendors(inputText = '') {
+function parseReceivedAllFromVendors(inputText = '', scopedRoNumber = '') {
   const text = String(inputText || '')
   if (!/\b(received|recieved|rcvd|got)\b/i.test(text) || !/\ball\s+parts?\s+from\b/i.test(text)) return null
   const parsedSegments = text
@@ -667,7 +713,7 @@ function parseReceivedAllFromVendors(inputText = '') {
     .filter(segment => /\b(received|recieved|rcvd|got)\b/i.test(segment) && /\ball\s+parts?\s+from\b/i.test(segment))
     .map(segment => {
       const roMatch = segment.match(/\b(?:ro\s*#?|#)?\s*(\d{4,})\b/i)
-      const roNumber = roMatch?.[1] || ''
+      const roNumber = String(scopedRoNumber || roMatch?.[1] || '')
       const afterFrom = segment.split(/\ball\s+parts?\s+from\b/i).pop()?.trim() || ''
       const vendorText = afterFrom
         .split(/\b(?:part|parts)\s+from\b/i)[0]
@@ -684,8 +730,8 @@ function parseReceivedAllFromVendors(inputText = '') {
   return parsedSegments.length ? parsedSegments : null
 }
 
-function normalizeReceivedAllFromVendorActions(rawActions = [], inputText = '', ros = []) {
-  const parsedSegments = parseReceivedAllFromVendors(inputText)
+function normalizeReceivedAllFromVendorActions(rawActions = [], inputText = '', ros = [], scopedRoNumber = '') {
+  const parsedSegments = parseReceivedAllFromVendors(inputText, scopedRoNumber)
   if (!parsedSegments) return rawActions
 
   let nextActions = rawActions
@@ -738,14 +784,15 @@ function cleanWaitingVendor(value = '') {
     .trim()
 }
 
-function parseWaitingPartsOrders(inputText = '') {
+function parseWaitingPartsOrders(inputText = '', scopedRoNumber = '') {
   const text = String(inputText || '')
   if (!/\b(ord\w*|wait\w*|await\w*)\b/i.test(text) || !/\bfrom\b/i.test(text)) return []
   return text
     .split(/\s*\/\/+\s*/g)
     .map(segment => segment.trim())
     .flatMap(segment => {
-      const roNumber = segment.match(/\b(?:ro\s*#?|#)?\s*(\d{4,})\b/i)?.[1] || ''
+      const inferredRoNumber = segment.match(/\b(?:ro\s*#?|#)?\s*(\d{4,})\b/i)?.[1] || ''
+      const roNumber = String(scopedRoNumber || inferredRoNumber)
       if (!roNumber) return []
       const matches = []
       const re = /\b(?:ord\w*|wait\w*|await\w*)(?:\s+(?:and|&)\s+(?:ord\w*|wait\w*|await\w*))?\s+(?:on\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:pc|pcs|part|parts|piece|pieces)?\s+from\s+(.+?)(?:\s+(?:eta|due|arriv(?:e|es|ing|al)?)\s*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?))?(?=$|[.;,])/gi
@@ -764,8 +811,8 @@ function parseWaitingPartsOrders(inputText = '') {
     })
 }
 
-function normalizeWaitingPartsOrderActions(rawActions = [], inputText = '', ros = []) {
-  const parsedOrders = parseWaitingPartsOrders(inputText)
+function normalizeWaitingPartsOrderActions(rawActions = [], inputText = '', ros = [], scopedRoNumber = '') {
+  const parsedOrders = parseWaitingPartsOrders(inputText, scopedRoNumber)
   if (!parsedOrders.length) return rawActions
 
   let nextActions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
@@ -950,13 +997,13 @@ function normalizeReceivedFromNoteActions(rawActions = [], ros = []) {
   return generated.length ? [...actions, ...generated] : actions
 }
 
-function normalizeNoReplacementPartsActions(rawActions = [], inputText = '', ros = []) {
+function normalizeNoReplacementPartsActions(rawActions = [], inputText = '', ros = [], scopedRoNumber = '') {
   const text = String(inputText || '')
   if (!/\b(no|none|not\s+needed|does\s+not\s+need|doesn't\s+need|without)\b/i.test(text)) return rawActions
   if (!/\b(repl(?:acement)?|replace(?:ment)?|parts?|part)\b/i.test(text)) return rawActions
   if (/\b(order(?:ed)?|eta|received|rcvd|got|short|except|return|wrong|exchange)\b/i.test(text)) return rawActions
 
-  const roNumber = extractRoNumber(text, ros)
+  const roNumber = String(scopedRoNumber || extractRoNumber(text, ros) || '')
   if (!roNumber) return rawActions
   const roDoc = ros.find(ro => String(ro.roNumber ?? '') === String(roNumber))
   if (!roDoc) return rawActions
@@ -1114,12 +1161,13 @@ function shouldHideResolvedBodyTechClarification(clarification = '', resultActio
     const existingBodyTech = resolveBodyTech(roDoc, employees)
     if (!existingBodyTech.uid && !existingBodyTech.name) return false
     if (!action.assigneeName) return true
+    const scopedInput = scopedInputForRo(inputText, action.roNumber || roDoc?.roNumber, resultActions, ros)
     return normalizeName(action.assigneeName) !== normalizeName(existingBodyTech.name)
-      && !inputExplicitlyMentionsAssignee(inputText, action.assigneeName)
+      && !inputExplicitlyMentionsAssignee(scopedInput, action.assigneeName)
   })
 }
 
-function normalizeBodyWorkflowActions(rawActions = [], inputText = '', ros = [], employees = []) {
+function normalizeBodyWorkflowActionsForScope(rawActions = [], inputText = '', ros = [], employees = [], scopedRoNumber = '') {
   const baseActions = normalizeReceivedFromNoteActions(
     normalizeWaitingPartsOrderActions(
       normalizeReceivedAllFromVendorActions(
@@ -1128,15 +1176,19 @@ function normalizeBodyWorkflowActions(rawActions = [], inputText = '', ros = [],
             rawActions.map(action => ({ ...action, type: action.type ?? action.action })),
             inputText,
             ros,
+            scopedRoNumber,
           ),
           inputText,
           ros,
+          scopedRoNumber,
         ),
         inputText,
         ros,
+        scopedRoNumber,
       ),
       inputText,
       ros,
+      scopedRoNumber,
     ),
     ros,
   )
@@ -1237,6 +1289,12 @@ function normalizeBodyWorkflowActions(rawActions = [], inputText = '', ros = [],
   return [...normalized, ...extras]
 }
 
+function normalizeBodyWorkflowActions(rawActions = [], inputText = '', ros = [], employees = []) {
+  return normalizeActionsPerRoScope(rawActions, inputText, ros, (scopedActions, scopedText, scopedRoNumber) => (
+    normalizeBodyWorkflowActionsForScope(scopedActions, scopedText, ros, employees, scopedRoNumber)
+  ))
+}
+
 function paintReadyStatusForRo(roDoc) {
   const current = roDoc?.status || ''
   if (['checked_in', 'teardown', 'waiting_parts', 'body_work', 'body_complete'].includes(current)) return 'paint_prep'
@@ -1255,7 +1313,7 @@ function paintSecondaryPhase(action = {}, inputText = '') {
   return 'paint_prep'
 }
 
-function normalizePaintWorkflowActions(rawActions = [], inputText = '', ros = [], employees = []) {
+function normalizePaintWorkflowActionsForScope(rawActions = [], inputText = '', ros = [], employees = []) {
   const actions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
   const extras = []
 
@@ -1342,6 +1400,12 @@ function normalizePaintWorkflowActions(rawActions = [], inputText = '', ros = []
     seen.add(key)
     return true
   })
+}
+
+function normalizePaintWorkflowActions(rawActions = [], inputText = '', ros = [], employees = []) {
+  return normalizeActionsPerRoScope(rawActions, inputText, ros, (scopedActions, scopedText) => (
+    normalizePaintWorkflowActionsForScope(scopedActions, scopedText, ros, employees)
+  ))
 }
 
 function impliedCompletedPhasesForStatus(status) {
@@ -2071,8 +2135,8 @@ function canonicalParsedVendorLabel(value = '') {
   return cleaned
 }
 
-function extractExplicitPartsOrderVendors(inputText = '') {
-  return extractPartsOrderCandidates(inputText).map(order => ({
+function extractExplicitPartsOrderVendors(inputText = '', knownRoNumbers = []) {
+  return extractPartsOrderCandidates(inputText, { knownRoNumbers }).map(order => ({
     roNumber: order.roNumber,
     vendor: canonicalParsedVendorLabel(order.vendor),
     qty: order.qty,
@@ -2090,10 +2154,16 @@ function applyExplicitPartsOrderFields(action, order) {
   }
 }
 
-function preserveExplicitPartsOrderVendors(parsed, inputText = '') {
+function preserveExplicitPartsOrderVendors(parsed, inputText = '', knownRoNumbers = []) {
   if (!parsed?.actions?.length) return parsed
-  const explicitOrders = extractExplicitPartsOrderVendors(inputText)
+  const explicitOrders = extractExplicitPartsOrderVendors(inputText, knownRoNumbers)
   if (!explicitOrders.length) return parsed
+  const supportedActions = removeCrossRoPartsOrderLeakage(
+    parsed.actions,
+    inputText,
+    explicitOrders,
+    { knownRoNumbers },
+  )
 
   const used = new Set()
   const allCandidatesFor = (action) => explicitOrders
@@ -2104,7 +2174,7 @@ function preserveExplicitPartsOrderVendors(parsed, inputText = '') {
   const candidatesFor = (action) => allCandidatesFor(action)
     .filter(({ index }) => !used.has(index))
 
-  const actions = parsed.actions.map(action => {
+  const actions = supportedActions.map(action => {
     if (action?.type !== 'update_parts_order') return action
 
     const candidates = candidatesFor(action)
@@ -2135,8 +2205,8 @@ function preserveExplicitPartsOrderVendors(parsed, inputText = '') {
   return { ...parsed, actions }
 }
 
-function parseBatchPartsOrders(inputText = '') {
-  return extractPartsOrderCandidates(inputText)
+function parseBatchPartsOrders(inputText = '', knownRoNumbers = []) {
+  return extractPartsOrderCandidates(inputText, { knownRoNumbers })
     .filter(order => order.roNumber)
     .map(order => {
       const vendor = canonicalParsedVendorLabel(order.vendor)
@@ -2155,9 +2225,9 @@ function parseBatchPartsOrders(inputText = '') {
     })
 }
 
-function mergeBatchPartsOrders(parsed, inputText = '') {
-  if (!parsed?.actions?.length) return parsed
-  const inferredOrders = parseBatchPartsOrders(inputText)
+function mergeBatchPartsOrders(parsed, inputText = '', knownRoNumbers = []) {
+  if (!parsed || !Array.isArray(parsed.actions)) return parsed
+  const inferredOrders = parseBatchPartsOrders(inputText, knownRoNumbers)
   if (!inferredOrders.length) return parsed
   const hasVendor = (order) => parsed.actions.some(action =>
     action?.type === 'update_parts_order'
@@ -2169,14 +2239,23 @@ function mergeBatchPartsOrders(parsed, inputText = '') {
   return { ...parsed, actions: [...parsed.actions, ...missingOrders] }
 }
 
-function applyPartsManagerParsePreference(parsed, sourceRole, inputText = '') {
+function applyPartsManagerParsePreference(parsed, sourceRole, inputText = '', knownRoNumbers = []) {
   if (sourceRole !== 'parts_manager' || !parsed?.actions?.length) return parsed
-  if (!looksLikePartsManagerEtaInput(inputText)) return parsed
+
+  const actionRoNumbers = parsed.actions.map(action => action?.roNumber).filter(Boolean)
+  const candidateRoNumbers = [...knownRoNumbers, ...actionRoNumbers]
 
   return {
     ...parsed,
     actions: parsed.actions.map(action => {
       if (action?.type !== 'update_due_date') return action
+      const scopedInput = getRoScopedText(
+        inputText,
+        action.roNumber,
+        candidateRoNumbers,
+        actionRoNumbers,
+      )
+      if (!looksLikePartsManagerEtaInput(scopedInput)) return action
       return {
         type: 'update_parts_order',
         roNumber: action.roNumber,
@@ -2194,15 +2273,16 @@ function applyPartsManagerParsePreference(parsed, sourceRole, inputText = '') {
   }
 }
 
-function prepareParsedResult(parsed, sourceRole, inputText = '') {
+function prepareParsedResult(parsed, sourceRole, inputText = '', knownRoNumbers = []) {
   const parseContextText = [inputText, parsed?.translation].filter(Boolean).join('\n')
   const withInferredStructuredActions = parsed?.actions
-    ? { ...parsed, actions: inferStructuredActionsFromText(parsed.actions, parseContextText) }
+    ? { ...parsed, actions: inferStructuredActionsFromText(parsed.actions, parseContextText, knownRoNumbers) }
     : parsed
-  const withExplicitPartOrderVendors = preserveExplicitPartsOrderVendors(withInferredStructuredActions, parseContextText)
+  const withExplicitPartOrderVendors = preserveExplicitPartsOrderVendors(withInferredStructuredActions, parseContextText, knownRoNumbers)
   return mergeBatchPartsOrders(
-    applyPartsManagerParsePreference(withExplicitPartOrderVendors, sourceRole, parseContextText),
+    applyPartsManagerParsePreference(withExplicitPartOrderVendors, sourceRole, parseContextText, knownRoNumbers),
     parseContextText,
+    knownRoNumbers,
   )
 }
 
@@ -2305,7 +2385,7 @@ export default function AIInputBox({
   useEffect(() => {
     if (result?.actions) {
       const inputText = submittedText.current || text
-      const prepared = prepareParsedResult(result, sourceRole, inputText)
+      const prepared = prepareParsedResult(result, sourceRole, inputText, ros.map(ro => ro.roNumber))
       setActions(normalizePaintWorkflowActions(
         normalizeBodyWorkflowActions(prepared.actions, inputText, ros, employees),
         inputText,
@@ -2357,7 +2437,7 @@ export default function AIInputBox({
         if (!key) return
         const parsed = await parseShopInput({ text, ros, employees, images: [], sourceRole })
         if (!parsed.raw) {
-          setResult(prepareParsedResult(parsed, sourceRole, text))
+          setResult(prepareParsedResult(parsed, sourceRole, text, ros.map(ro => ro.roNumber)))
           submittedText.current = text
         }
       } catch { /* silent — user can re-submit manually */ }
@@ -2573,7 +2653,7 @@ export default function AIInputBox({
       if (!key) { setNoKey(true); setLoading(false); return }
       const parsed = await parseShopInput({ text, ros, employees, images: [], sourceRole })
       if (parsed.raw) throw new Error('AI returned unexpected format. Please rephrase.')
-      setResult(prepareParsedResult(parsed, sourceRole, text))
+      setResult(prepareParsedResult(parsed, sourceRole, text, ros.map(ro => ro.roNumber)))
       rememberHistory(text)
       submittedText.current = text
     } catch (err) {
@@ -2596,6 +2676,7 @@ export default function AIInputBox({
     const stamp  = format(new Date(), 'MM/dd HH:mm')
     const author = employees.find(e => e.uid === user.uid)?.name ?? user.email
     const now    = new Date().toISOString()
+    const submittedInput = submittedText.current || text
 
     // ── Step 1: bucket all actions by RO, building one merged update per doc ──
     // This cuts N sequential Firestore writes down to 1 per RO.
@@ -2908,7 +2989,8 @@ export default function AIInputBox({
           if (assignee) {
             entry.fields.assignedBodyMan = assignee.uid
             entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
-            const phase = bodyPhaseFromActionsForRo(actions, action.roNumber, text)
+            const actionInput = scopedInputForRo(submittedInput, action.roNumber, actions, ros)
+            const phase = bodyPhaseFromActionsForRo(actions, action.roNumber, actionInput)
             const hasExplicitPrimaryBodyTask = actions.some(other =>
               other !== action
               && other.type === 'assign_task'
@@ -2948,7 +3030,8 @@ export default function AIInputBox({
           break
         }
         case 'assign_task': {
-          const roActionText = `${sameRoActionText(actions, action.roNumber)} ${text}`
+          const actionInput = scopedInputForRo(submittedInput, action.roNumber, actions, ros)
+          const roActionText = `${sameRoActionText(actions, action.roNumber)} ${actionInput}`
           const contextPhase = bodyPhaseFromText(roActionText)
           const isSecondaryBodyTask = action.taskKind === 'secondary'
             || (!isExplicitPrimaryBodyTaskAction(action) && contextPhase && looksLikeSecondaryBodyTaskStrict(action, roActionText))
@@ -3095,7 +3178,8 @@ export default function AIInputBox({
 
     for (const entry of roMap.values()) {
       const roDoc = entry.roDoc
-      const roActionText = `${sameRoActionText(actions, roDoc.roNumber)} ${text}`.toLowerCase()
+      const roInput = scopedInputForRo(submittedInput, roDoc.roNumber, actions, ros)
+      const roActionText = `${sameRoActionText(actions, roDoc.roNumber)} ${roInput}`.toLowerCase()
       if (mentionsAuthorization(roActionText)) {
         entry.fields.customerAuthorized = true
       }

@@ -3,10 +3,14 @@ import assert from 'node:assert/strict'
 import {
   extractPartsOrderCandidates,
   mergePreferredPartsOrderActions,
+  removeCrossRoPartsOrderLeakage,
   vendorsMatchIgnoringParsingMetadata,
 } from './partsOrderParsing.js'
 
-const options = { defaultYear: 2026 }
+const options = {
+  defaultYear: 2026,
+  knownRoNumbers: ['9448', '9725', '1111', '2222'],
+}
 
 test('does not turn a received historical order into a new order', () => {
   const text = 'RO9725. The 5 parts ordered from Sepaplus have all been received today.'
@@ -65,6 +69,72 @@ test('does not leak a shared ETA from one RO into another RO', () => {
     { roNumber: '9448', vendor: 'Keystone', qty: 1, eta: '2026-05-21' },
     { roNumber: '9725', vendor: 'Amazon', qty: 1, eta: null },
   ])
+})
+
+test('carries a continuation order only from the nearest preceding RO scope', () => {
+  const text = 'RO1111 customer called. RO2222 is waiting parts; ordered 2 parts from Amazon ETA 8/25'
+  assert.deepEqual(extractPartsOrderCandidates(text, options), [
+    { roNumber: '2222', vendor: 'Amazon', qty: 2, eta: '2026-08-25' },
+  ])
+})
+
+test('keeps comma-separated RO orders isolated', () => {
+  const text = 'RO1111 ordered 1 part from Keystone, RO2222 ordered 2 parts from Amazon ETA 8/25'
+  assert.deepEqual(extractPartsOrderCandidates(text, options), [
+    { roNumber: '1111', vendor: 'Keystone', qty: 1, eta: null },
+    { roNumber: '2222', vendor: 'Amazon', qty: 2, eta: '2026-08-25' },
+  ])
+})
+
+test('applies an explicitly grouped parts order to every named RO', () => {
+  const text = 'RO1111 and RO2222 ordered 1 part from Keystone ETA 8/25'
+  assert.deepEqual(extractPartsOrderCandidates(text, options), [
+    { roNumber: '1111', vendor: 'Keystone', qty: 1, eta: '2026-08-25' },
+    { roNumber: '2222', vendor: 'Keystone', qty: 1, eta: '2026-08-25' },
+  ])
+})
+
+test('drops a model parts action copied onto the wrong RO clause', () => {
+  const text = 'RO1111 customer called. RO2222 is waiting parts; ordered 2 parts from Amazon ETA 8/25'
+  const explicitOrders = extractPartsOrderCandidates(text, options)
+  const actions = [
+    { type: 'add_note', roNumber: '1111', note: 'Customer called.' },
+    { type: 'update_parts_order', roNumber: '1111', vendor: 'Amazon', qty: 2, eta: '2026-08-25' },
+  ]
+
+  assert.deepEqual(
+    removeCrossRoPartsOrderLeakage(actions, text, explicitOrders, options),
+    [{ type: 'add_note', roNumber: '1111', note: 'Customer called.' }],
+  )
+})
+
+test('drops a copied vendor even when both RO clauses contain different orders', () => {
+  const text = 'RO1111 ordered 1 part from Keystone. RO2222 ordered 2 parts from Amazon ETA 8/25'
+  const explicitOrders = extractPartsOrderCandidates(text, options)
+  const actions = [
+    { type: 'update_parts_order', roNumber: '1111', vendor: 'Keystone', qty: 1 },
+    { type: 'update_parts_order', roNumber: '1111', vendor: 'Amazon', qty: 2 },
+    { type: 'update_parts_order', roNumber: '2222', vendor: 'Amazon', qty: 2 },
+  ]
+
+  assert.deepEqual(
+    removeCrossRoPartsOrderLeakage(actions, text, explicitOrders, options),
+    [actions[0], actions[2]],
+  )
+})
+
+test('keeps a legitimate vendor ETA action when another RO contains an order', () => {
+  const text = 'RO1111 Keystone ETA changed to 8/25. RO2222 ordered 1 part from Amazon.'
+  const explicitOrders = extractPartsOrderCandidates(text, options)
+  const actions = [
+    { type: 'update_parts_order', roNumber: '1111', vendor: 'Keystone', eta: '2026-08-25' },
+    { type: 'update_parts_order', roNumber: '2222', vendor: 'Amazon', qty: 1 },
+  ]
+
+  assert.deepEqual(
+    removeCrossRoPartsOrderLeakage(actions, text, explicitOrders, options),
+    actions,
+  )
 })
 
 test('does not mistake a legitimate vendor containing Complete for receipt language', () => {

@@ -1,3 +1,5 @@
+import { buildRoInputScopes, getRoScopedText } from './gibInputScope.js'
+
 function normalizeDateParts(month, day, year = null) {
   const m = Number.parseInt(month, 10)
   const d = Number.parseInt(day, 10)
@@ -40,39 +42,48 @@ function actionHas(actions, roNumber, type) {
   )
 }
 
-function inferRoNumber(text = '') {
-  return text.match(/\b(?:RO|#)?\s*(\d{4,6})\b/i)?.[1] ?? null
-}
+export function inferStructuredActionsFromText(actions = [], inputText = '', knownRoNumbers = []) {
+  if (!Array.isArray(actions)) return actions
 
-export function inferStructuredActionsFromText(actions = [], inputText = '') {
-  if (!Array.isArray(actions) || actions.length === 0) return actions
-
+  const actionRoNumbers = actions.map(action => action?.roNumber).filter(Boolean)
+  const candidateRoNumbers = [...knownRoNumbers, ...actionRoNumbers]
+  const scopes = buildRoInputScopes(inputText, candidateRoNumbers)
+  const targetRoNumbers = [...new Set([...actionRoNumbers.map(String), ...scopes.keys()])]
+  const normalizedActions = actions.map(action => {
+    if (action?.type !== 'update_rental' || !action.roNumber) return action
+    const scopedInput = getRoScopedText(inputText, action.roNumber, candidateRoNumbers, actionRoNumbers)
+    const supportedRental = inferRental(scopedInput)
+    return supportedRental === null ? action : { ...action, hasRental: supportedRental }
+  })
   const extras = []
-  for (const action of actions) {
-    const roNumber = action.roNumber ?? inferRoNumber(inputText)
+  for (const roNumber of targetRoNumbers) {
     if (!roNumber) continue
-    const text = `${inputText} ${actionText(action)}`
+    const scopedInput = getRoScopedText(inputText, roNumber, candidateRoNumbers, actionRoNumbers)
+    const sourceAction = normalizedActions.find(action => String(action?.roNumber ?? '') === String(roNumber))
+    const generatedText = sourceAction ? actionText(sourceAction) : ''
 
-    const hasRental = inferRental(text)
-    if (hasRental !== null && !actionHas(actions.concat(extras), roNumber, 'update_rental')) {
+    // The user's RO-scoped words are stronger evidence than model-generated notes.
+    // Fall back to action text only when the scoped input contains no usable fact.
+    const hasRental = inferRental(scopedInput) ?? inferRental(generatedText)
+    if (hasRental !== null && !actionHas(normalizedActions.concat(extras), roNumber, 'update_rental')) {
       extras.push({
         type: 'update_rental',
         roNumber,
         hasRental,
-        confidence: action.confidence || 'high',
+        confidence: sourceAction?.confidence || 'high',
       })
     }
 
-    const dueDate = inferDueDate(text)
-    if (dueDate && !actionHas(actions.concat(extras), roNumber, 'update_due_date')) {
+    const dueDate = inferDueDate(scopedInput) || inferDueDate(generatedText)
+    if (dueDate && !actionHas(normalizedActions.concat(extras), roNumber, 'update_due_date')) {
       extras.push({
         type: 'update_due_date',
         roNumber,
         dueDate,
-        confidence: action.confidence || 'high',
+        confidence: sourceAction?.confidence || 'high',
       })
     }
   }
 
-  return extras.length ? [...actions, ...extras] : actions
+  return extras.length ? [...normalizedActions, ...extras] : normalizedActions
 }

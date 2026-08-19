@@ -1,3 +1,5 @@
+import { buildRoInputScopes } from './gibInputScope.js'
+
 const NUMBER_WORDS = {
   one: 1,
   two: 2,
@@ -161,15 +163,52 @@ function receiptIntentIsNearest(scope, matchIndex) {
   return lastReceipt > lastOrder
 }
 
+function candidateRoNumbersFromText(inputText = '') {
+  const text = String(inputText || '')
+  const numbers = []
+  const add = (value) => {
+    const normalized = String(value || '').trim()
+    if (/^\d{3,8}$/.test(normalized) && !numbers.includes(normalized)) numbers.push(normalized)
+  }
+
+  for (const match of text.matchAll(/\b(?:RO\s*#?|#)\s*(\d{3,8})\b/gi)) add(match[1])
+  for (const match of text.matchAll(/(?:^|[\r\n.;。；!?！？])\s*(\d{4,6})\b/gu)) add(match[1])
+  return numbers
+}
+
+function mergeCandidateRecords(candidates = []) {
+  const merged = []
+  const seen = new Map()
+  for (const candidate of candidates) {
+    const key = `${candidate.roNumber || '*'}:${normalizeKey(candidate.vendor)}`
+    const existingIndex = seen.get(key)
+    if (existingIndex === undefined) {
+      seen.set(key, merged.length)
+      merged.push(candidate)
+      continue
+    }
+    const existing = merged[existingIndex]
+    merged[existingIndex] = {
+      ...existing,
+      qty: existing.qty || candidate.qty,
+      eta: existing.eta || candidate.eta,
+    }
+  }
+  return merged
+}
+
 /**
  * Extract explicit new parts orders without treating a completed historical
  * order ("parts ordered from X have all been received") as another order.
  */
-export function extractPartsOrderCandidates(inputText = '', { defaultYear = new Date().getFullYear() } = {}) {
+function extractPartsOrderCandidatesInScope(
+  inputText = '',
+  { defaultYear = new Date().getFullYear(), scopedRoNumber = '' } = {},
+) {
   const text = String(inputText || '')
   if (!ORDER_CONTEXT_RE.test(text)) return []
 
-  const defaultRoNumber = text.match(/\b(?:RO|#)?\s*(\d{4,6})\b/i)?.[1] || ''
+  const defaultRoNumber = String(scopedRoNumber || candidateRoNumbersFromText(text)[0] || '')
   const candidates = []
   const seen = new Map()
 
@@ -197,7 +236,7 @@ export function extractPartsOrderCandidates(inputText = '', { defaultYear = new 
   for (const scope of splitOrderScopes(text)) {
     if (!ORDER_CONTEXT_RE.test(scope) || RESOLVED_RECEIPT_RE.test(scope) || RESOLVED_CHINESE_RECEIPT_RE.test(scope)) continue
 
-    const roNumber = scope.match(/\b(?:RO|#)?\s*(\d{4,6})\b/i)?.[1] || defaultRoNumber
+    const roNumber = String(scopedRoNumber || candidateRoNumbersFromText(scope)[0] || defaultRoNumber)
     const scopeEta = parseDateText(scope, defaultYear)
     const scopeCommonEtaMatch = scope.match(/\ball\s+eta\b(.{0,40})/i)
     const scopeCommonEta = scopeCommonEtaMatch ? parseDateText(scopeCommonEtaMatch[0], defaultYear) : null
@@ -230,4 +269,61 @@ export function extractPartsOrderCandidates(inputText = '', { defaultYear = new 
   }
 
   return candidates
+}
+
+export function extractPartsOrderCandidates(
+  inputText = '',
+  { defaultYear = new Date().getFullYear(), knownRoNumbers = [] } = {},
+) {
+  const text = String(inputText || '')
+  const candidates = [...knownRoNumbers, ...candidateRoNumbersFromText(text)]
+  const scopes = buildRoInputScopes(text, candidates)
+
+  if (scopes.size === 0) {
+    return extractPartsOrderCandidatesInScope(text, { defaultYear })
+  }
+
+  const scopedCandidates = []
+  for (const [roNumber, scopedText] of scopes) {
+    scopedCandidates.push(...extractPartsOrderCandidatesInScope(scopedText, {
+      defaultYear,
+      scopedRoNumber: roNumber,
+    }))
+  }
+  return mergeCandidateRecords(scopedCandidates)
+}
+
+export function removeCrossRoPartsOrderLeakage(
+  actions = [],
+  inputText = '',
+  explicitOrders = [],
+  { knownRoNumbers = [] } = {},
+) {
+  if (!Array.isArray(actions) || explicitOrders.length === 0) return actions
+  const scopes = buildRoInputScopes(inputText, [
+    ...knownRoNumbers,
+    ...explicitOrders.map(order => order.roNumber),
+  ])
+  if (scopes.size < 2) return actions
+
+  return actions.filter(action => {
+    if (action?.type !== 'update_parts_order' || !action.roNumber) return true
+    const actionRoNumber = String(action.roNumber)
+    const sameRoOrders = explicitOrders.filter(order => String(order.roNumber || '') === actionRoNumber)
+    const actionVendor = withoutParsingMetadata(action.vendorFull || action.vendor)
+    const vendorAppearsOnSameRo = Boolean(actionVendor) && sameRoOrders.some(order => (
+      withoutParsingMetadata(order.vendor) === actionVendor
+    ))
+    if (vendorAppearsOnSameRo) return true
+
+    const vendorAppearsOnAnotherRo = Boolean(actionVendor) && explicitOrders.some(order => (
+      String(order.roNumber || '') !== actionRoNumber
+      && withoutParsingMetadata(order.vendor) === actionVendor
+    ))
+    if (vendorAppearsOnAnotherRo) return false
+
+    // Keep unmatched actions such as a legitimate vendor ETA update. We only
+    // reject an action when its vendor is explicitly tied to another RO scope.
+    return true
+  })
 }
