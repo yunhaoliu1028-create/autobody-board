@@ -1,7 +1,9 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { addDoc, collection, onSnapshot, query, orderBy, doc, updateDoc, serverTimestamp, arrayUnion, getDocs, where } from 'firebase/firestore'
+import { collection, onSnapshot, query, orderBy, doc, serverTimestamp, arrayUnion, getDocs, where } from 'firebase/firestore'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
 import { StatusBadge, PartsStatusBadge } from '../components/StatusBadge'
@@ -399,7 +401,7 @@ function RevenueReconcileModal({ ros, selectedMonth, onClose }) {
     setApplying(true)
     const importedAt = new Date().toISOString()
     try {
-      await Promise.all(preview.matchedRows.map(row => updateDoc(doc(db, 'ros', row.matchedRo.id), {
+      await Promise.all(preview.matchedRows.map(row => updateRoDoc(doc(db, 'ros', row.matchedRo.id), {
         status: 'delivered',
         deliveredAt: row.outDateIso,
         cccDeliveredAt: row.outDateIso,
@@ -1504,7 +1506,7 @@ export default function ROBoard() {
       .slice(0, 20)
 
     toAssign.forEach(({ ro, emp }) => {
-      updateDoc(doc(db, 'ros', ro.id), {
+      updateRoDoc(doc(db, 'ros', ro.id), {
         assignedEstimator: emp.uid,
         updatedAt: serverTimestamp(),
       }).catch(err => console.warn('[ROBoard] estimator auto-assign failed', ro.roNumber, err))
@@ -1521,7 +1523,7 @@ export default function ROBoard() {
 
     invalidRos.forEach(ro => {
       cleanedInvalidBodyRef.current.add(ro.id)
-      updateDoc(doc(db, 'ros', ro.id), {
+      updateRoDoc(doc(db, 'ros', ro.id), {
         assignedBodyMan: '',
         updatedAt: serverTimestamp(),
         changeLog: arrayUnion({
@@ -1639,7 +1641,7 @@ export default function ROBoard() {
 
   const saveBoardOrder = async (group, orderedItems) => {
     const author = employees[user?.uid] ?? 'Unknown'
-    await Promise.all(orderedItems.map((ro, index) => updateDoc(doc(db, 'ros', ro.id), {
+    await Promise.all(orderedItems.map((ro, index) => updateRoDoc(doc(db, 'ros', ro.id), {
       boardOrder: (index + 1) * 1000,
       boardOrderGroup: group.key,
       updatedAt: serverTimestamp(),
@@ -1689,7 +1691,7 @@ export default function ROBoard() {
     const ro = ros.find(r => r.id === roId)
     if (!ro || ro.status === newStatus) return
     const author = employees[user?.uid] ?? 'Unknown'
-    await updateDoc(doc(db, 'ros', roId), {
+    await updateRoDoc(doc(db, 'ros', roId), {
       status:    newStatus,
       updatedAt: serverTimestamp(),
       changeLog: arrayUnion({
@@ -1731,7 +1733,7 @@ export default function ROBoard() {
         assignTo = emp?.uid ?? null
       }
       if (tmpl.setRoField && assignTo) roUpdates[tmpl.setRoField] = assignTo
-      await addDoc(collection(db, 'tasks'), {
+      await createTaskDoc(collection(db, 'tasks'), {
         roId:          roData.id,
         roNumber:      roData.roNumber,
         vehicleInfo:   roData.vehicle || roData.vehicleInfo || '',
@@ -1753,7 +1755,7 @@ export default function ROBoard() {
       })
     }
     if (Object.keys(roUpdates).length) {
-      await updateDoc(doc(db, 'ros', roData.id), { ...roUpdates, updatedAt: serverTimestamp() })
+      await updateRoDoc(doc(db, 'ros', roData.id), { ...roUpdates, updatedAt: serverTimestamp() })
     }
   }
 
@@ -1777,7 +1779,7 @@ export default function ROBoard() {
       (hasRental ? ', Rental: Yes' : '')
     const noteLine   = `[${stamp} - ${author}] ${noteText}`
     const prevNotes  = typeof ro.notes === 'string' ? ro.notes : ''
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       status:              'body_work',
       assignedBodyMan:     bodyManUid,
       assignedPainter:     painterUid,

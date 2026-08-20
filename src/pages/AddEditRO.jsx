@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
-  doc, getDoc, addDoc, updateDoc, collection, serverTimestamp, onSnapshot, query, where, getDocs,
+  doc, getDoc, addDoc, collection, serverTimestamp, onSnapshot, query, where, getDocs,
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, EDIT_RO_ROLES } from '../constants/roles'
 
@@ -80,7 +82,7 @@ async function syncPendingTaskAssignees(roId, prevData, nextData) {
   for (const d of snap.docs) {
     const phase = d.data().phase
     if (!changedPhases.has(phase)) continue
-    await updateDoc(doc(db, 'tasks', d.id), {
+    await updateTaskDoc(doc(db, 'tasks', d.id), {
       assignedTo: newAssigneeByPhase[phase],
       updatedAt: serverTimestamp(),
     })
@@ -151,13 +153,14 @@ export default function AddEditRO() {
         updatedAt: serverTimestamp(),
       }
       if (isNew) {
+        payload.gibRevision = 0
         payload.createdAt = serverTimestamp()
         payload.createdBy = user.uid
         const ref = await addDoc(collection(db, 'ros'), payload)
         navigate(`/ro/${ref.id}`)
       } else {
         const prevSnap = await getDoc(doc(db, 'ros', id))
-        await updateDoc(doc(db, 'ros', id), payload)
+        await updateRoDoc(doc(db, 'ros', id), payload)
         await syncPendingTaskAssignees(id, prevSnap.data() || {}, payload)
         navigate(`/ro/${id}`)
       }

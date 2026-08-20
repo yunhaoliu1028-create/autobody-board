@@ -21,6 +21,39 @@ service cloud.firestore {
       return myRole() in ['shop_manager', 'production_manager', 'estimator'];
     }
 
+    function hasValidGibRevisionTransition() {
+      let before = resource.data.get('gibRevision', 0);
+      let after = request.resource.data.get('gibRevision', 0);
+      return after is int
+        && after >= 0
+        && (
+          (before is int && after == before + 1)
+          || (!(before is int) && after == 1)
+        );
+    }
+
+    function hasValidTaskRevisionTransition() {
+      let before = resource.data.get('taskRevision', 0);
+      let after = request.resource.data.get('taskRevision', 0);
+      return after is int
+        && after >= 0
+        && (
+          (before is int && after == before + 1)
+          || (!(before is int) && after == 1)
+        );
+    }
+
+    function hasCurrentTaskDeleteReceipt(taskId) {
+      let receiptPath = /databases/$(database)/documents/taskDeletionReceipts/$(taskId);
+      return existsAfter(receiptPath)
+        && getAfter(receiptPath).data.kind == 'task_delete'
+        && getAfter(receiptPath).data.taskId == taskId
+        && getAfter(receiptPath).data.actorUid == request.auth.uid
+        && getAfter(receiptPath).data.expectedTaskRevision
+          == resource.data.get('taskRevision', 0)
+        && getAfter(receiptPath).data.committedAt == request.time;
+    }
+
     // ── Users collection ──────────────────────────────────────────────────────
     match /users/{uid} {
       // Anyone logged in can read user profiles (needed for name lookups)
@@ -41,9 +74,11 @@ service cloud.firestore {
       // All logged-in employees can read ROs
       allow read: if isAuth();
       // Only estimators / managers can create new ROs
-      allow create: if isAuth() && canEditRO();
+      allow create: if isAuth()
+        && canEditRO()
+        && request.resource.data.gibRevision == 0;
       // Any logged-in employee can update existing ROs through the app/GIB flow.
-      allow update: if isAuth();
+      allow update: if isAuth() && hasValidGibRevisionTransition();
       allow delete: if isAuth() && isManager();
     }
 
@@ -51,15 +86,35 @@ service cloud.firestore {
     match /tasks/{taskId} {
       allow read: if isAuth();
       // Any logged-in employee can create tasks through the app/GIB flow.
-      allow create: if isAuth();
+      allow create: if isAuth()
+        && request.resource.data.taskRevision == 0;
       // Managers can update anything; assignees can update status and add notes
-      allow update: if isAuth() && (
+      allow update: if isAuth() && hasValidTaskRevisionTransition() && (
         isManager() ||
         (request.auth.uid == resource.data.assignedTo &&
          request.resource.data.diff(resource.data).affectedKeys()
-           .hasOnly(['status', 'startedAt', 'completedAt', 'updatedAt', 'taskNotes']))
+           .hasOnly(['status', 'startedAt', 'completedAt', 'updatedAt', 'taskNotes', 'taskRevision']))
       );
-      allow delete: if isAuth() && isManager();
+      allow delete: if isAuth() && isManager() && hasCurrentTaskDeleteReceipt(taskId);
+    }
+
+    match /taskDeletionReceipts/{taskId} {
+      allow read: if false;
+      allow create, update: if isAuth()
+        && isManager()
+        && request.resource.data.keys().hasAll([
+          'kind', 'taskId', 'actorUid', 'expectedTaskRevision', 'committedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'kind', 'taskId', 'actorUid', 'expectedTaskRevision', 'committedAt'
+        ])
+        && request.resource.data.kind == 'task_delete'
+        && request.resource.data.taskId == taskId
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.expectedTaskRevision is int
+        && request.resource.data.expectedTaskRevision >= 0
+        && request.resource.data.committedAt == request.time;
+      allow delete: if false;
     }
 
     // ── Immutable GIB operation ledger ──────────────────────────────────────
@@ -74,12 +129,14 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll([
           'kind', 'operationId', 'ownerUid', 'planFingerprint',
           'schemaVersion', 'sourceRole', 'actionCount', 'writeCount',
-          'targetRoIds', 'createdTaskIds', 'committedAt'
+          'targetRoIds', 'createdTaskIds', 'baseRoRevisions',
+          'resultRoRevisions', 'committedAt'
         ])
         && request.resource.data.keys().hasOnly([
           'kind', 'operationId', 'ownerUid', 'planFingerprint',
           'schemaVersion', 'sourceRole', 'actionCount', 'writeCount',
-          'targetRoIds', 'createdTaskIds', 'committedAt'
+          'targetRoIds', 'createdTaskIds', 'baseRoRevisions',
+          'resultRoRevisions', 'committedAt'
         ])
         && request.resource.data.kind == 'gib_apply'
         && request.resource.data.operationId == operationId
@@ -89,7 +146,7 @@ service cloud.firestore {
         && request.resource.data.ownerUid == uid
         && request.resource.data.planFingerprint is string
         && request.resource.data.planFingerprint.matches('^[0-9a-f]{64}$')
-        && request.resource.data.schemaVersion == 1
+        && request.resource.data.schemaVersion == 2
         && request.resource.data.sourceRole is string
         && request.resource.data.sourceRole.size() <= 64
         && request.resource.data.actionCount is int
@@ -102,6 +159,10 @@ service cloud.firestore {
         && request.resource.data.targetRoIds.size() <= 100
         && request.resource.data.createdTaskIds is list
         && request.resource.data.createdTaskIds.size() <= 449
+        && request.resource.data.baseRoRevisions is map
+        && request.resource.data.baseRoRevisions.size() <= 100
+        && request.resource.data.resultRoRevisions is map
+        && request.resource.data.resultRoRevisions.size() <= 100
         && request.resource.data.committedAt == request.time;
       allow update, delete: if false;
     }

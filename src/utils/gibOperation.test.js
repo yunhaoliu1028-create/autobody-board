@@ -17,6 +17,7 @@ const base = {
     { type: 'update_target_date', roNumber: '9725', dueDate: '2026-08-20', confidence: 'high' },
     { type: 'update_rental_status', roNumber: '9725', rentalStatus: 'no' },
   ],
+  baseRoRevisions: { 'ro-9725': 3 },
 }
 
 describe('GIB operation identity', () => {
@@ -46,6 +47,7 @@ describe('GIB operation identity', () => {
     ['assignee', { actions: [...base.actions, { type: 'assign_task', assigneeName: 'Alex', title: 'QC' }] }],
     ['quantity', { actions: [...base.actions, { type: 'update_parts_order', vendor: 'Keystone', qty: 2 }] }],
     ['submitted input', { submittedInput: `${base.submittedInput} customer called` }],
+    ['reviewed RO revision', { baseRoRevisions: { 'ro-9725': 4 } }],
   ]) {
     it(`keeps the draft sentinel but changes the fingerprint when ${label} changes`, async () => {
       const first = await buildGibOperationIdentity(base)

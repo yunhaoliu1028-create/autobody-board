@@ -1,13 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  addDoc,
   arrayUnion,
   collection,
   doc,
   getDoc,
   onSnapshot,
   serverTimestamp,
-  updateDoc,
 } from 'firebase/firestore'
 import { getDownloadURL, ref as storageRef, uploadBytesResumable } from 'firebase/storage'
 import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
@@ -21,6 +19,8 @@ import MobileROSheet from '../components/MobileROSheet'
 import { partsLabel, statusLabel, t } from '../utils/mobileI18n'
 import { compressImageFile, compressVideoFrame } from '../utils/imageCompression'
 import { playShutterSound } from '../utils/cameraFeedback'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, updateTaskDoc } from '../utils/taskMutations'
 
 function IconMic() {
   return (
@@ -1060,7 +1060,7 @@ export default function MobilePainterTaskView() {
 
   const updateRoNote = async (ro, line) => {
     const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       notes: prevNotes ? `${line}\n${prevNotes}` : line,
       updatedAt: serverTimestamp(),
     })
@@ -1085,7 +1085,7 @@ export default function MobilePainterTaskView() {
         assignTo = emp?.uid ?? null
       }
       if (tmpl.setRoField && assignTo) roUpdates[tmpl.setRoField] = assignTo
-      await addDoc(collection(db, 'tasks'), {
+      await createTaskDoc(collection(db, 'tasks'), {
         roId: roData.id,
         roNumber: roData.roNumber,
         vehicleInfo: roData.vehicle || roData.vehicleInfo || '',
@@ -1107,7 +1107,7 @@ export default function MobilePainterTaskView() {
       })
     }
     if (Object.keys(roUpdates).length) {
-      await updateDoc(doc(db, 'ros', roData.id), { ...roUpdates, updatedAt: serverTimestamp() })
+      await updateRoDoc(doc(db, 'ros', roData.id), { ...roUpdates, updatedAt: serverTimestamp() })
     }
   }
 
@@ -1154,7 +1154,7 @@ export default function MobilePainterTaskView() {
 
     const line = makeNote(noteSuffix ? `${suggestion.noteText} ${noteSuffix}` : suggestion.noteText)
     const prevNotes = typeof currentRo.notes === 'string' ? currentRo.notes : ''
-    await updateDoc(roRef, {
+    await updateRoDoc(roRef, {
       status: suggestion.nextStatus,
       notes: prevNotes ? `${line}\n${prevNotes}` : line,
       updatedAt: serverTimestamp(),
@@ -1175,7 +1175,7 @@ export default function MobilePainterTaskView() {
     if (task.status === 'completed') return
     const next = nextTaskStatus(task.status)
     try {
-      await updateDoc(doc(db, 'tasks', task.id), {
+      await updateTaskDoc(doc(db, 'tasks', task.id), {
         status: next,
         startedAt: next === 'in_progress' ? serverTimestamp() : task.startedAt || null,
         completedAt: next === 'completed' ? serverTimestamp() : null,
@@ -1216,7 +1216,7 @@ export default function MobilePainterTaskView() {
 
   const updateTaskStatusFromWorker = async (task, next, ro, commandText, options = {}) => {
     if (!task || task.status === next) return ''
-    await updateDoc(doc(db, 'tasks', task.id), {
+    await updateTaskDoc(doc(db, 'tasks', task.id), {
       status: next,
       startedAt: next === 'in_progress' ? serverTimestamp() : task.startedAt || null,
       completedAt: next === 'completed' ? serverTimestamp() : null,
@@ -1275,7 +1275,7 @@ export default function MobilePainterTaskView() {
         uploadedByName: authorName,
       })
     }
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       attachments: arrayUnion(...attachments),
       updatedAt: serverTimestamp(),
     })
@@ -1346,7 +1346,7 @@ export default function MobilePainterTaskView() {
       if (noteLines.length) {
         const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
         const newNotes = noteLines.map(line => makeNote(line)).join('\n')
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           notes: prevNotes ? `${newNotes}\n${prevNotes}` : newNotes,
           updatedAt: serverTimestamp(),
         })

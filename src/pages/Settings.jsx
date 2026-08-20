@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp, getDocs, collection } from 'firebase/firestore'
 import { format } from 'date-fns'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { saveApiKey, getApiKey, clearKeyCache, saveOpenAIKey, getOpenAIKey, clearOpenAIKeyCache, summarizeDayNotes } from '../hooks/useAI'
 import { parseNoteLines } from '../components/DailyNotesLog'
@@ -361,7 +362,7 @@ export default function Settings() {
         }
 
         if (summaries.length > 0) {
-          await updateDoc(doc(db, 'ros', ro.id), { noteSummaries: summaries })
+          await updateRoDoc(doc(db, 'ros', ro.id), { noteSummaries: summaries })
         }
         setRegenState(s => ({ ...s, done: s.done + 1 }))
       }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
-import { doc, updateDoc, deleteField, getDocFromServer, getDocs, query, where, collection, serverTimestamp, arrayUnion, arrayRemove, writeBatch } from 'firebase/firestore'
+import { doc, deleteField, getDocFromServer, getDocsFromServer, query, where, collection, serverTimestamp, arrayUnion, arrayRemove, runTransaction, snapshotEqual } from 'firebase/firestore'
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
@@ -20,7 +20,21 @@ import {
   reconcileEditedActionIdentity,
   resolveRoForAction,
 } from '../utils/actionIdentity'
-import { selectPendingPhaseTaskItems, taskMatchesOpenTemplate } from '../utils/gibTaskPlanning'
+import {
+  actionHasExplicitAssigneeIntent,
+  gibTaskSemanticKey,
+  hasOpenTaskForSemanticKey,
+  phaseIsCompleteAtStatus,
+  selectPendingPhaseTaskItems,
+} from '../utils/gibTaskPlanning'
+import {
+  captureBaseRoRevisions,
+  gibStalePlanError,
+  isGibStalePlanError,
+  normalizeGibRevision,
+  reviewedRoRevisionsAreComplete,
+  taskUndoFingerprint,
+} from '../utils/gibConcurrency'
 import {
   GIB_DRAFT_SCHEMA_VERSION,
   isGibDraftPayloadForOwner,
@@ -38,6 +52,7 @@ import {
   gibTaskDocumentId,
   operationLedgerMatches,
 } from '../utils/gibOperation'
+import { normalizeTaskRevision } from '../utils/taskMutations'
 import {
   extractPartsOrderCandidates,
   mergePreferredPartsOrderActions,
@@ -533,20 +548,21 @@ function effectiveTaskData(item, taskUpdates) {
   return { ...item.data, ...(taskUpdates.get(item.ref.path)?.fields || {}) }
 }
 
-function hasOpenTaskForTemplate(taskCatalog, taskUpdates, roId, tmpl) {
-  if (!roId || !tmpl?.phase) return false
-  return (taskCatalog.get(roId) || []).some(item => (
-    taskMatchesOpenTemplate(effectiveTaskData(item, taskUpdates), tmpl)
-  ))
-}
-
 async function loadTaskCatalog(roIds = []) {
   const uniqueRoIds = [...new Set(roIds.filter(Boolean))]
   const entries = await Promise.all(uniqueRoIds.map(async roId => {
-    const snap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roId)))
-    return [roId, snap.docs.map(taskDoc => ({ ref: taskDoc.ref, data: taskDoc.data(), isNew: false }))]
+    const snap = await getDocsFromServer(query(collection(db, 'tasks'), where('roId', '==', roId)))
+    return [roId, snap.docs]
   }))
-  return new Map(entries)
+  const snapshots = new Map()
+  const catalog = new Map(entries.map(([roId, taskDocs]) => [
+    roId,
+    taskDocs.map(taskDoc => {
+      snapshots.set(taskDoc.ref.path, taskDoc)
+      return { ref: taskDoc.ref, data: taskDoc.data(), isNew: false }
+    }),
+  ]))
+  return { catalog, snapshots }
 }
 
 function planTaskUpdate(item, fields, taskUpdates) {
@@ -555,7 +571,14 @@ function planTaskUpdate(item, fields, taskUpdates) {
     return
   }
   const key = item.ref.path
-  const planned = taskUpdates.get(key) || { ref: item.ref, fields: {}, restoreFields: {} }
+  const baseRevision = normalizeTaskRevision(item.data.taskRevision)
+  const planned = taskUpdates.get(key) || {
+    ref: item.ref,
+    fields: {},
+    restoreFields: {},
+    baseRevision,
+    resultRevision: baseRevision + 1,
+  }
   for (const field of Object.keys(fields)) {
     if (!Object.prototype.hasOwnProperty.call(planned.restoreFields, field)) {
       planned.restoreFields[field] = Object.prototype.hasOwnProperty.call(item.data, field)
@@ -563,7 +586,7 @@ function planTaskUpdate(item, fields, taskUpdates) {
         : deleteField()
     }
   }
-  planned.fields = { ...planned.fields, ...fields }
+  planned.fields = { ...planned.fields, ...fields, taskRevision: planned.resultRevision }
   taskUpdates.set(key, planned)
 }
 
@@ -612,10 +635,9 @@ function taskFieldsFromTemplate({ roDoc, tmpl, assignTo, user, author, employees
   return fields
 }
 
-function addDownstreamTasksForEntry({ entry, status, roDoc, employees, user, author, addTask, taskCatalog, taskUpdates }) {
+function addDownstreamTasksForEntry({ entry, status, roDoc, employees, user, author, addTask }) {
   const downstreamTemplates = getDownstreamTasks(status, { ...roDoc, ...entry.fields })
   for (const tmpl of downstreamTemplates) {
-    if (hasOpenTaskForTemplate(taskCatalog, taskUpdates, roDoc.id, tmpl)) continue
     let assignTo = tmpl.assignedToUid
     if (!assignTo && tmpl.assignedToRole) {
       const emp = employees.find(e => e.role === tmpl.assignedToRole)
@@ -1389,11 +1411,24 @@ function normalizePaintWorkflowActionsForScope(rawActions = [], inputText = '', 
   const actions = rawActions.map(action => ({ ...action, type: action.type ?? action.action }))
   const extras = []
 
+  const explicitPaintAssignee = (roDoc, role) => {
+    for (const action of actions) {
+      if (!actionTargetsRo(action, roDoc)) continue
+      if (action.type !== 'assign_painter' && action.type !== 'assign_task') continue
+      const assignee = resolveActionAssignee(employees, action)
+      if (assignee?.role !== role) continue
+      if (actionHasExplicitAssigneeIntent(action, inputText, assignee, employees)) return assignee
+    }
+    return null
+  }
+
   const addPaintPrimaries = (roDoc) => {
     if (!roDoc?.id) return
+    const explicitPainter = explicitPaintAssignee(roDoc, 'painter')
+    const explicitHelper = explicitPaintAssignee(roDoc, 'paint_helper')
     const paintTeam = {
-      painter: employees.find(e => e.role === 'painter'),
-      helper: employees.find(e => e.role === 'paint_helper'),
+      painter: explicitPainter || employees.find(e => e.role === 'painter'),
+      helper: explicitHelper || employees.find(e => e.role === 'paint_helper'),
     }
     extras.push({
       type: 'assign_task',
@@ -1407,6 +1442,7 @@ function normalizePaintWorkflowActionsForScope(rawActions = [], inputText = '', 
       taskKind: 'primary',
       autoGenerated: true,
       autoReason: 'paint_ready',
+      gibExplicitAssigneeChange: Boolean(explicitHelper),
     })
     extras.push({
       type: 'assign_task',
@@ -1420,6 +1456,7 @@ function normalizePaintWorkflowActionsForScope(rawActions = [], inputText = '', 
       taskKind: 'primary',
       autoGenerated: true,
       autoReason: 'paint_ready',
+      gibExplicitAssigneeChange: Boolean(explicitPainter),
     })
   }
 
@@ -1570,7 +1607,13 @@ function EditableActionCard({ action, onChange, onDelete, employees, ros }) {
   const meta = ACTION_LABELS[draft.type] ?? { icon: '•', label: draft.type, color: 'bg-gray-50 border-gray-200' }
 
   const save = () => {
-    onChange(reconcileEditedActionIdentity(draft, action))
+    const reconciled = reconcileEditedActionIdentity(draft, action)
+    const assigneeChanged = normalizeName(draft.assigneeName) !== normalizeName(action.assigneeName)
+      || String(draft.assigneeUid || '') !== String(action.assigneeUid || '')
+    onChange({
+      ...reconciled,
+      ...(assigneeChanged ? { assigneeUserEdited: true } : {}),
+    })
     setEditing(false)
   }
   const set  = (patch) => setDraft(prev => ({ ...prev, ...patch }))
@@ -2421,6 +2464,7 @@ export default function AIInputBox({
   const [recentApplied,   setRecentApplied]   = useState(null)
   const [undoing,         setUndoing]         = useState(false)
   const [draftNonce,      setDraftNonce]      = useState('')
+  const [baseRoRevisions, setBaseRoRevisions] = useState({})
   const [operationAttempt, setOperationAttempt] = useState(null)
   const [hydratedStorageKey, setHydratedStorageKey] = useState(null)
   const [autoReparseRequested, setAutoReparseRequested] = useState(false)
@@ -2440,6 +2484,7 @@ export default function AIInputBox({
   const submitInvocationRef = useRef(null)
   const undoInvocationRef = useRef(null)
   const photoActionTimerRef = useRef(null)
+  const photoUploadAttemptRef = useRef(null)
   // Whisper voice refs
   const mediaRecorderRef  = useRef(null)
   const audioChunksRef    = useRef([])
@@ -2499,12 +2544,14 @@ export default function AIInputBox({
     setNoKey(false)
     setIsTranscribing(false)
     setDraftNonce('')
+    setBaseRoRevisions({})
     operationAttemptRef.current = null
     setOperationAttempt(null)
     setAutoReparseRequested(false)
     applyInvocationRef.current = null
     submitInvocationRef.current = null
     undoInvocationRef.current = null
+    photoUploadAttemptRef.current = null
     setRecentApplied(null)
     setUndoing(false)
     setImages(previous => {
@@ -2542,6 +2589,11 @@ export default function AIInputBox({
       setResult(resultMetadataWithoutActions(payload.result))
       setActions(Array.isArray(payload.actions) ? payload.actions : [])
       setDraftNonce(typeof payload.draftNonce === 'string' ? payload.draftNonce : '')
+      setBaseRoRevisions(
+        payload.baseRoRevisions && typeof payload.baseRoRevisions === 'object'
+          ? payload.baseRoRevisions
+          : {},
+      )
       submittedText.current = typeof payload.submittedInput === 'string' ? payload.submittedInput : ''
       const savedAttempt = payload.operationAttempt || null
       const nextAttempt = recoverInFlight ? recoverGibAttemptAfterReload(savedAttempt) : savedAttempt
@@ -2582,6 +2634,7 @@ export default function AIInputBox({
         setResult(null)
         setActions([])
         setDraftNonce('')
+        setBaseRoRevisions({})
         operationAttemptRef.current = null
         setOperationAttempt(null)
         setAutoReparseRequested(false)
@@ -2621,6 +2674,7 @@ export default function AIInputBox({
       result,
       actions,
       draftNonce,
+      baseRoRevisions,
       submittedInput: submittedText.current,
       operationAttempt,
       autoReparseRequested,
@@ -2641,6 +2695,7 @@ export default function AIInputBox({
   }, [
     actions,
     autoReparseRequested,
+    baseRoRevisions,
     draftNonce,
     draftStorageKey,
     effectiveDraftScope,
@@ -2685,6 +2740,7 @@ export default function AIInputBox({
     setResult(null)
     setActions([])
     setDraftNonce('')
+    setBaseRoRevisions({})
     setOperationAttempt(null)
     submittedText.current = ''
     actionRevision.current += 1
@@ -2734,6 +2790,7 @@ export default function AIInputBox({
         submittedText.current = requestText
         setResult(resultMetadata)
         setActions(reviewedActions)
+        setBaseRoRevisions(captureBaseRoRevisions(reviewedActions, ros))
         setDraftNonce(prev => prev || createGibDraftNonce())
         setOperationAttempt(null)
         setAutoReparseRequested(false)
@@ -2927,9 +2984,22 @@ export default function AIInputBox({
     }
     const { label: typeLabel, slug: typeSlug } = detectPhotoType(text)
     const author = employees.find(e => e.uid === user.uid)?.name ?? user.email
-    const stamp  = format(new Date(), 'MM/dd HH:mm')
-    const now    = new Date().toISOString()
-    const ts     = Date.now()
+    const attemptSignature = JSON.stringify({
+      generation: uploadLifecycle.generation,
+      roId: roDoc.id,
+      text: text.trim(),
+      images: images.map(image => [image.name || '', image.blob?.size || 0, image.blob?.type || '']),
+    })
+    if (photoUploadAttemptRef.current?.signature !== attemptSignature) {
+      const attemptedAt = new Date()
+      photoUploadAttemptRef.current = {
+        signature: attemptSignature,
+        id: createGibDraftNonce(),
+        noteStamp: format(attemptedAt, 'MM/dd HH:mm'),
+        uploadedAt: attemptedAt.toISOString(),
+      }
+    }
+    const uploadAttempt = photoUploadAttemptRef.current
 
     try {
       // Upload sequentially — avoids overwhelming mobile radio with concurrent streams
@@ -2937,28 +3007,79 @@ export default function AIInputBox({
       for (let idx = 0; idx < images.length; idx++) {
         const img    = images[idx]
         const padded = String(idx + 1).padStart(2, '0')
-        const filename = `${ts}_${typeSlug}_${padded}.jpg`
+        const filename = `${uploadAttempt.id}_${typeSlug}_${padded}.jpg`
         const sRef = storageRef(storage, `ros/${roDoc.id}/attachments/${filename}`)
 
         await uploadOneBlob(sRef, img.blob)
         const url = await getDownloadURL(sRef)
 
-        attachments.push({ url, name: `${typeSlug}_${padded}`, label: typeLabel, uploadedAt: now })
+        attachments.push({
+          url,
+          name: `${typeSlug}_${padded}`,
+          label: typeLabel,
+          uploadedAt: uploadAttempt.uploadedAt,
+          uploadAttemptId: uploadAttempt.id,
+          storagePath: sRef.fullPath,
+          photoIndex: idx + 1,
+        })
         setUploadStatus({ done: idx + 1, total: images.length })
       }
 
-      // Write attachments + auto-note in one updateDoc
+      // Merge attachments + note against the current server RO. Uploads can
+      // take several seconds, so the React RO snapshot may be stale by now.
       const n         = images.length
-      const noteEntry = `[${stamp} - ${author}] Uploaded ${n} ${typeLabel} photo${n !== 1 ? 's' : ''}`
-      await updateDoc(doc(db, 'ros', roDoc.id), {
-        attachments: arrayUnion(...attachments),
-        notes:       `${noteEntry}\n${roDoc.notes ?? ''}`,
-        updatedAt:   serverTimestamp(),
+      const noteEntry = `[${uploadAttempt.noteStamp} - ${author}] Uploaded ${n} ${typeLabel} photo${n !== 1 ? 's' : ''}`
+      await runTransaction(db, async transaction => {
+        const roRef = doc(db, 'ros', roDoc.id)
+        const current = await transaction.get(roRef)
+        if (!current.exists()) throw new Error(`RO #${roNumber} no longer exists`)
+        const currentData = current.data()
+        const currentAttachments = Array.isArray(currentData.attachments)
+          ? currentData.attachments
+          : []
+        const incomingByKey = new Map(attachments.map(attachment => [
+          `${attachment.uploadAttemptId}:${attachment.photoIndex}`,
+          attachment,
+        ]))
+        const matchedKeys = new Set()
+        let attachmentChanged = false
+        const mergedAttachments = currentAttachments.map(existing => {
+          const key = existing?.uploadAttemptId && existing?.photoIndex
+            ? `${existing.uploadAttemptId}:${existing.photoIndex}`
+            : ''
+          const incoming = key ? incomingByKey.get(key) : null
+          if (!incoming) return existing
+          matchedKeys.add(key)
+          const changed = Object.keys(incoming).some(field => existing?.[field] !== incoming[field])
+          if (!changed) return existing
+          attachmentChanged = true
+          return { ...existing, ...incoming }
+        })
+        attachments.forEach(attachment => {
+          const key = `${attachment.uploadAttemptId}:${attachment.photoIndex}`
+          if (matchedKeys.has(key)) return
+          attachmentChanged = true
+          mergedAttachments.push(attachment)
+        })
+        if (!attachmentChanged) return
+        const updates = {
+          attachments: mergedAttachments,
+          gibRevision: normalizeGibRevision(currentData.gibRevision) + 1,
+          updatedAt: serverTimestamp(),
+        }
+        // A lost acknowledgement may lead to overwriting the same Storage
+        // objects and receiving refreshed download URLs. Replace those URLs,
+        // but never add the upload note twice for the same stable attempt.
+        if (matchedKeys.size === 0) {
+          updates.notes = `${noteEntry}\n${currentData.notes ?? ''}`
+        }
+        transaction.update(roRef, updates)
       })
 
       if (uploadUiIsCurrent()) {
         toast.success(`${n} ${typeLabel} photo${n !== 1 ? 's' : ''} → RO #${roNumber}`)
         rememberHistory(text)
+        photoUploadAttemptRef.current = null
         setText(''); setImages([])
       }
     } catch (err) {
@@ -3001,6 +3122,7 @@ export default function AIInputBox({
     setReparse(false)
     setLoading(true); setError(''); setResult(null); setActions([]); setApplied(false)
     setDraftNonce(nextDraftNonce)
+    setBaseRoRevisions({})
     setOperationAttempt(null)
     actionRevision.current += 1
     const requestActionRevision = actionRevision.current
@@ -3032,6 +3154,7 @@ export default function AIInputBox({
       submittedText.current = requestText
       setResult(resultMetadata)
       setActions(reviewedActions)
+      setBaseRoRevisions(captureBaseRoRevisions(reviewedActions, ros))
       actionRevision.current += 1
       rememberHistory(requestText)
     } catch (err) {
@@ -3067,6 +3190,10 @@ export default function AIInputBox({
       setApplyError(`${actionDateValidationError(invalidDateAction)}${roLabel}. Edit or remove that action before applying.`)
       return
     }
+    if (!reviewedRoRevisionsAreComplete(actions, ros, baseRoRevisions)) {
+      setApplyError('This reviewed draft is missing its RO version snapshot. Submit it again before applying.')
+      return
+    }
     if (['planning', 'committing'].includes(operationAttempt?.status)) {
       setApplyError('This GIB draft is already being applied in another view. Wait for it to finish before verifying.')
       return
@@ -3088,6 +3215,7 @@ export default function AIInputBox({
         result,
         actions: applyActions,
         draftNonce,
+        baseRoRevisions,
         submittedInput,
         operationAttempt: attempt,
       }
@@ -3135,7 +3263,8 @@ export default function AIInputBox({
     }
     setSharedAttempt(initialLock, { required: true })
     const stamp  = format(new Date(), 'MM/dd HH:mm')
-    const author = employees.find(e => e.uid === user.uid)?.name ?? user.email
+    const actor = employees.find(e => e.uid === user.uid)
+    const author = actor?.name ?? user.email
     const now    = new Date().toISOString()
     const operationIdentity = await buildGibOperationIdentity({
       draftNonce,
@@ -3143,6 +3272,7 @@ export default function AIInputBox({
       sourceRole,
       submittedInput,
       actions: applyActions,
+      baseRoRevisions,
     })
     if (
       priorUnconfirmedAttempt
@@ -3159,7 +3289,7 @@ export default function AIInputBox({
     setSharedAttempt({ ...operationIdentity, status: priorUnconfirmedAttempt ? 'unknown' : 'planning' }, { required: true })
     const operationRef = doc(db, 'gibOperations', user.uid, 'operations', operationIdentity.operationId)
 
-    const completeApplyUi = ({ alreadyApplied = false, competingRevision = false, roRestores = [], taskRefs = [], taskRestores = [] } = {}) => {
+    const completeApplyUi = ({ alreadyApplied = false, competingRevision = false, roRestores = [], taskRefs = [], taskFingerprints = {}, taskRestores = [] } = {}) => {
       if (!applyUiIsCurrent()) return
       const allNums = [...new Set(applyActions.map(action => action.roNumber).filter(Boolean))]
         .map(number => `#${number}`)
@@ -3182,7 +3312,9 @@ export default function AIInputBox({
           actionCount: applyActions.length,
           roRestores,
           taskRefs,
+          taskFingerprints,
           taskRestores,
+          undoSupported: taskRefs.length === 0,
         })
       }
 
@@ -3193,6 +3325,7 @@ export default function AIInputBox({
       latestText.current = ''
       submittedText.current = ''
       setDraftNonce('')
+      setBaseRoRevisions({})
       operationAttemptRef.current = null
       setOperationAttempt(null)
       setImages([])
@@ -3220,14 +3353,33 @@ export default function AIInputBox({
     } catch (preflightError) {
       // A server read can fail transiently. The create-only ledger in the same
       // atomic batch remains the authoritative duplicate-write guard.
+      if (priorUnconfirmedAttempt) {
+        throw new Error(`The earlier Apply is still unconfirmed because its safety record could not be read: ${preflightError.message}`)
+      }
     }
 
     // Read task state before planning. No Firestore write is started until every
     // action has been resolved and the complete mutation plan has been validated.
-    const targetedRoIds = applyActions
+    const targetedRoIds = [...new Set(applyActions
       .map(action => resolveRoForAction(ros, action)?.id)
-      .filter(Boolean)
-    const taskCatalog = await loadTaskCatalog(targetedRoIds)
+      .filter(Boolean))]
+    const targetRoSnapshots = new Map((await Promise.all(targetedRoIds.map(async roId => {
+      const snapshot = await getDocFromServer(doc(db, 'ros', roId))
+      return [roId, snapshot]
+    }))))
+    for (const roId of targetedRoIds) {
+      const snapshot = targetRoSnapshots.get(roId)
+      const expectedRevision = normalizeGibRevision(baseRoRevisions[roId])
+      if (!snapshot?.exists() || normalizeGibRevision(snapshot.data().gibRevision) !== expectedRevision) {
+        throw gibStalePlanError()
+      }
+    }
+    const serverRosById = new Map([...targetRoSnapshots].map(([roId, snapshot]) => [
+      roId,
+      { id: roId, ...snapshot.data() },
+    ]))
+    const planningRos = ros.map(ro => serverRosById.get(ro.id) || ro)
+    const { catalog: taskCatalog, snapshots: taskSnapshots } = await loadTaskCatalog(targetedRoIds)
 
     // ── Step 1: build an in-memory mutation plan ─────────────────────────────
     const roMap = new Map() // roId → { roDoc, fields, changeLogEntries }
@@ -3244,13 +3396,53 @@ export default function AIInputBox({
       for (const k of Object.keys(data)) {
         if (data[k] !== undefined) clean[k] = data[k]
       }
+      const explicitExistingAssigneeChange = clean.gibExplicitAssigneeChange === true
+      delete clean.gibExplicitAssigneeChange
+      const semanticKey = gibTaskSemanticKey(clean)
+      if (clean.roId && semanticKey) {
+        const roDoc = serverRosById.get(clean.roId)
+        const effectiveStatus = roMap.get(clean.roId)?.fields.status || roDoc?.status
+        if (phaseIsCompleteAtStatus(clean.phase, effectiveStatus)) {
+          return null
+        }
+        const tasksForRo = taskCatalog.get(clean.roId) || []
+        if (hasOpenTaskForSemanticKey(tasksForRo, taskUpdates, clean)) {
+          const existingItem = tasksForRo.find(item => {
+            const task = effectiveTaskData(item, taskUpdates)
+            return task.status !== 'completed' && gibTaskSemanticKey(task) === semanticKey
+          })
+          const existingTask = existingItem ? effectiveTaskData(existingItem, taskUpdates) : null
+          if (
+            existingItem
+            && explicitExistingAssigneeChange
+            && clean.assignedTo
+            && existingTask?.assignedTo !== clean.assignedTo
+          ) {
+            if (existingTask.status !== 'pending') {
+              throw new Error(`${existingTask.title || 'Primary task'} is already ${existingTask.status}. Reassign it from the task board before changing this RO assignment.`)
+            }
+            planTaskUpdate(existingItem, {
+              assignedTo: clean.assignedTo,
+              assignedToName: clean.assignedToName || '',
+              assignedBy: clean.assignedBy,
+              assignedByName: clean.assignedByName || '',
+              assignedAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            }, taskUpdates)
+          }
+          return existingItem?.ref || null
+        }
+        clean.gibSemanticKey = semanticKey
+      }
       const operationTaskIndex = plannedTaskCreates.length
       const taskRef = doc(db, 'tasks', gibTaskDocumentId(operationIdentity.operationId, operationTaskIndex))
       const planned = {
         ref: taskRef,
         data: {
           ...clean,
+          taskRevision: 0,
           gibOperationId: operationIdentity.operationId,
+          gibOperationOwnerUid: user.uid,
           gibOperationTaskIndex: operationTaskIndex,
         },
         isNew: true,
@@ -3272,7 +3464,7 @@ export default function AIInputBox({
     }
 
     for (const action of applyActions) {
-      const roDoc = resolveRoForAction(ros, action)
+      const roDoc = resolveRoForAction(planningRos, action)
       if (!roDoc) {
         if (action.type === 'assign_task') {
           const assignee = resolveActionAssignee(employees, action)
@@ -3336,7 +3528,7 @@ export default function AIInputBox({
           impliedCompletedPhasesForStatus(action.status).forEach(phase => {
             requestPhaseCompletion(roDoc.id, phase)
           })
-          addDownstreamTasksForEntry({ entry, status: action.status, roDoc, employees, user, author, addTask, taskCatalog, taskUpdates })
+          addDownstreamTasksForEntry({ entry, status: action.status, roDoc, employees, user, author, addTask })
           break
         }
         case 'update_parts_status':
@@ -3577,7 +3769,7 @@ export default function AIInputBox({
           }
           entry.fields.assignedBodyMan = assignee.uid
           entry.changeLogEntries.push({ type: 'assign_body_man', value: assignee.uid, label: assignee.name, by: author, at: now, source: 'gib' })
-          const actionInput = scopedInputForRo(submittedInput, action.roNumber, applyActions, ros)
+          const actionInput = scopedInputForRo(submittedInput, action.roNumber, applyActions, planningRos)
           const phase = bodyPhaseFromActionsForRo(applyActions, action.roNumber, actionInput)
           const hasExplicitPrimaryBodyTask = applyActions.some(other =>
             other !== action
@@ -3603,6 +3795,7 @@ export default function AIInputBox({
               source: 'gib',
               autoTriggered: true,
               taskKind: 'primary',
+              gibExplicitAssigneeChange: actionHasExplicitAssigneeIntent(action, actionInput, assignee, employees),
               createdAt: serverTimestamp(),
             })
           }
@@ -3621,7 +3814,7 @@ export default function AIInputBox({
           break
         }
         case 'assign_task': {
-          const actionInput = scopedInputForRo(submittedInput, action.roNumber, applyActions, ros)
+          const actionInput = scopedInputForRo(submittedInput, action.roNumber, applyActions, planningRos)
           const roActionText = `${sameRoActionText(applyActions, action.roNumber)} ${actionInput}`
           const contextPhase = bodyPhaseFromText(roActionText)
           const isSecondaryBodyTask = action.taskKind === 'secondary'
@@ -3659,6 +3852,7 @@ export default function AIInputBox({
             status: 'pending',
             source: 'gib',
             autoTriggered: false,
+            gibExplicitAssigneeChange: actionHasExplicitAssigneeIntent(action, actionInput, assignee, employees),
             createdAt: serverTimestamp(),
           }
           if (isPaintAssignee && action.taskKind === 'primary') {
@@ -3668,17 +3862,15 @@ export default function AIInputBox({
               category: 'paint',
               taskKind: 'primary',
             }
-            if (!hasOpenTaskForTemplate(taskCatalog, taskUpdates, roDoc.id, tmpl)) {
-              addTask({
-                ...taskBase,
-                title: tmpl.title,
-                description: '',
-                phase: tmpl.phase,
-                category: 'paint',
-                taskKind: 'primary',
-                autoTriggered: true,
-              })
-            }
+            addTask({
+              ...taskBase,
+              title: tmpl.title,
+              description: '',
+              phase: tmpl.phase,
+              category: 'paint',
+              taskKind: 'primary',
+              autoTriggered: true,
+            })
             break
           }
           if (isPaintAssignee && !isBodyTask && !isSecondaryBodyTask) {
@@ -3738,7 +3930,7 @@ export default function AIInputBox({
               ? `${noteLine}\n${entry.fields.notes}`
               : `${noteLine}\n${roDoc.notes ?? ''}`
             entry.changeLogEntries.push({ type: 'complete_phase', value: phase, label: `${phase} phase complete`, by: author, at: now, source: 'gib' })
-            addDownstreamTasksForEntry({ entry, status: suggestion.nextStatus, roDoc, employees, user, author, addTask, taskCatalog, taskUpdates })
+            addDownstreamTasksForEntry({ entry, status: suggestion.nextStatus, roDoc, employees, user, author, addTask })
           }
           requestPhaseCompletion(roDoc.id, phase)
           break
@@ -3748,7 +3940,7 @@ export default function AIInputBox({
 
     for (const entry of roMap.values()) {
       const roDoc = entry.roDoc
-      const roInput = scopedInputForRo(submittedInput, roDoc.roNumber, applyActions, ros)
+      const roInput = scopedInputForRo(submittedInput, roDoc.roNumber, applyActions, planningRos)
       const roActionText = `${sameRoActionText(applyActions, roDoc.roNumber)} ${roInput}`.toLowerCase()
       if (mentionsAuthorization(roActionText)) {
         entry.fields.customerAuthorized = true
@@ -3769,7 +3961,7 @@ export default function AIInputBox({
         entry.fields.status = 'body_work'
         prependRoNote(entry, roDoc, `[${stamp} - ${author}] Authorization and parts status confirmed. Repair task released to body technician.`)
         entry.changeLogEntries.push({ type: 'auto_release_repair', value: 'body_work', label: 'Repair task released', by: author, at: now, source: 'auto' })
-        addDownstreamTasksForEntry({ entry, status: 'body_work', roDoc, employees, user, author, addTask, taskCatalog, taskUpdates })
+        addDownstreamTasksForEntry({ entry, status: 'body_work', roDoc, employees, user, author, addTask })
       }
     }
 
@@ -3782,6 +3974,7 @@ export default function AIInputBox({
 
     // ── Step 2: finalize restores, then commit every write atomically ─────────
     // (Images are handled in handleDirectImageUpload and never enter this batch.)
+    const resultRoRevisions = {}
     const roRestores = [...roMap.values()].map(({ roDoc, fields, changeLogEntries }) => {
       const restoreFields = {}
       Object.keys(fields).forEach(key => {
@@ -3789,18 +3982,32 @@ export default function AIInputBox({
         const prev = getPathValue(roDoc, key)
         restoreFields[key] = prev === undefined ? deleteField() : prev
       })
-      return { roId: roDoc.id, fields: restoreFields, changeLogEntries }
+      const baseRevision = normalizeGibRevision(baseRoRevisions[roDoc.id])
+      const resultRevision = baseRevision + 1
+      resultRoRevisions[roDoc.id] = resultRevision
+      return { roId: roDoc.id, fields: restoreFields, changeLogEntries, baseRevision, resultRevision }
     })
 
-    const taskRestores = [...taskUpdates.values()].map(({ ref, restoreFields }) => ({ ref, fields: restoreFields }))
+    const taskRestores = [...taskUpdates.values()].map(({ ref, restoreFields, fields }) => ({
+      ref,
+      fields: restoreFields,
+      resultRevision: fields.taskRevision,
+      expectedAfterFingerprint: taskUndoFingerprint({
+        ...(taskSnapshots.get(ref.path)?.data() || {}),
+        ...fields,
+      }),
+    }))
     const createdTaskRefs = plannedTaskCreates.map(item => item.ref)
+    const createdTaskFingerprints = Object.fromEntries(plannedTaskCreates.map(item => [
+      item.ref.path,
+      taskUndoFingerprint(item.data),
+    ]))
     const businessWriteCount = roMap.size + plannedTaskCreates.length + taskUpdates.size
     const writeCount = businessWriteCount + 1 // immutable operation ledger
     const limitError = gibOperationLimitError({ actions: applyActions, targetRoIds: targetedRoIds, writeCount })
     if (limitError) throw new Error(limitError)
 
-    const batch = writeBatch(db)
-    batch.set(operationRef, {
+    const ledgerData = {
       kind: 'gib_apply',
       operationId: operationIdentity.operationId,
       ownerUid: user.uid,
@@ -3811,26 +4018,96 @@ export default function AIInputBox({
       writeCount,
       targetRoIds: [...new Set(targetedRoIds)],
       createdTaskIds: plannedTaskCreates.map(item => item.ref.id),
+      baseRoRevisions,
+      resultRoRevisions,
       committedAt: serverTimestamp(),
-    })
-    for (const { roDoc, fields, changeLogEntries } of roMap.values()) {
-      const updates = { ...fields }
-      if (changeLogEntries.length) updates.changeLog = arrayUnion(...changeLogEntries)
-      batch.update(doc(db, 'ros', roDoc.id), updates)
     }
-    plannedTaskCreates.forEach(item => batch.set(item.ref, item.data))
-    taskUpdates.forEach(item => batch.update(item.ref, item.fields))
 
     // ── Step 3: one commit — either every mutation succeeds or none do ────────
     setSharedAttempt({ ...operationIdentity, status: 'committing' }, { required: true })
     try {
-      await awaitAtomicCommit(batch.commit(), () => {
+      const commitResult = await awaitAtomicCommit(runTransaction(db, async transaction => {
+        const operationSnapshot = await transaction.get(operationRef)
+        if (operationSnapshot.exists()) {
+          return {
+            status: operationLedgerMatches(operationSnapshot.data(), operationIdentity, user.uid)
+              ? 'already_applied'
+              : 'competing_revision',
+          }
+        }
+
+        // Queries are not supported inside Web SDK transactions. Re-read every
+        // exact server-prefetched document and compare it before any write. A
+        // concurrent participating GIB task insert also advances its RO
+        // revision, fencing the query membership snapshot.
+        const roSnapshotEntries = [...targetRoSnapshots.entries()]
+        const existingTaskSnapshots = [...taskSnapshots.values()]
+        const transactionRoSnapshots = await Promise.all(
+          roSnapshotEntries.map(([, snapshot]) => transaction.get(snapshot.ref)),
+        )
+        const transactionTaskSnapshots = await Promise.all(
+          existingTaskSnapshots.map(snapshot => transaction.get(snapshot.ref)),
+        )
+        const plannedTaskSnapshots = await Promise.all(
+          plannedTaskCreates.map(item => transaction.get(item.ref)),
+        )
+
+        transactionRoSnapshots.forEach((snapshot, index) => {
+          const [roId, reviewedSnapshot] = roSnapshotEntries[index]
+          const expectedRevision = normalizeGibRevision(baseRoRevisions[roId])
+          if (
+            !snapshotEqual(snapshot, reviewedSnapshot)
+            || normalizeGibRevision(snapshot.data()?.gibRevision) !== expectedRevision
+          ) {
+            throw gibStalePlanError()
+          }
+        })
+        transactionTaskSnapshots.forEach((snapshot, index) => {
+          if (!snapshotEqual(snapshot, existingTaskSnapshots[index])) {
+            throw gibStalePlanError('Task data changed after these actions were reviewed.')
+          }
+        })
+        if (plannedTaskSnapshots.some(snapshot => snapshot.exists())) {
+          throw gibStalePlanError('A planned GIB task ID already exists without its operation record.')
+        }
+
+        transaction.set(operationRef, ledgerData)
+        for (const { roDoc, fields, changeLogEntries } of roMap.values()) {
+          const updates = { ...fields, gibRevision: resultRoRevisions[roDoc.id] }
+          if (changeLogEntries.length) updates.changeLog = arrayUnion(...changeLogEntries)
+          transaction.update(doc(db, 'ros', roDoc.id), updates)
+        }
+        plannedTaskCreates.forEach(item => transaction.set(item.ref, item.data))
+        taskUpdates.forEach(item => transaction.update(item.ref, item.fields))
+        return { status: 'applied' }
+      }), () => {
         setApplyError('Apply is still being committed. Do not retry or refresh until it finishes.')
       })
+      if (commitResult.status === 'competing_revision') {
+        setApplyError('')
+        completeApplyUi({ alreadyApplied: true, competingRevision: true })
+        return
+      }
+      if (commitResult.status === 'already_applied') {
+        setApplyError('')
+        completeApplyUi({ alreadyApplied: true })
+        return
+      }
       setApplyError('')
-      completeApplyUi({ roRestores, taskRefs: createdTaskRefs, taskRestores })
+      completeApplyUi({
+        roRestores,
+        taskRefs: createdTaskRefs,
+        taskFingerprints: createdTaskFingerprints,
+        taskRestores,
+      })
     } catch (err) {
       console.error('[handleApply]', err)
+      if (isGibStalePlanError(err)) {
+        unlockSharedAttempt()
+        if (applyUiIsCurrent()) setBaseRoRevisions({})
+        setApplyError('RO or task data changed after you reviewed these actions. No changes were written. Click Submit to generate and review a fresh plan.')
+        return
+      }
       try {
         const committedOperation = await getDocFromServer(operationRef)
         if (committedOperation.exists()) {
@@ -3858,6 +4135,10 @@ export default function AIInputBox({
       if (priorUnconfirmedAttempt) {
         setSharedAttempt(priorUnconfirmedAttempt)
         setApplyError('Apply verification failed. The original attempt remains locked; use Verify Apply again when the connection is available. ' + err.message)
+      } else if (isGibStalePlanError(err)) {
+        unlockSharedAttempt()
+        if (applyUiIsCurrent()) setBaseRoRevisions({})
+        setApplyError('RO or task data changed after you reviewed these actions. No changes were written. Click Submit to generate and review a fresh plan.')
       } else {
         unlockSharedAttempt()
         setApplyError('Apply failed: ' + err.message)
@@ -3869,6 +4150,7 @@ export default function AIInputBox({
   }
 
   const planIsStale = isGibPlanStale(actions, text, submittedText.current)
+  const reviewedRevisionsReady = reviewedRoRevisionsAreComplete(actions, ros, baseRoRevisions)
   const draftLocked = isGibDraftMutationLocked(operationAttempt)
   const applyInProgressElsewhere = ['planning', 'committing'].includes(operationAttempt?.status)
   const canApply = actions.length > 0
@@ -3877,6 +4159,7 @@ export default function AIInputBox({
     && !applyInProgressElsewhere
     && !reparsing
     && !planIsStale
+    && reviewedRevisionsReady
   const canSubmit = (text.trim() || images.length > 0)
     && draftHydratedForOwner
     && !loading
@@ -3893,7 +4176,9 @@ export default function AIInputBox({
     parseRequestRevision.current += 1
     actionRevision.current += 1
     setOperationAttempt(null)
-    setActions(prev => prev.map((action, actionIndex) => actionIndex === index ? updated : action))
+    const nextActions = actions.map((action, actionIndex) => actionIndex === index ? updated : action)
+    setActions(nextActions)
+    setBaseRoRevisions(previous => captureBaseRoRevisions(nextActions, ros, previous))
   }
 
   const deleteActionAt = (index) => {
@@ -3905,7 +4190,9 @@ export default function AIInputBox({
     parseRequestRevision.current += 1
     actionRevision.current += 1
     setOperationAttempt(null)
-    setActions(prev => prev.filter((_, actionIndex) => actionIndex !== index))
+    const nextActions = actions.filter((_, actionIndex) => actionIndex !== index)
+    setActions(nextActions)
+    setBaseRoRevisions(previous => captureBaseRoRevisions(nextActions, ros, previous))
   }
 
   const clearDraft = () => {
@@ -3921,6 +4208,7 @@ export default function AIInputBox({
     setResult(null)
     setActions([])
     setDraftNonce('')
+    setBaseRoRevisions({})
     setOperationAttempt(null)
     setImages([])
   }
@@ -3937,7 +4225,13 @@ export default function AIInputBox({
     : ''
 
   const handleUndoRecent = async () => {
-    if (!draftHydratedForOwner || !recentAppliedForOwner || undoing || undoInvocationRef.current) return
+    if (
+      !draftHydratedForOwner
+      || !recentAppliedForOwner
+      || recentAppliedForOwner.undoSupported === false
+      || undoing
+      || undoInvocationRef.current
+    ) return
     const undoSnapshot = recentAppliedForOwner
     const undoLifecycle = { ...draftLifecycleRef.current }
     const undoUiIsCurrent = () => isGibDraftLifecycleCurrent(draftLifecycleRef.current, undoLifecycle)
@@ -3946,16 +4240,58 @@ export default function AIInputBox({
     setUndoing(true)
     setError('')
     try {
-      const batch = writeBatch(db)
-      undoSnapshot.roRestores.forEach(item => batch.update(doc(db, 'ros', item.roId), {
-        ...item.fields,
-        ...(item.changeLogEntries?.length ? { changeLog: arrayRemove(...item.changeLogEntries) } : {}),
-        updatedAt: serverTimestamp(),
-      }))
-      undoSnapshot.taskRefs.forEach(ref => batch.delete(ref))
       const taskRestores = undoSnapshot.taskRestores || []
-      taskRestores.forEach(item => batch.update(item.ref, item.fields))
-      await awaitAtomicCommit(batch.commit(), () => {
+      await awaitAtomicCommit(runTransaction(db, async transaction => {
+        const roSnapshots = await Promise.all(
+          undoSnapshot.roRestores.map(item => transaction.get(doc(db, 'ros', item.roId))),
+        )
+        const createdTaskSnapshots = await Promise.all(
+          undoSnapshot.taskRefs.map(ref => transaction.get(ref)),
+        )
+        const existingTaskSnapshots = await Promise.all(
+          taskRestores.map(item => transaction.get(item.ref)),
+        )
+
+        roSnapshots.forEach((snapshot, index) => {
+          const restore = undoSnapshot.roRestores[index]
+          if (
+            !snapshot.exists()
+            || normalizeGibRevision(snapshot.data().gibRevision) !== restore.resultRevision
+          ) {
+            throw gibStalePlanError('A later GIB update changed this RO after Apply.')
+          }
+        })
+        createdTaskSnapshots.forEach(snapshot => {
+          if (
+            !snapshot.exists()
+            || snapshot.data().gibOperationId !== undoSnapshot.operationId
+            || snapshot.data().gibOperationOwnerUid !== undoSnapshot.ownerUid
+            || taskUndoFingerprint(snapshot.data()) !== undoSnapshot.taskFingerprints?.[snapshot.ref.path]
+          ) {
+            throw gibStalePlanError('A GIB-created task changed after Apply.')
+          }
+        })
+        existingTaskSnapshots.forEach((snapshot, index) => {
+          if (
+            !snapshot.exists()
+            || taskUndoFingerprint(snapshot.data()) !== taskRestores[index].expectedAfterFingerprint
+          ) {
+            throw gibStalePlanError('A task changed after Apply.')
+          }
+        })
+
+        undoSnapshot.roRestores.forEach((item, index) => transaction.update(roSnapshots[index].ref, {
+          ...item.fields,
+          ...(item.changeLogEntries?.length ? { changeLog: arrayRemove(...item.changeLogEntries) } : {}),
+          gibRevision: item.resultRevision + 1,
+          updatedAt: serverTimestamp(),
+        }))
+        createdTaskSnapshots.forEach(snapshot => transaction.delete(snapshot.ref))
+        taskRestores.forEach(item => transaction.update(item.ref, {
+          ...item.fields,
+          taskRevision: item.resultRevision + 1,
+        }))
+      }), () => {
         if (undoUiIsCurrent()) setError('Undo is still being committed. Do not retry or refresh until it finishes.')
       })
       if (undoUiIsCurrent()) {
@@ -3964,7 +4300,11 @@ export default function AIInputBox({
         setRecentApplied(null)
       }
     } catch (err) {
-      if (undoUiIsCurrent()) setError('Undo failed: ' + err.message)
+      if (undoUiIsCurrent()) {
+        setError(isGibStalePlanError(err)
+          ? `Undo stopped safely: ${err.message} No changes were written.`
+          : 'Undo failed: ' + err.message)
+      }
     } finally {
       if (undoUiIsCurrent()) setUndoing(false)
       if (undoInvocationRef.current === undoInvocationToken) undoInvocationRef.current = null
@@ -4498,14 +4838,20 @@ export default function AIInputBox({
                 )}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={handleUndoRecent}
-              disabled={undoing}
-              className="shrink-0 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-600 hover:border-red-300 hover:text-red-600 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-red-700 dark:hover:text-red-300"
-            >
-              {undoing ? 'Undoing...' : 'Undo'}
-            </button>
+            {recentAppliedForOwner.undoSupported === false ? (
+              <span className="shrink-0 max-w-40 text-right text-[11px] text-amber-600 dark:text-amber-300">
+                Undo unavailable for task-creating updates
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={handleUndoRecent}
+                disabled={undoing}
+                className="shrink-0 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-600 hover:border-red-300 hover:text-red-600 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-red-700 dark:hover:text-red-300"
+              >
+                {undoing ? 'Undoing...' : 'Undo'}
+              </button>
+            )}
           </div>
         </div>
       )}

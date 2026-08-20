@@ -292,10 +292,13 @@ async function autoMarkMissingDelivered(scannedROs, existingROs, timestamp) {
           fields: { status: strVal('delivered'), updatedAt: strVal(timestamp) },
         },
         updateMask:       { fieldPaths: ['status', 'updatedAt'] },
-        updateTransforms: [{
-          fieldPath:             'changeLog',
-          appendMissingElements: { values: [changeLogEntry('status', 'Delivered', timestamp)] },
-        }],
+        updateTransforms: [
+          { fieldPath: 'gibRevision', increment: { integerValue: '1' } },
+          {
+            fieldPath:             'changeLog',
+            appendMissingElements: { values: [changeLogEntry('status', 'Delivered', timestamp)] },
+          },
+        ],
       }
       const res = await authFetch(COMMIT_URL, {
         method:  'POST',
@@ -361,9 +364,10 @@ async function writeRO(ro, timestamp, existingDocName, oldData, users) {
     const write = {
       update:     { name: existingDocName, fields: updateFields },
       updateMask: { fieldPaths: Object.keys(updateFields) },
+      updateTransforms: [{ fieldPath: 'gibRevision', increment: { integerValue: '1' } }],
     }
     if (logEntries.length) {
-      write.updateTransforms = [{ fieldPath: 'changeLog', appendMissingElements: { values: logEntries } }]
+      write.updateTransforms.push({ fieldPath: 'changeLog', appendMissingElements: { values: logEntries } })
     }
 
     const res = await authFetch(COMMIT_URL, {
@@ -406,6 +410,7 @@ async function writeRO(ro, timestamp, existingDocName, oldData, users) {
         assignedPainter:      strVal((wantsPaint && painterUser?.uid) || ''),
         assignedPaintHelper:  strVal((wantsPaint && helperUser?.uid) || ''),
         assignedPartsManager: strVal(''),
+        gibRevision:          { integerValue: '0' },
         createdAt:            strVal(timestamp),
         updatedAt:            strVal(timestamp),
         source:               strVal('auto_sync'),

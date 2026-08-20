@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  addDoc, arrayUnion, collection, deleteDoc, doc, onSnapshot, serverTimestamp, updateDoc, writeBatch,
+  arrayUnion, collection, doc, onSnapshot, serverTimestamp, writeBatch,
 } from 'firebase/firestore'
 import { differenceInCalendarDays, format, isValid, parseISO, subDays } from 'date-fns'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, deleteTaskDoc, normalizeTaskRevision, taskUpdateFields, updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
 import { MANAGER_ROLES, PARTS_STATUSES, STATUS_MAP, WORKER_ROLES } from '../constants/roles'
@@ -1219,7 +1221,7 @@ export default function TaskBoard() {
 
   const handleStatusChange = async (taskId, newStatus) => {
     try {
-      await updateDoc(doc(db, 'tasks', taskId), {
+      await updateTaskDoc(doc(db, 'tasks', taskId), {
         status: newStatus,
         completedAt: newStatus === 'completed' ? serverTimestamp() : null,
         updatedAt: serverTimestamp(),
@@ -1256,7 +1258,7 @@ export default function TaskBoard() {
       : `[${stamp} - ${authorName}] ${noteText}`
     const prevNotes = typeof roData.notes === 'string' ? roData.notes : ''
     try {
-      await updateDoc(doc(db, 'ros', roId), {
+      await updateRoDoc(doc(db, 'ros', roId), {
         status: nextStatus,
         notes: prevNotes ? `${note}\n${prevNotes}` : note,
         updatedAt: serverTimestamp(),
@@ -1278,7 +1280,7 @@ export default function TaskBoard() {
           assignTo = emp?.uid ?? null
         }
         if (tmpl.setRoField && assignTo) roUpdates[tmpl.setRoField] = assignTo
-        await addDoc(collection(db, 'tasks'), {
+        await createTaskDoc(collection(db, 'tasks'), {
           roId,
           roNumber: roData.roNumber,
           vehicleInfo: roData.vehicle || roData.vehicleInfo || '',
@@ -1298,7 +1300,7 @@ export default function TaskBoard() {
         })
       }
       if (Object.keys(roUpdates).length) {
-        await updateDoc(doc(db, 'ros', roId), { ...roUpdates, updatedAt: serverTimestamp() })
+        await updateRoDoc(doc(db, 'ros', roId), { ...roUpdates, updatedAt: serverTimestamp() })
       }
       setPendingPromotion(prev => { const n = { ...prev }; delete n[roId]; return n })
       toast.success(`RO#${roData.roNumber} → ${STATUS_MAP[nextStatus]?.label ?? nextStatus}`)
@@ -1317,7 +1319,7 @@ export default function TaskBoard() {
     const roNote = `[${stamp} - ${authorName}] Task update (${task.title || 'task'}): ${noteText}`
 
     try {
-      await updateDoc(doc(db, 'tasks', task.id), {
+      await updateTaskDoc(doc(db, 'tasks', task.id), {
         taskNotes: arrayUnion(noteObj),
         updatedAt: serverTimestamp(),
       })
@@ -1325,7 +1327,7 @@ export default function TaskBoard() {
         const roDoc = ros.find(r => r.id === task.roId)
         if (roDoc) {
           const prevNotes = typeof roDoc.notes === 'string' ? roDoc.notes : ''
-          await updateDoc(doc(db, 'ros', task.roId), {
+          await updateRoDoc(doc(db, 'ros', task.roId), {
             notes: prevNotes ? `${roNote}\n${prevNotes}` : roNote,
             updatedAt: serverTimestamp(),
           })
@@ -1342,7 +1344,7 @@ export default function TaskBoard() {
     const ok = window.confirm(`Delete task "${task.title || 'Untitled task'}"? This cannot be undone.`)
     if (!ok) return
     try {
-      await deleteDoc(doc(db, 'tasks', task.id))
+      await deleteTaskDoc(doc(db, 'tasks', task.id), user.uid, normalizeTaskRevision(task.taskRevision))
       toast.success('Task deleted')
     } catch (err) {
       toast.error('Delete failed: ' + err.message)
@@ -1368,7 +1370,7 @@ export default function TaskBoard() {
     reorderedGroups.splice(toIdx, 0, moved)
     const reorderedTasks = reorderedGroups.flatMap(group => group.tasks)
     const batch = writeBatch(db)
-    reorderedTasks.forEach((t, i) => batch.update(doc(db, 'tasks', t.id), { sortOrder: i * 1000 }))
+    reorderedTasks.forEach((t, i) => batch.update(doc(db, 'tasks', t.id), taskUpdateFields({ sortOrder: i * 1000 })))
     setDragId(null)
     setOverId(null)
     try {

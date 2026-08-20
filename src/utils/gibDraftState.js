@@ -1,4 +1,4 @@
-export const GIB_DRAFT_SCHEMA_VERSION = 2
+export const GIB_DRAFT_SCHEMA_VERSION = 3
 
 export function resultMetadataWithoutActions(result) {
   if (!result || typeof result !== 'object') return null

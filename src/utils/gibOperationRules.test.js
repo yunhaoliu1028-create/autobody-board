@@ -18,10 +18,20 @@ describe('GIB operation ledger rules contract', () => {
     assert.match(ledgerRule, /request\.resource\.data\.ownerUid == uid/)
     assert.match(ledgerRule, /planFingerprint\.matches\('\^\[0-9a-f\]\{64\}\$'\)/)
     assert.match(ledgerRule, /request\.resource\.data\.writeCount <= 450/)
+    assert.match(ledgerRule, /request\.resource\.data\.schemaVersion == 2/)
+    assert.match(ledgerRule, /request\.resource\.data\.baseRoRevisions is map/)
+    assert.match(ledgerRule, /request\.resource\.data\.resultRoRevisions is map/)
     assert.match(ledgerRule, /request\.resource\.data\.committedAt == request\.time/)
   })
 
   it('prevents the update bypass and deletion of consumed IDs', () => {
     assert.match(ledgerRule, /allow update, delete: if false/)
+  })
+
+  it('requires every RO update to advance the shared revision by exactly one', () => {
+    assert.match(rules, /function hasValidGibRevisionTransition\(\)/)
+    assert.match(rules, /before is int && after == before \+ 1/)
+    assert.doesNotMatch(rules, /after == before \|\|/)
+    assert.match(rules, /allow update: if isAuth\(\) && hasValidGibRevisionTransition\(\)/)
   })
 })

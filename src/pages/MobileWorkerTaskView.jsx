@@ -1,14 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  addDoc,
   arrayUnion,
   collection,
   doc,
   getDoc,
   onSnapshot,
   serverTimestamp,
-  setDoc,
-  updateDoc,
 } from 'firebase/firestore'
 import { getDownloadURL, ref as storageRef, uploadBytesResumable } from 'firebase/storage'
 import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
@@ -21,6 +18,8 @@ import MobileROSheet from '../components/MobileROSheet'
 import { partsLabel, statusLabel, t } from '../utils/mobileI18n'
 import { compressImageFile, compressVideoFrame } from '../utils/imageCompression'
 import { playShutterSound } from '../utils/cameraFeedback'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, setNewTaskDoc, updateTaskDoc } from '../utils/taskMutations'
 
 function IconMic() {
   return (
@@ -1050,7 +1049,7 @@ export default function MobileWorkerTaskView() {
         const existing = await getDoc(taskRef)
         if (existing.exists()) continue
 
-        await setDoc(taskRef, {
+        await setNewTaskDoc(taskRef, {
           roId:          ro.id,
           roNumber:      ro.roNumber,
           vehicleInfo:   vehicleLine(ro),
@@ -1174,7 +1173,7 @@ export default function MobileWorkerTaskView() {
 
   const updateRoNote = async (ro, line) => {
     const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       notes: prevNotes ? `${line}\n${prevNotes}` : line,
       updatedAt: serverTimestamp(),
     })
@@ -1184,7 +1183,7 @@ export default function MobileWorkerTaskView() {
     if (task.status === 'completed') return
     const next = nextTaskStatus(task.status)
     try {
-      await updateDoc(doc(db, 'tasks', task.id), {
+      await updateTaskDoc(doc(db, 'tasks', task.id), {
         status: next,
         startedAt: next === 'in_progress' ? serverTimestamp() : task.startedAt || null,
         completedAt: next === 'completed' ? serverTimestamp() : null,
@@ -1217,7 +1216,7 @@ export default function MobileWorkerTaskView() {
       ? (ro.assignedPartsManager || roleFallbackAssignee(employees, [ROLES.PARTS_MANAGER, ...MANAGER_ROLES]))
       : (ro.assignedEstimator || roleFallbackAssignee(employees, [ROLES.ESTIMATOR, ...MANAGER_ROLES]))
 
-    await addDoc(collection(db, 'tasks'), {
+    await createTaskDoc(collection(db, 'tasks'), {
       roId: ro.id,
       roNumber: ro.roNumber,
       vehicleInfo: vehicleLine(ro),
@@ -1245,7 +1244,7 @@ export default function MobileWorkerTaskView() {
       : makeNote(authorName, needsParts ? 'Needs parts flag cleared.' : 'Supplement damage flag cleared.')
 
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         [`workerFlags.${flag}`]: next,
         [`workerFlags.${flag}By`]: next ? user.uid : null,
         [`workerFlags.${flag}ByName`]: next ? authorName : null,
@@ -1271,7 +1270,7 @@ export default function MobileWorkerTaskView() {
 
   const updateTaskStatusFromWorker = async (task, next, ro, commandText, options = {}) => {
     if (!task || task.status === next) return ''
-    await updateDoc(doc(db, 'tasks', task.id), {
+    await updateTaskDoc(doc(db, 'tasks', task.id), {
       status: next,
       startedAt: next === 'in_progress' ? serverTimestamp() : task.startedAt || null,
       completedAt: next === 'completed' ? serverTimestamp() : null,
@@ -1327,7 +1326,7 @@ export default function MobileWorkerTaskView() {
         uploadedByName: authorName,
       })
     }
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       attachments: arrayUnion(...attachments),
       updatedAt: serverTimestamp(),
     })
@@ -1391,7 +1390,7 @@ export default function MobileWorkerTaskView() {
       }
 
       if (command.wantsNeedsParts && !ro.workerFlags?.needsParts) {
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           'workerFlags.needsParts': true,
           'workerFlags.needsPartsAt': new Date().toISOString(),
           'workerFlags.needsPartsBy': user.uid,
@@ -1403,7 +1402,7 @@ export default function MobileWorkerTaskView() {
         actions.push('needs parts')
       }
       if (command.wantsSuppDamage && !ro.workerFlags?.suppDamage) {
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           'workerFlags.suppDamage': true,
           'workerFlags.suppDamageAt': new Date().toISOString(),
           'workerFlags.suppDamageBy': user.uid,
@@ -1428,7 +1427,7 @@ export default function MobileWorkerTaskView() {
       if (noteLines.length) {
         const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
         const newNotes = noteLines.map(line => makeNote(authorName, line)).join('\n')
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           notes: prevNotes ? `${newNotes}\n${prevNotes}` : newNotes,
           updatedAt: serverTimestamp(),
         })

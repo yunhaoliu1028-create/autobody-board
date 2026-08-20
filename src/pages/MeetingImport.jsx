@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react'
 import {
-  collection, onSnapshot, doc, updateDoc, addDoc, serverTimestamp, getDoc,
+  collection, onSnapshot, doc, serverTimestamp, getDoc,
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { parseMeetingNotes, getApiKey } from '../hooks/useAI'
 import { STATUS_MAP, RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, CAR_STATUS_MAP } from '../constants/roles'
@@ -392,13 +394,13 @@ export default function MeetingImport() {
         }
 
         if (Object.keys(updates).length > 1) {
-          await updateDoc(doc(db, 'ros', roDoc.id), updates)
+          await updateRoDoc(doc(db, 'ros', roDoc.id), updates)
         }
 
         for (const task of (action.tasks ?? [])) {
           const assignee = findEmployeeByName(employees, task.assigneeName)
           if (!assignee) throw new Error(`Could not match task assignee "${task.assigneeName}".`)
-          await addDoc(collection(db, 'tasks'), {
+          await createTaskDoc(collection(db, 'tasks'), {
             roId:        roDoc.id,
             roNumber:    roDoc.roNumber,
             vehicleInfo: roDoc.vehicle,

@@ -5,10 +5,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  doc, updateDoc, deleteDoc, addDoc, collection, onSnapshot,
+  doc, collection, onSnapshot,
   query, where, orderBy, getDocs, deleteField, serverTimestamp,
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, deleteTaskDoc, normalizeTaskRevision, updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { StatusBadge, PartsStatusBadge } from './StatusBadge'
@@ -96,7 +98,7 @@ export default function RODrawer({ ro, employees, onClose }) {
     const prev   = ro.notes ?? ''
     const stamp  = format(new Date(), 'MM/dd HH:mm')
     const author = employees[user.uid] ?? user.email
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       notes:     `[${stamp} - ${author}] ${note.trim()}\n${prev}`,
       updatedAt: serverTimestamp(),
     })
@@ -109,7 +111,7 @@ export default function RODrawer({ ro, employees, onClose }) {
     if (!taskTo || !taskTitle.trim()) return
     setSavingTask(true)
     try {
-      await addDoc(collection(db, 'tasks'), {
+      await createTaskDoc(collection(db, 'tasks'), {
         roId:        ro.id,
         roNumber:    ro.roNumber,
         vehicleInfo: ro.vehicle,
@@ -130,7 +132,7 @@ export default function RODrawer({ ro, employees, onClose }) {
 
   const updateTaskStatus = async (taskId, current) => {
     const next = current === 'pending' ? 'in_progress' : 'completed'
-    await updateDoc(doc(db, 'tasks', taskId), {
+    await updateTaskDoc(doc(db, 'tasks', taskId), {
       status:      next,
       completedAt: next === 'completed' ? serverTimestamp() : null,
       updatedAt:   serverTimestamp(),
@@ -141,7 +143,7 @@ export default function RODrawer({ ro, employees, onClose }) {
     if (!isShopManager) return
     const ok = window.confirm(`Delete task "${task.title || 'Untitled task'}"? This cannot be undone.`)
     if (!ok) return
-    await deleteDoc(doc(db, 'tasks', task.id))
+    await deleteTaskDoc(doc(db, 'tasks', task.id), user.uid, normalizeTaskRevision(task.taskRevision))
   }
 
   const clearNotes = async () => {
@@ -150,7 +152,7 @@ export default function RODrawer({ ro, employees, onClose }) {
     if (!ok) return
     setMaintenanceBusy('notes')
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         notes: '',
         noteSummaries: [],
         updatedAt: serverTimestamp(),
@@ -169,8 +171,12 @@ export default function RODrawer({ ro, employees, onClose }) {
     setMaintenanceBusy('reset')
     try {
       const taskSnap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', ro.id)))
-      await Promise.all(taskSnap.docs.map(taskDoc => deleteDoc(doc(db, 'tasks', taskDoc.id))))
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await Promise.all(taskSnap.docs.map(taskDoc => deleteTaskDoc(
+        doc(db, 'tasks', taskDoc.id),
+        user.uid,
+        normalizeTaskRevision(taskDoc.data().taskRevision),
+      )))
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         status: deleteField(),
         carStatus: deleteField(),
         partsStatus: deleteField(),
@@ -207,7 +213,7 @@ export default function RODrawer({ ro, employees, onClose }) {
     setMaintenanceBusy('undo')
     try {
       const { updates } = buildUndoNoteUpdate(ro, line)
-      await updateDoc(doc(db, 'ros', ro.id), updates)
+      await updateRoDoc(doc(db, 'ros', ro.id), updates)
     } finally {
       setMaintenanceBusy('')
     }
@@ -257,7 +263,7 @@ export default function RODrawer({ ro, employees, onClose }) {
         })
       }
 
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         noteSummaries: nextSummaries,
         updatedAt: serverTimestamp(),
       })

@@ -266,12 +266,15 @@ async function markDeliveredDoc(roNum, docName, timestamp = new Date().toISOStri
       }
     },
     updateMask: { fieldPaths: ['status', 'updatedAt'] },
-    updateTransforms: [{
-      fieldPath: 'changeLog',
-      appendMissingElements: {
-        values: [changeLogEntry('status', 'Delivered', timestamp)]
-      }
-    }]
+    updateTransforms: [
+      { fieldPath: 'gibRevision', increment: { integerValue: '1' } },
+      {
+        fieldPath: 'changeLog',
+        appendMissingElements: {
+          values: [changeLogEntry('status', 'Delivered', timestamp)]
+        }
+      },
+    ]
   }
 
   const res = await authFetch(COMMIT_URL, {
@@ -315,12 +318,15 @@ async function handleMarkDelivered(roNum, docName, btn) {
         }
       },
       updateMask: { fieldPaths: ['status', 'updatedAt'] },
-      updateTransforms: [{
-        fieldPath: 'changeLog',
-        appendMissingElements: {
-          values: [changeLogEntry('status', 'Delivered', timestamp)]
-        }
-      }]
+      updateTransforms: [
+        { fieldPath: 'gibRevision', increment: { integerValue: '1' } },
+        {
+          fieldPath: 'changeLog',
+          appendMissingElements: {
+            values: [changeLogEntry('status', 'Delivered', timestamp)]
+          }
+        },
+      ]
     }
 
     const res = await authFetch(COMMIT_URL, {
@@ -645,13 +651,14 @@ async function writeRO(ro, timestamp, existingDocName, oldData) {
         fields: updateFields,
       },
       updateMask: { fieldPaths: Object.keys(updateFields) },
+      updateTransforms: [{ fieldPath: 'gibRevision', increment: { integerValue: '1' } }],
     }
 
     if (logEntries.length > 0) {
-      write.updateTransforms = [{
+      write.updateTransforms.push({
         fieldPath: 'changeLog',
         appendMissingElements: { values: logEntries },
-      }]
+      })
     }
 
     const res = await authFetch(COMMIT_URL, {
@@ -702,6 +709,7 @@ async function writeRO(ro, timestamp, existingDocName, oldData) {
         assignedPainter:      strVal((wantsPaint && painterUser?.uid) || ''),
         assignedPaintHelper:  strVal((wantsPaint && helperUser?.uid) || ''),
         assignedPartsManager: strVal(''),
+        gibRevision:          { integerValue: '0' },
         createdAt:        strVal(timestamp),
         updatedAt:        strVal(timestamp),
         source:           strVal('ccc_import'),

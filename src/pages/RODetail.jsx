@@ -1,11 +1,13 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
-  doc, onSnapshot, collection, addDoc, updateDoc, deleteDoc, getDocs, deleteField, serverTimestamp,
+  doc, onSnapshot, collection, getDocs, deleteField, serverTimestamp,
   query, where, orderBy, arrayUnion,
 } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, deleteTaskDoc, normalizeTaskRevision, updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { summarizeDayNotes, getApiKey } from '../hooks/useAI'
 import { StatusBadge, PartsStatusBadge, CCCFieldLabel } from '../components/StatusBadge'
@@ -113,7 +115,7 @@ function TaskList({ roId, employees }) {
     e.preventDefault()
     setSaving(true)
     try {
-      await addDoc(collection(db, 'tasks'), {
+      await createTaskDoc(collection(db, 'tasks'), {
         roId,
         assignedTo:  assignTo,
         assignedToName: employees[assignTo] ?? '',
@@ -132,7 +134,7 @@ function TaskList({ roId, employees }) {
   }
 
   const updateTaskStatus = async (taskId, newStatus) => {
-    await updateDoc(doc(db, 'tasks', taskId), {
+    await updateTaskDoc(doc(db, 'tasks', taskId), {
       status:      newStatus,
       completedAt: newStatus === 'completed' ? serverTimestamp() : null,
       updatedAt:   serverTimestamp(),
@@ -143,7 +145,7 @@ function TaskList({ roId, employees }) {
     if (!isShopManager) return
     const ok = window.confirm(`Delete task "${task.title || 'Untitled task'}"? This cannot be undone.`)
     if (!ok) return
-    await deleteDoc(doc(db, 'tasks', task.id))
+    await deleteTaskDoc(doc(db, 'tasks', task.id), user.uid, normalizeTaskRevision(task.taskRevision))
   }
 
   const priorityDot = { low: 'bg-gray-400', medium: 'bg-amber-400', high: 'bg-red-500' }
@@ -297,7 +299,7 @@ function ManagerMaintenance({ ro }) {
     if (!ok) return
     setBusy('notes')
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         notes: '',
         noteSummaries: [],
         updatedAt: serverTimestamp(),
@@ -315,8 +317,12 @@ function ManagerMaintenance({ ro }) {
     setBusy('reset')
     try {
       const taskSnap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', ro.id)))
-      await Promise.all(taskSnap.docs.map(taskDoc => deleteDoc(doc(db, 'tasks', taskDoc.id))))
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await Promise.all(taskSnap.docs.map(taskDoc => deleteTaskDoc(
+        doc(db, 'tasks', taskDoc.id),
+        user.uid,
+        normalizeTaskRevision(taskDoc.data().taskRevision),
+      )))
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         status: deleteField(),
         carStatus: deleteField(),
         partsStatus: deleteField(),
@@ -397,7 +403,7 @@ function AttachmentsSection({ roId, roNumber, attachments = [] }) {
         const sRef = storageRef(storage, `ros/${roId}/attachments/${filename}`)
         await uploadBytes(sRef, blob || file, { contentType: 'image/jpeg' })
         const url = await getDownloadURL(sRef)
-        await updateDoc(doc(db, 'ros', roId), {
+        await updateRoDoc(doc(db, 'ros', roId), {
           attachments: arrayUnion({ url, name: filename, label: file.name.replace(/\.[^.]+$/, ''), uploadedAt: new Date().toISOString() }),
           updatedAt: serverTimestamp(),
         })
@@ -667,7 +673,7 @@ export default function RODetail() {
           const entry = { date: isoDate, bullets: result.bullets, generatedAt: new Date().toISOString() }
           accumulated.push(entry)
           setNoteSummaries([...accumulated])
-          await updateDoc(doc(db, 'ros', id), { noteSummaries: accumulated })
+          await updateRoDoc(doc(db, 'ros', id), { noteSummaries: accumulated })
         } catch { /* silent — raw notes still shown */ } finally {
           setSummarizingDates(prev => { const s = new Set(prev); s.delete(isoDate); return s })
         }
@@ -679,12 +685,12 @@ export default function RODetail() {
 
   const handleStatusChange = async (newStatus) => {
     setUpdatingStatus(true)
-    await updateDoc(doc(db, 'ros', id), { status: newStatus, updatedAt: serverTimestamp() })
+    await updateRoDoc(doc(db, 'ros', id), { status: newStatus, updatedAt: serverTimestamp() })
     setUpdatingStatus(false)
   }
 
   const handlePartsChange = async (v) => {
-    await updateDoc(doc(db, 'ros', id), { partsStatus: v, updatedAt: serverTimestamp() })
+    await updateRoDoc(doc(db, 'ros', id), { partsStatus: v, updatedAt: serverTimestamp() })
   }
 
   const addNote = async (e) => {
@@ -694,7 +700,7 @@ export default function RODetail() {
     const prev   = ro.notes ?? ''
     const stamp  = format(new Date(), 'MM/dd HH:mm')
     const author = employees[user.uid] ?? user.email
-    await updateDoc(doc(db, 'ros', id), {
+    await updateRoDoc(doc(db, 'ros', id), {
       notes:     `[${stamp} - ${author}] ${note.trim()}\n${prev}`,
       updatedAt: serverTimestamp(),
     })
@@ -707,7 +713,7 @@ export default function RODetail() {
     const ok = window.confirm(`Undo this RO note?\n\nThe note will be removed. If a matching status change can be safely identified, it will be rolled back too.`)
     if (!ok) return
     const { updates } = buildUndoNoteUpdate(ro, line)
-    await updateDoc(doc(db, 'ros', id), updates)
+    await updateRoDoc(doc(db, 'ros', id), updates)
   }
 
   if (loading) return (

@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
-import { collection, getDocs, doc, updateDoc, addDoc, serverTimestamp, arrayUnion, query, where } from 'firebase/firestore'
+import { collection, getDocs, doc, serverTimestamp, arrayUnion, query, where } from 'firebase/firestore'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { askShopAssistant, transcribeWithWhisper, loadAssistantMemory, appendAssistantMemory, deleteAssistantMemory } from '../hooks/useAI'
@@ -187,12 +189,12 @@ async function addDownstreamTasks({ roDoc, status, employees, user, author }) {
       createdAt: serverTimestamp(),
     }
     if (tmpl.setRoField && assignee?.uid) {
-      await updateDoc(doc(db, 'ros', roDoc.id), {
+      await updateRoDoc(doc(db, 'ros', roDoc.id), {
         [tmpl.setRoField]: assignee.uid,
         updatedAt: serverTimestamp(),
       })
     }
-    return addDoc(collection(db, 'tasks'), task)
+    return createTaskDoc(collection(db, 'tasks'), task)
   }))
 }
 
@@ -406,7 +408,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
     const updateRo = (roDoc, fields, changeLogEntry = null) => {
       const updates = { ...fields, updatedAt: serverTimestamp() }
       if (changeLogEntry) updates.changeLog = arrayUnion(changeLogEntry)
-      return updateDoc(doc(db, 'ros', roDoc.id), updates)
+      return updateRoDoc(doc(db, 'ros', roDoc.id), updates)
     }
 
     try {
@@ -416,7 +418,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
           if (action.type === 'assign_task') {
             const assignee = findEmployeeByName(employees, action.assigneeName)
             if (!assignee) throw new Error(`Could not match task assignee "${action.assigneeName}".`)
-            await addDoc(collection(db, 'tasks'), {
+            await createTaskDoc(collection(db, 'tasks'), {
               assignedTo: assignee.uid,
               assignedBy: user?.uid ?? '',
               assignedByName: author,
@@ -469,7 +471,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
               { assignedBodyMan: assignee.uid },
               logEntry('assign_body_man', assignee.uid, assignee.name)
             )
-            await addDoc(collection(db, 'tasks'), {
+            await createTaskDoc(collection(db, 'tasks'), {
               roId: roDoc.id, roNumber: roDoc.roNumber,
               vehicleInfo: roDoc.vehicle,
               assignedTo: assignee.uid,
@@ -524,10 +526,10 @@ export default function FloatingAssistant({ inline = false, onBack }) {
             createdAt: serverTimestamp(),
           }
           if (isBodyTask) fields.assignedBodyMan = assignee.uid
-          await addDoc(collection(db, 'tasks'), fields)
+          await createTaskDoc(collection(db, 'tasks'), fields)
           // Also write assignedBodyMan to RO if it's a body task
           if (isBodyTask) {
-            await updateDoc(doc(db, 'ros', roDoc.id), {
+            await updateRoDoc(doc(db, 'ros', roDoc.id), {
               assignedBodyMan: assignee.uid,
               updatedAt: serverTimestamp(),
             })
@@ -535,7 +537,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
         } else if (action.type === 'update_parts_status') {
           const partsStatus = action.partsStatus || 'not_ordered'
           if (action.noReplacementPartsNeeded) {
-            await updateDoc(doc(db, 'ros', roDoc.id), {
+            await updateRoDoc(doc(db, 'ros', roDoc.id), {
               partsStatus: 'all_received',
               partsOrders: [],
               noReplacementPartsNeeded: true,
@@ -554,7 +556,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
             const orderStatus = orderStatusFromPartsStatus(partsStatus)
             return orderStatus ? { ...order, status: orderStatus } : order
           })
-          await updateDoc(doc(db, 'ros', roDoc.id), {
+          await updateRoDoc(doc(db, 'ros', roDoc.id), {
             partsStatus: nextOrders.length ? calculatePartsStatus(nextOrders, partsStatus) : partsStatus,
             partsOrders: nextOrders,
             updatedAt: serverTimestamp(),
@@ -580,7 +582,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
             return { ...order, ...nextOrder, qty: nextOrder.qty || order.qty || order.quantity || 1 }
           })
           if (!matched) nextOrders.push(nextOrder)
-          await updateDoc(doc(db, 'ros', roDoc.id), {
+          await updateRoDoc(doc(db, 'ros', roDoc.id), {
             partsOrders: nextOrders,
             partsStatus: calculatePartsStatus(nextOrders, roDoc.partsStatus),
             noReplacementPartsNeeded: false,
@@ -633,7 +635,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
               receivedAt: new Date().toISOString(),
             })
           }
-          await updateDoc(doc(db, 'ros', roDoc.id), {
+          await updateRoDoc(doc(db, 'ros', roDoc.id), {
             partsOrders: nextOrders,
             partsStatus: calculatePartsStatus(nextOrders, roDoc.partsStatus),
             noReplacementPartsNeeded: false,
@@ -659,7 +661,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
             updates.noReplacementPartsNeeded = false
             updates['partsSubtasks.verifiedAllReceived'] = false
           }
-          await updateDoc(doc(db, 'ros', roDoc.id), updates)
+          await updateRoDoc(doc(db, 'ros', roDoc.id), updates)
         } else if (action.type === 'complete_phase') {
           const suggestion = getSuggestedNextStatus(action.phase, roDoc)
           const fields = {}
@@ -678,7 +680,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
           const phaseSnap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roDoc.id), where('phase', '==', action.phase)))
           await Promise.all(phaseSnap.docs
             .filter(d => d.data().status !== 'completed')
-            .map(d => updateDoc(doc(db, 'tasks', d.id), {
+            .map(d => updateTaskDoc(doc(db, 'tasks', d.id), {
               status: 'completed',
               completedAt: serverTimestamp(),
               updatedAt: serverTimestamp(),

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore'
+import { collection, doc, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore'
 import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
 import AIInputBox from '../components/AIInputBox'
@@ -656,7 +657,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
         }
         : item
       )
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         partsReturns: nextReturns,
         notes: noteLine(`Parts return processed: ${targetReturn.vendor || 'vendor'} ${qty(targetReturn.qty ?? targetReturn.quantity, 1)} pc${qty(targetReturn.qty ?? targetReturn.quantity, 1) === 1 ? '' : 's'}.`),
         updatedAt: serverTimestamp(),
@@ -667,7 +668,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
 
     if (taskKey === 'verify') {
       if (done.verifiedAllReceived) {
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           'partsSubtasks.verifiedAllReceived': false,
           notes: noteLine('Parts manager retracted all-parts-received verification.'),
           updatedAt: serverTimestamp(),
@@ -691,7 +692,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
         status: 'received',
         receivedAt: order.receivedAt || new Date().toISOString(),
       }))
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         partsOrders: nextOrders,
         partsStatus: 'all_received',
         'partsSubtasks.verifiedAllReceived': true,
@@ -704,7 +705,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
 
     if (taskKey === 'deliver-repair') {
       if (done.deliveredToRepair) {
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           'partsSubtasks.deliveredToRepair': false,
           notes: noteLine('Parts manager retracted repair-parts delivery.'),
           updatedAt: serverTimestamp(),
@@ -719,14 +720,14 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
         updatedAt: serverTimestamp(),
       }
       if (['checked_in', 'teardown', 'waiting_parts'].includes(ro.status)) updates.status = 'body_work'
-      await updateDoc(doc(db, 'ros', ro.id), updates)
+      await updateRoDoc(doc(db, 'ros', ro.id), updates)
       toast.success(`RO#${ro.roNumber} repair parts delivered`)
       return
     }
 
     if (taskKey === 'deliver-reassembly') {
       if (done.deliveredToReassembly) {
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           'partsSubtasks.deliveredToReassembly': false,
           notes: noteLine('Parts manager retracted all-parts delivery.'),
           updatedAt: serverTimestamp(),
@@ -741,7 +742,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
         updatedAt: serverTimestamp(),
       }
       if (!['reassembly', 'sublet', 'detail', 'ready'].includes(ro.status)) updates.status = 'reassembly'
-      await updateDoc(doc(db, 'ros', ro.id), updates)
+      await updateRoDoc(doc(db, 'ros', ro.id), updates)
       toast.success(`RO#${ro.roNumber} reassembly parts delivered`)
     }
   }
@@ -752,7 +753,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
     setWarning('')
     try {
       const nextStatus = calculatedPartsStatus(duplicateCleanup.orders, ro.partsStatus)
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         partsOrders: duplicateCleanup.orders,
         partsStatus: nextStatus,
         notes: noteLine(`Merged ${duplicateCleanup.mergedCount} duplicate vendor receiving row${duplicateCleanup.mergedCount === 1 ? '' : 's'}.`),
@@ -870,7 +871,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
     summaryPieces.push(`${draftOrders.length} saved`)
 
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         partsOrders: nextOrders,
         partsStatus: nextStatus,
         noReplacementPartsNeeded: false,
@@ -974,7 +975,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
     const actionLabel = editingOrder.mode === 'add' ? 'added' : 'updated'
 
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         partsOrders: nextOrders,
         partsStatus: nextStatus,
         noReplacementPartsNeeded: false,
@@ -999,7 +1000,7 @@ function ROCard({ ro, authorName, canEditParts, onOpenDrawer }) {
     const nextStatus = calculatedPartsStatus(nextOrders, ro.partsStatus)
     const previousStatus = partsStatus
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         partsOrders: nextOrders,
         partsStatus: nextStatus,
         notes: noteLine(`Parts vendor removed: ${label}.`),

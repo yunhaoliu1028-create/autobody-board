@@ -1,4 +1,4 @@
-export const GIB_OPERATION_SCHEMA_VERSION = 1
+export const GIB_OPERATION_SCHEMA_VERSION = 2
 
 const NON_SEMANTIC_ACTION_KEYS = new Set(['confidence'])
 
@@ -45,6 +45,7 @@ export async function buildGibOperationIdentity({
   sourceRole = '',
   submittedInput = '',
   actions = [],
+  baseRoRevisions = {},
 }) {
   if (!draftNonce) throw new Error('This GIB draft is missing its safety identity. Submit it again before applying.')
   if (!actorUid) throw new Error('You must be signed in before applying GIB actions.')
@@ -55,6 +56,7 @@ export async function buildGibOperationIdentity({
     sourceRole: sourceRole || '',
     submittedInput: submittedInput.trim(),
     actions,
+    baseRoRevisions,
   }))
   const safeNonce = String(draftNonce).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48)
   if (safeNonce.length < 26) throw new Error('This GIB draft has an invalid safety identity. Submit it again before applying.')

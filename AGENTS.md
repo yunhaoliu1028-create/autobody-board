@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-19 - Codex** Added revision-guarded GIB transactions, fail-closed RO/task mutation protocols, concurrency-safe task deletion, and idempotent direct-photo retries. → [session below](#session-august-19-2026-codex--gib-concurrency-and-mixed-client-safety)
 - **2026-08-19 - Codex** Added durable per-draft GIB operation ledgers, deterministic task IDs, idempotent retry verification, and owner-scoped async draft lifecycle protection. → [session below](#session-august-19-2026-codex--gib-idempotent-apply-safety)
 - **2026-08-19 - Codex** Made GIB Apply and Undo validate-first atomic Firestore batches so failures cannot leave partial RO or task changes. → [session below](#session-august-19-2026-codex--gib-atomic-apply-and-undo)
 - **2026-08-19 - Codex** Made visible GIB action RO and assignee fields authoritative so stale hidden IDs cannot redirect writes or assignments. → [session below](#session-august-19-2026-codex--gib-action-identity-safety)
@@ -137,6 +138,37 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 19, 2026 (Codex) — GIB Concurrency and Mixed-Client Safety
+
+**Status:** Implemented, independently red-teamed, and verified on the isolated Draft PR branch. Not deployed to production.
+
+Changed:
+- Raised the GIB operation/draft schema and moved Apply to a server-fresh Firestore transaction. Each reviewed plan freezes the targeted RO revisions and exact task snapshots, performs every transaction read before any write, and exits with zero writes when another current GIB changed the reviewed data.
+- Added monotonic `gibRevision` and `taskRevision` protocols to every current web writer and the CCC extension. New documents start at zero and updates advance exactly once; Firestore rules reject old cached clients that omit the protocol so they cannot leave a task write behind after a rejected RO write.
+- Unified primary-task semantic matching across downstream, body, and paint paths. Automatic workflow tasks no longer silently reassign existing work; explicit, unambiguous employee assignments update pending work and block reassignment after work is in progress.
+- Made manager task deletion compare the revision confirmed in the UI inside a transaction, then write a same-request, revision-bound authorization receipt. Concurrently changed tasks are preserved and deterministic task IDs can be deleted again after recreation.
+- Made direct photo uploads merge current server notes and attachments, reuse a stable attempt/path within the draft lifecycle, refresh replaced Storage download URLs, and avoid duplicate notes or attachment records after a lost acknowledgement.
+- Temporarily disabled current-session Undo when an Apply created tasks. Durable, refresh-safe multi-task Undo is intentionally reserved for the next isolated step rather than relying on per-task manual-delete receipts.
+
+Verification:
+- `npm.cmd run test:gib-scope` — 99/99 passing.
+- `npm.cmd run test:parts-parser` — 24/24 passing.
+- `npm.cmd run build` — production build succeeded; only the existing large-chunk warning remains; final asset `index-CuPMZFR9.js`.
+- Firebase CLI rules dry-run — `firestore.rules` compiled successfully; no deployment was performed.
+- `git diff --check` — passing.
+- Two independent sub-agent release gates — PASS, with no remaining reproducible P0/P1 findings.
+
+Known follow-ups:
+- The next step is durable, operation-scoped Undo that survives refresh and rejects later edits atomically; it must use a shared operation receipt rather than one manual-delete receipt per task.
+- RO workflow reset still deletes tasks in separate transactions before resetting the RO, and non-GIB task-only inserts are outside the current GIB-vs-GIB query fence.
+- Add Firestore Emulator coverage for legacy-client rejection, revision races, repeated deterministic-ID deletion, and security-rule permissions.
+- After eventual deployment, refresh installed PWAs and update/reload the CCC extension; old clients now fail safely but cannot write under the stricter rules.
+
+Deployment:
+- No Firebase deploy was run; the live site remained unchanged while staff were using it.
 
 ---
 
