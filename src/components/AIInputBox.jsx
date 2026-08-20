@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
-import { doc, deleteField, getDocFromServer, getDocsFromServer, query, where, collection, serverTimestamp, arrayUnion, arrayRemove, runTransaction, snapshotEqual } from 'firebase/firestore'
+import { doc, deleteField, getDocFromServer, getDocsFromServer, query, where, collection, serverTimestamp, arrayUnion, runTransaction, snapshotEqual } from 'firebase/firestore'
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
 import { useAuth } from '../contexts/AuthContext'
@@ -52,6 +52,22 @@ import {
   gibTaskDocumentId,
   operationLedgerMatches,
 } from '../utils/gibOperation'
+import {
+  GIB_UNDO_MANIFEST_ID,
+  GIB_UNDO_RECEIPT_ID,
+  GIB_UNDO_SCHEMA_VERSION,
+  buildGibUndoPatch,
+  buildGibUndoPayload,
+  firestoreFieldsFromUndoPatch,
+  gibUndoSurfaceId,
+  operationHasDurableUndo,
+  parseGibUndoPayload,
+  recentAppliedFromOperation,
+  undoHeadMatchesOperation,
+  undoManifestDocumentMatches,
+  undoManifestTargetsMatchOperation,
+  undoReceiptMatches,
+} from '../utils/gibUndo'
 import { normalizeTaskRevision } from '../utils/taskMutations'
 import {
   extractPartsOrderCandidates,
@@ -1542,10 +1558,6 @@ function prependRoNote(entry, roDoc, line) {
   entry.fields.notes = prev ? `${line}\n${prev}` : line
 }
 
-function getPathValue(obj, path) {
-  return String(path).split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), obj)
-}
-
 // ── Photo-type keyword detection (no AI needed) ───────────────────────────────
 const PHOTO_TYPES = [
   { keys: ['check in','checkin','check-in',' ci ','c/i','ci photo','check in photo'], label: 'Check-In',   slug: 'check_in'   },
@@ -2483,6 +2495,7 @@ export default function AIInputBox({
   const applyInvocationRef = useRef(null)
   const submitInvocationRef = useRef(null)
   const undoInvocationRef = useRef(null)
+  const recentUndoRequestRevision = useRef(0)
   const photoActionTimerRef = useRef(null)
   const photoUploadAttemptRef = useRef(null)
   // Whisper voice refs
@@ -2505,6 +2518,7 @@ export default function AIInputBox({
   const historyStorageKey = user?.uid
     ? `${GIB_HISTORY_KEY_PREFIX}:${import.meta.env.VITE_FIREBASE_PROJECT_ID || 'default'}:${user.uid}`
     : null
+  const currentUserRole = employees.find(employee => employee.uid === user?.uid)?.role || ''
 
   useLayoutEffect(() => {
     const previous = draftLifecycleRef.current
@@ -2517,6 +2531,70 @@ export default function AIInputBox({
   }, [draftStorageKey, user?.uid])
 
   useEffect(() => {
+    if (!draftHydratedForOwner || !user?.uid || !draftStorageKey) return undefined
+    const ownerUid = user.uid
+    const recentLifecycle = { ...draftLifecycleRef.current }
+    const recentRequestRevision = ++recentUndoRequestRevision.current
+    let disposed = false
+
+    const canUpdateRecentUndo = () => (
+      !disposed
+      && recentUndoRequestRevision.current === recentRequestRevision
+      && isGibDraftLifecycleCurrent(draftLifecycleRef.current, recentLifecycle)
+    )
+
+    const loadRecentUndoableOperation = async () => {
+      try {
+        const surfaceId = await gibUndoSurfaceId(effectiveDraftScope)
+        const headSnapshot = await getDocFromServer(doc(
+          db, 'gibUndoHeads', ownerUid, 'surfaces', surfaceId,
+        ))
+        if (!headSnapshot.exists()) {
+          if (canUpdateRecentUndo()) setRecentApplied(null)
+          return
+        }
+        const headData = headSnapshot.data()
+        if (
+          typeof headData.operationId !== 'string'
+          || !headData.operationId
+          || headData.operationId.includes('/')
+        ) {
+          if (canUpdateRecentUndo()) setRecentApplied(null)
+          return
+        }
+        const operationRef = doc(
+          db, 'gibOperations', ownerUid, 'operations', headData.operationId,
+        )
+        const [operationSnapshot, receiptSnapshot] = await Promise.all([
+          getDocFromServer(operationRef),
+          getDocFromServer(doc(operationRef, 'undoReceipts', GIB_UNDO_RECEIPT_ID)),
+        ])
+        const operationData = operationSnapshot.data()
+        if (
+          !operationSnapshot.exists()
+          || !operationHasDurableUndo(operationData, ownerUid, effectiveDraftScope)
+          || !undoHeadMatchesOperation(headData, operationData, ownerUid, surfaceId)
+          || receiptSnapshot.exists()
+        ) {
+          if (receiptSnapshot.exists() && !undoReceiptMatches(receiptSnapshot.data(), operationData, ownerUid)) {
+            console.warn('[GIB Undo] Ignoring an operation with a mismatched Undo receipt.', headData.operationId)
+          }
+          if (canUpdateRecentUndo()) setRecentApplied(null)
+          return
+        }
+        if (canUpdateRecentUndo()) {
+          setRecentApplied(recentAppliedFromOperation(operationData, draftStorageKey, currentUserRole))
+        }
+      } catch (loadError) {
+        console.warn('[GIB Undo] Recent operation could not be loaded.', loadError)
+      }
+    }
+
+    loadRecentUndoableOperation()
+    return () => { disposed = true }
+  }, [currentUserRole, draftHydratedForOwner, draftStorageKey, effectiveDraftScope, user?.uid])
+
+  useEffect(() => {
     latestText.current = text
   }, [text])
 
@@ -2526,6 +2604,7 @@ export default function AIInputBox({
 
   useEffect(() => {
     setHydratedStorageKey(null)
+    recentUndoRequestRevision.current += 1
     clearTimeout(reparseTimer.current)
     clearTimeout(photoActionTimerRef.current)
     latestText.current = ''
@@ -3287,9 +3366,47 @@ export default function AIInputBox({
       return
     }
     setSharedAttempt({ ...operationIdentity, status: priorUnconfirmedAttempt ? 'unknown' : 'planning' }, { required: true })
+    const operationSurface = String(effectiveDraftScope || 'general')
+    const undoSurfaceId = await gibUndoSurfaceId(operationSurface)
     const operationRef = doc(db, 'gibOperations', user.uid, 'operations', operationIdentity.operationId)
+    const undoManifestRef = doc(operationRef, 'undoData', GIB_UNDO_MANIFEST_ID)
+    const undoHeadRef = doc(db, 'gibUndoHeads', user.uid, 'surfaces', undoSurfaceId)
 
-    const completeApplyUi = ({ alreadyApplied = false, competingRevision = false, roRestores = [], taskRefs = [], taskFingerprints = {}, taskRestores = [] } = {}) => {
+    const loadAlreadyAppliedUndo = async operationData => {
+      const requestRevision = ++recentUndoRequestRevision.current
+      if (!operationHasDurableUndo(operationData, user.uid, operationSurface)) {
+        if (applyUiIsCurrent() && recentUndoRequestRevision.current === requestRevision) {
+          setRecentApplied(null)
+        }
+        return
+      }
+      try {
+        const [headSnapshot, receiptSnapshot] = await Promise.all([
+          getDocFromServer(undoHeadRef),
+          getDocFromServer(doc(operationRef, 'undoReceipts', GIB_UNDO_RECEIPT_ID)),
+        ])
+        if (!applyUiIsCurrent() || recentUndoRequestRevision.current !== requestRevision) return
+        const headMatches = headSnapshot.exists()
+          && undoHeadMatchesOperation(headSnapshot.data(), operationData, user.uid, undoSurfaceId)
+        const receiptMatches = receiptSnapshot.exists()
+          && undoReceiptMatches(receiptSnapshot.data(), operationData, user.uid)
+        if (receiptSnapshot.exists() && !receiptMatches) {
+          console.warn('[GIB Undo] Ignoring an operation with a mismatched Undo receipt.', operationIdentity.operationId)
+        }
+        setRecentApplied(
+          headMatches && !receiptSnapshot.exists()
+            ? recentAppliedFromOperation(operationData, draftStorageKey, currentUserRole)
+            : null,
+        )
+      } catch (loadError) {
+        if (applyUiIsCurrent() && recentUndoRequestRevision.current === requestRevision) {
+          setRecentApplied(null)
+        }
+        console.warn('[GIB Undo] Applied operation could not be checked for Undo.', loadError)
+      }
+    }
+
+    const completeApplyUi = ({ alreadyApplied = false, competingRevision = false, operationData = null } = {}) => {
       if (!applyUiIsCurrent()) return
       const allNums = [...new Set(applyActions.map(action => action.roNumber).filter(Boolean))]
         .map(number => `#${number}`)
@@ -3300,22 +3417,17 @@ export default function AIInputBox({
             ? 'Another view already applied this GIB draft. This stale version was not written.'
             : 'This GIB update was already applied. No duplicate changes were written.',
         )
-        setRecentApplied(null)
+        if (competingRevision) {
+          recentUndoRequestRevision.current += 1
+          setRecentApplied(null)
+        } else {
+          setRecentApplied(null)
+          void loadAlreadyAppliedUndo(operationData)
+        }
       } else if (applyActions.length > 0) {
         toast.success(`${applyActions.length} update${applyActions.length !== 1 ? 's' : ''} applied to RO ${allNums}`)
-        setRecentApplied({
-          at: new Date().toISOString(),
-          ownerUid: user.uid,
-          draftStorageKey,
-          operationId: operationIdentity.operationId,
-          summary: applyActions.map(actionSummary).slice(0, 4),
-          actionCount: applyActions.length,
-          roRestores,
-          taskRefs,
-          taskFingerprints,
-          taskRestores,
-          undoSupported: taskRefs.length === 0,
-        })
+        recentUndoRequestRevision.current += 1
+        setRecentApplied(recentAppliedFromOperation(operationData, draftStorageKey, currentUserRole))
       }
 
       setApplied(true)
@@ -3345,7 +3457,7 @@ export default function AIInputBox({
           setApplyApplying(false)
           return
         }
-        completeApplyUi({ alreadyApplied: true })
+        completeApplyUi({ alreadyApplied: true, operationData: existingOperation.data() })
         setApplyError('')
         setApplyApplying(false)
         return
@@ -3974,38 +4086,70 @@ export default function AIInputBox({
 
     // ── Step 2: finalize restores, then commit every write atomically ─────────
     // (Images are handled in handleDirectImageUpload and never enter this batch.)
+    // A single Firestore update cannot contain both a map field and one of its
+    // dotted children. Merge the only GIB nested-map fields before snapshotting.
+    for (const { fields } of roMap.values()) {
+      if (fields.partsSubtasks && typeof fields.partsSubtasks === 'object') {
+        const mergedPartsSubtasks = { ...fields.partsSubtasks }
+        for (const nestedField of [
+          'partsSubtasks.verifiedAllReceived',
+          'partsSubtasks.deliveredToRepair',
+          'partsSubtasks.deliveredToReassembly',
+        ]) {
+          if (!Object.prototype.hasOwnProperty.call(fields, nestedField)) continue
+          mergedPartsSubtasks[nestedField.split('.')[1]] = fields[nestedField]
+          delete fields[nestedField]
+        }
+        fields.partsSubtasks = mergedPartsSubtasks
+      }
+    }
     const resultRoRevisions = {}
     const roRestores = [...roMap.values()].map(({ roDoc, fields, changeLogEntries }) => {
-      const restoreFields = {}
-      Object.keys(fields).forEach(key => {
-        if (key === 'updatedAt') return
-        const prev = getPathValue(roDoc, key)
-        restoreFields[key] = prev === undefined ? deleteField() : prev
-      })
+      const restoreFieldNames = Object.keys(fields).filter(key => key !== 'updatedAt')
+      if (changeLogEntries.length) restoreFieldNames.push('changeLog')
       const baseRevision = normalizeGibRevision(baseRoRevisions[roDoc.id])
       const resultRevision = baseRevision + 1
       resultRoRevisions[roDoc.id] = resultRevision
-      return { roId: roDoc.id, fields: restoreFields, changeLogEntries, baseRevision, resultRevision }
+      return {
+        roId: roDoc.id,
+        patch: buildGibUndoPatch(roDoc, restoreFieldNames),
+        resultRevision,
+      }
     })
 
     const taskRestores = [...taskUpdates.values()].map(({ ref, restoreFields, fields }) => ({
-      ref,
-      fields: restoreFields,
+      taskId: ref.id,
+      patch: buildGibUndoPatch(
+        taskSnapshots.get(ref.path)?.data() || {},
+        Object.keys(restoreFields).filter(field => field !== 'updatedAt'),
+      ),
       resultRevision: fields.taskRevision,
       expectedAfterFingerprint: taskUndoFingerprint({
         ...(taskSnapshots.get(ref.path)?.data() || {}),
         ...fields,
       }),
     }))
-    const createdTaskRefs = plannedTaskCreates.map(item => item.ref)
-    const createdTaskFingerprints = Object.fromEntries(plannedTaskCreates.map(item => [
-      item.ref.path,
-      taskUndoFingerprint(item.data),
-    ]))
+    const createdTasks = plannedTaskCreates.map(item => ({
+      taskId: item.ref.id,
+      resultRevision: normalizeTaskRevision(item.data.taskRevision),
+      expectedAfterFingerprint: taskUndoFingerprint(item.data),
+    }))
+    const undoPayload = await buildGibUndoPayload({
+      operationId: operationIdentity.operationId,
+      ownerUid: user.uid,
+      roRestores,
+      createdTasks,
+      taskRestores,
+    })
     const businessWriteCount = roMap.size + plannedTaskCreates.length + taskUpdates.size
-    const writeCount = businessWriteCount + 1 // immutable operation ledger
+    const writeCount = businessWriteCount + 3 // operation ledger + Undo manifest + owner/surface head
     const limitError = gibOperationLimitError({ actions: applyActions, targetRoIds: targetedRoIds, writeCount })
     if (limitError) throw new Error(limitError)
+
+    const operationSummary = applyActions
+      .map(action => actionSummary(action).slice(0, 240))
+      .slice(0, 4)
+      .join('\n')
 
     const ledgerData = {
       kind: 'gib_apply',
@@ -4016,10 +4160,39 @@ export default function AIInputBox({
       sourceRole: sourceRole || '',
       actionCount: applyActions.length,
       writeCount,
+      surface: operationSurface,
+      surfaceId: undoSurfaceId,
+      summary: operationSummary,
       targetRoIds: [...new Set(targetedRoIds)],
       createdTaskIds: plannedTaskCreates.map(item => item.ref.id),
+      updatedTaskIds: taskRestores.map(item => item.taskId),
       baseRoRevisions,
       resultRoRevisions,
+      undoSchemaVersion: GIB_UNDO_SCHEMA_VERSION,
+      undoManifestHash: undoPayload.payloadHash,
+      undoManifestBytes: undoPayload.payloadBytes,
+      undoItemCount: undoPayload.itemCount,
+      committedAt: serverTimestamp(),
+    }
+    const undoManifestData = {
+      kind: 'gib_undo_manifest',
+      operationId: operationIdentity.operationId,
+      ownerUid: user.uid,
+      schemaVersion: GIB_UNDO_SCHEMA_VERSION,
+      payload: undoPayload.payload,
+      payloadHash: undoPayload.payloadHash,
+      payloadBytes: undoPayload.payloadBytes,
+      itemCount: undoPayload.itemCount,
+      committedAt: serverTimestamp(),
+    }
+    const undoHeadData = {
+      kind: 'gib_undo_head',
+      ownerUid: user.uid,
+      surface: operationSurface,
+      surfaceId: undoSurfaceId,
+      operationId: operationIdentity.operationId,
+      manifestHash: undoPayload.payloadHash,
+      itemCount: undoPayload.itemCount,
       committedAt: serverTimestamp(),
     }
 
@@ -4033,8 +4206,14 @@ export default function AIInputBox({
             status: operationLedgerMatches(operationSnapshot.data(), operationIdentity, user.uid)
               ? 'already_applied'
               : 'competing_revision',
+            operationData: operationSnapshot.data(),
           }
         }
+        const undoManifestSnapshot = await transaction.get(undoManifestRef)
+        if (undoManifestSnapshot.exists()) {
+          throw gibStalePlanError('An Undo manifest already exists without its operation record.')
+        }
+        await transaction.get(undoHeadRef)
 
         // Queries are not supported inside Web SDK transactions. Re-read every
         // exact server-prefetched document and compare it before any write. A
@@ -4072,6 +4251,8 @@ export default function AIInputBox({
         }
 
         transaction.set(operationRef, ledgerData)
+        transaction.set(undoManifestRef, undoManifestData)
+        transaction.set(undoHeadRef, undoHeadData)
         for (const { roDoc, fields, changeLogEntries } of roMap.values()) {
           const updates = { ...fields, gibRevision: resultRoRevisions[roDoc.id] }
           if (changeLogEntries.length) updates.changeLog = arrayUnion(...changeLogEntries)
@@ -4079,7 +4260,7 @@ export default function AIInputBox({
         }
         plannedTaskCreates.forEach(item => transaction.set(item.ref, item.data))
         taskUpdates.forEach(item => transaction.update(item.ref, item.fields))
-        return { status: 'applied' }
+        return { status: 'applied', operationData: ledgerData }
       }), () => {
         setApplyError('Apply is still being committed. Do not retry or refresh until it finishes.')
       })
@@ -4090,16 +4271,11 @@ export default function AIInputBox({
       }
       if (commitResult.status === 'already_applied') {
         setApplyError('')
-        completeApplyUi({ alreadyApplied: true })
+        completeApplyUi({ alreadyApplied: true, operationData: commitResult.operationData })
         return
       }
       setApplyError('')
-      completeApplyUi({
-        roRestores,
-        taskRefs: createdTaskRefs,
-        taskFingerprints: createdTaskFingerprints,
-        taskRestores,
-      })
+      completeApplyUi({ operationData: ledgerData })
     } catch (err) {
       console.error('[handleApply]', err)
       if (isGibStalePlanError(err)) {
@@ -4116,7 +4292,7 @@ export default function AIInputBox({
             completeApplyUi({ alreadyApplied: true, competingRevision: true })
           } else {
             setApplyError('')
-            completeApplyUi({ alreadyApplied: true })
+            completeApplyUi({ alreadyApplied: true, operationData: committedOperation.data() })
           }
         } else {
           setSharedAttempt({ ...operationIdentity, status: 'failed' })
@@ -4239,21 +4415,122 @@ export default function AIInputBox({
     undoInvocationRef.current = undoInvocationToken
     setUndoing(true)
     setError('')
+    let undoSurfaceId
     try {
-      const taskRestores = undoSnapshot.taskRestores || []
-      await awaitAtomicCommit(runTransaction(db, async transaction => {
-        const roSnapshots = await Promise.all(
-          undoSnapshot.roRestores.map(item => transaction.get(doc(db, 'ros', item.roId))),
+      undoSurfaceId = await gibUndoSurfaceId(effectiveDraftScope)
+    } catch (surfaceError) {
+      if (undoUiIsCurrent()) {
+        setError('Undo could not start: ' + surfaceError.message)
+        setUndoing(false)
+      }
+      if (undoInvocationRef.current === undoInvocationToken) undoInvocationRef.current = null
+      return
+    }
+    if (!undoUiIsCurrent()) {
+      if (undoInvocationRef.current === undoInvocationToken) undoInvocationRef.current = null
+      return
+    }
+    const operationRef = doc(
+      db,
+      'gibOperations', undoSnapshot.ownerUid,
+      'operations', undoSnapshot.operationId,
+    )
+    const manifestRef = doc(operationRef, 'undoData', GIB_UNDO_MANIFEST_ID)
+    const receiptRef = doc(operationRef, 'undoReceipts', GIB_UNDO_RECEIPT_ID)
+    const headRef = doc(db, 'gibUndoHeads', undoSnapshot.ownerUid, 'surfaces', undoSurfaceId)
+    const finishAlreadyUndone = () => {
+      if (!undoUiIsCurrent()) return
+      setError('')
+      recentUndoRequestRevision.current += 1
+      setRecentApplied(null)
+      toast.success('This GIB update was already undone')
+    }
+    try {
+      const [operationSnapshot, manifestSnapshot, headSnapshot, existingReceiptSnapshot] = await Promise.all([
+        getDocFromServer(operationRef),
+        getDocFromServer(manifestRef),
+        getDocFromServer(headRef),
+        getDocFromServer(receiptRef),
+      ])
+      if (
+        !operationSnapshot.exists()
+        || !operationHasDurableUndo(operationSnapshot.data(), undoSnapshot.ownerUid, effectiveDraftScope)
+        || operationSnapshot.data().operationId !== undoSnapshot.operationId
+      ) throw new Error('The durable Undo record is missing or does not match this page.')
+      const operationData = operationSnapshot.data()
+      if (existingReceiptSnapshot.exists()) {
+        if (!undoReceiptMatches(existingReceiptSnapshot.data(), operationData, undoSnapshot.ownerUid)) {
+          throw new Error('The Undo receipt does not match this operation.')
+        }
+        finishAlreadyUndone()
+        return
+      }
+      if (
+        !headSnapshot.exists()
+        || !undoHeadMatchesOperation(
+          headSnapshot.data(), operationData, undoSnapshot.ownerUid, undoSurfaceId,
         )
-        const createdTaskSnapshots = await Promise.all(
-          undoSnapshot.taskRefs.map(ref => transaction.get(ref)),
-        )
-        const existingTaskSnapshots = await Promise.all(
-          taskRestores.map(item => transaction.get(item.ref)),
-        )
+      ) throw gibStalePlanError('A newer GIB update replaced this page\'s Undo point.')
+      if (
+        !manifestSnapshot.exists()
+        || !undoManifestDocumentMatches(manifestSnapshot.data(), operationData, undoSnapshot.ownerUid)
+      ) throw new Error('The durable Undo manifest is missing or invalid.')
+      const manifestData = manifestSnapshot.data()
+      const undoManifest = await parseGibUndoPayload({
+        payload: manifestData.payload,
+        payloadHash: manifestData.payloadHash,
+        operationId: undoSnapshot.operationId,
+        ownerUid: undoSnapshot.ownerUid,
+        itemCount: manifestData.itemCount,
+      })
+      if (!undoManifestTargetsMatchOperation(undoManifest, operationData)) {
+        throw new Error('The Undo manifest targets do not match the immutable operation record.')
+      }
+
+      const roRefs = undoManifest.roRestores.map(item => doc(db, 'ros', item.roId))
+      const createdTaskRefs = undoManifest.createdTasks.map(item => doc(db, 'tasks', item.taskId))
+      const existingTaskRefs = undoManifest.taskRestores.map(item => doc(db, 'tasks', item.taskId))
+      const receiptData = {
+        kind: 'gib_undo',
+        operationId: undoSnapshot.operationId,
+        ownerUid: undoSnapshot.ownerUid,
+        manifestHash: operationData.undoManifestHash,
+        itemCount: operationData.undoItemCount,
+        createdTaskIds: operationData.createdTaskIds,
+        surfaceId: undoSurfaceId,
+        committedAt: serverTimestamp(),
+      }
+
+      const undoResult = await awaitAtomicCommit(runTransaction(db, async transaction => {
+        const [currentOperation, currentManifest, currentHead, currentReceipt] = await Promise.all([
+          transaction.get(operationRef),
+          transaction.get(manifestRef),
+          transaction.get(headRef),
+          transaction.get(receiptRef),
+        ])
+        if (!currentOperation.exists() || !snapshotEqual(currentOperation, operationSnapshot)) {
+          throw gibStalePlanError('The immutable GIB operation record changed.')
+        }
+        if (currentReceipt.exists()) {
+          if (!undoReceiptMatches(currentReceipt.data(), currentOperation.data(), undoSnapshot.ownerUid)) {
+            throw gibStalePlanError('A different Undo receipt already exists.')
+          }
+          return { status: 'already_undone' }
+        }
+        if (!currentManifest.exists() || !snapshotEqual(currentManifest, manifestSnapshot)) {
+          throw gibStalePlanError('The durable Undo manifest changed.')
+        }
+        if (!currentHead.exists() || !snapshotEqual(currentHead, headSnapshot)) {
+          throw gibStalePlanError('A newer GIB update replaced this page\'s Undo point.')
+        }
+
+        // Firestore requires every transaction read before its first write.
+        const roSnapshots = await Promise.all(roRefs.map(ref => transaction.get(ref)))
+        const createdTaskSnapshots = await Promise.all(createdTaskRefs.map(ref => transaction.get(ref)))
+        const existingTaskSnapshots = await Promise.all(existingTaskRefs.map(ref => transaction.get(ref)))
 
         roSnapshots.forEach((snapshot, index) => {
-          const restore = undoSnapshot.roRestores[index]
+          const restore = undoManifest.roRestores[index]
           if (
             !snapshot.exists()
             || normalizeGibRevision(snapshot.data().gibRevision) !== restore.resultRevision
@@ -4261,45 +4538,72 @@ export default function AIInputBox({
             throw gibStalePlanError('A later GIB update changed this RO after Apply.')
           }
         })
-        createdTaskSnapshots.forEach(snapshot => {
+        createdTaskSnapshots.forEach((snapshot, index) => {
+          const restore = undoManifest.createdTasks[index]
           if (
             !snapshot.exists()
             || snapshot.data().gibOperationId !== undoSnapshot.operationId
             || snapshot.data().gibOperationOwnerUid !== undoSnapshot.ownerUid
-            || taskUndoFingerprint(snapshot.data()) !== undoSnapshot.taskFingerprints?.[snapshot.ref.path]
+            || normalizeTaskRevision(snapshot.data().taskRevision) !== restore.resultRevision
+            || taskUndoFingerprint(snapshot.data()) !== restore.expectedAfterFingerprint
           ) {
             throw gibStalePlanError('A GIB-created task changed after Apply.')
           }
         })
         existingTaskSnapshots.forEach((snapshot, index) => {
+          const restore = undoManifest.taskRestores[index]
           if (
             !snapshot.exists()
-            || taskUndoFingerprint(snapshot.data()) !== taskRestores[index].expectedAfterFingerprint
+            || normalizeTaskRevision(snapshot.data().taskRevision) !== restore.resultRevision
+            || taskUndoFingerprint(snapshot.data()) !== restore.expectedAfterFingerprint
           ) {
             throw gibStalePlanError('A task changed after Apply.')
           }
         })
 
-        undoSnapshot.roRestores.forEach((item, index) => transaction.update(roSnapshots[index].ref, {
-          ...item.fields,
-          ...(item.changeLogEntries?.length ? { changeLog: arrayRemove(...item.changeLogEntries) } : {}),
+        undoManifest.roRestores.forEach((item, index) => transaction.update(roSnapshots[index].ref, {
+          ...firestoreFieldsFromUndoPatch(item.patch),
           gibRevision: item.resultRevision + 1,
           updatedAt: serverTimestamp(),
         }))
         createdTaskSnapshots.forEach(snapshot => transaction.delete(snapshot.ref))
-        taskRestores.forEach(item => transaction.update(item.ref, {
-          ...item.fields,
+        undoManifest.taskRestores.forEach((item, index) => transaction.update(existingTaskSnapshots[index].ref, {
+          ...firestoreFieldsFromUndoPatch(item.patch),
           taskRevision: item.resultRevision + 1,
+          updatedAt: serverTimestamp(),
         }))
+        transaction.set(receiptRef, receiptData)
+        transaction.delete(headRef)
+        return { status: 'undone' }
       }), () => {
         if (undoUiIsCurrent()) setError('Undo is still being committed. Do not retry or refresh until it finishes.')
       })
+      if (undoResult.status === 'already_undone') {
+        finishAlreadyUndone()
+        return
+      }
       if (undoUiIsCurrent()) {
         setError('')
         toast.success('Last GIB update undone')
+        recentUndoRequestRevision.current += 1
         setRecentApplied(null)
       }
     } catch (err) {
+      try {
+        const confirmedReceipt = await getDocFromServer(receiptRef)
+        const confirmedOperation = await getDocFromServer(operationRef)
+        if (
+          confirmedReceipt.exists()
+          && confirmedOperation.exists()
+          && undoReceiptMatches(confirmedReceipt.data(), confirmedOperation.data(), undoSnapshot.ownerUid)
+        ) {
+          finishAlreadyUndone()
+          return
+        }
+      } catch {
+        // Keep the durable card visible. Retrying is safe because the fixed
+        // receipt makes the transaction exactly once.
+      }
       if (undoUiIsCurrent()) {
         setError(isGibStalePlanError(err)
           ? `Undo stopped safely: ${err.message} No changes were written.`
@@ -4839,8 +5143,8 @@ export default function AIInputBox({
               </div>
             </div>
             {recentAppliedForOwner.undoSupported === false ? (
-              <span className="shrink-0 max-w-40 text-right text-[11px] text-amber-600 dark:text-amber-300">
-                Undo unavailable for task-creating updates
+              <span className="shrink-0 max-w-44 text-right text-[11px] text-amber-600 dark:text-amber-300">
+                Undo unavailable for this task-changing update
               </span>
             ) : (
               <button

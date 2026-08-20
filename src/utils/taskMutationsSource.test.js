@@ -7,7 +7,7 @@ async function sourceFiles(directory) {
   const nested = await Promise.all(entries.map(async entry => {
     const url = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, directory)
     if (entry.isDirectory()) return sourceFiles(url)
-    return /\.(?:js|jsx)$/.test(entry.name) ? [url] : []
+    return /\.(?:js|jsx)$/.test(entry.name) && !entry.name.endsWith('.test.js') ? [url] : []
   }))
   return nested.flat()
 }
@@ -30,7 +30,8 @@ test('GIB task creates, updates, and existing-task Undo advance task revisions',
   assert.match(source, /taskRevision: 0,\s+gibOperationId:/)
   assert.match(source, /taskRevision: planned\.resultRevision/)
   assert.match(source, /taskRevision: item\.resultRevision \+ 1/)
-  assert.match(source, /undoSupported: taskRefs\.length === 0/)
+  assert.match(source, /transaction\.set\(receiptRef, receiptData\)/)
+  assert.match(source, /recentAppliedForOwner\.undoSupported === false/)
 })
 
 test('Firestore rules reject non-participating task writes and require atomic delete receipts', async () => {
@@ -38,7 +39,7 @@ test('Firestore rules reject non-participating task writes and require atomic de
   assert.match(rules, /function hasValidTaskRevisionTransition\(\)/)
   assert.match(rules, /allow create: if isAuth\(\)\s+&& request\.resource\.data\.taskRevision == 0;/)
   assert.match(rules, /allow update: if isAuth\(\) && hasValidTaskRevisionTransition\(\)/)
-  assert.match(rules, /allow delete: if isAuth\(\) && isManager\(\) && hasCurrentTaskDeleteReceipt\(taskId\);/)
+  assert.match(rules, /hasCurrentGibUndoReceipt\(taskId\)\s+\|\| \(isManager\(\) && hasCurrentTaskDeleteReceipt\(taskId\)\)/)
   assert.match(rules, /match \/taskDeletionReceipts\/\{taskId\}/)
   assert.match(rules, /allow create, update: if isAuth\(\)/)
   assert.match(rules, /expectedTaskRevision\s+== resource\.data\.get\('taskRevision', 0\)/)

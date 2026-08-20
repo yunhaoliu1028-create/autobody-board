@@ -31,6 +31,10 @@ test('GIB Apply plans every mutation before one guarded transaction commit', () 
   assert.ok(actionLoop < completionFinalizer)
   assert.ok(completionFinalizer < transactionCommit)
   assert.match(applySource, /transaction\.set\(operationRef, ledgerData\)/)
+  assert.match(applySource, /transaction\.set\(undoManifestRef, undoManifestData\)/)
+  assert.match(applySource, /transaction\.set\(undoHeadRef, undoHeadData\)/)
+  assert.match(applySource, /buildGibUndoPayload\(\{/)
+  assert.match(applySource, /const writeCount = businessWriteCount \+ 3/)
   assert.match(applySource, /gibOperationLimitError\(\{ actions: applyActions, targetRoIds: targetedRoIds, writeCount \}\)/)
   assert.match(applySource, /gibRevision: resultRoRevisions\[roDoc\.id\]/)
   assert.match(source, /const explicitExistingAssigneeChange = clean\.gibExplicitAssigneeChange === true/)
@@ -65,9 +69,28 @@ test('GIB Undo checks the post-Apply RO revision and advances it atomically', ()
   assert.match(undoSource, /normalizeGibRevision\(snapshot\.data\(\)\.gibRevision\) !== restore\.resultRevision/)
   assert.match(undoSource, /gibRevision: item\.resultRevision \+ 1/)
   assert.match(undoSource, /createdTaskSnapshots\.forEach\(snapshot => transaction\.delete/)
-  assert.match(undoSource, /taskRestores\.forEach\(item => transaction\.update/)
-  assert.match(undoSource, /taskUndoFingerprint\(snapshot\.data\(\)\) !== undoSnapshot\.taskFingerprints/)
-  assert.match(undoSource, /taskUndoFingerprint\(snapshot\.data\(\)\) !== taskRestores\[index\]\.expectedAfterFingerprint/)
+  assert.match(undoSource, /undoManifest\.taskRestores\.forEach\(\(item, index\) => transaction\.update/)
+  assert.match(undoSource, /taskUndoFingerprint\(snapshot\.data\(\)\) !== restore\.expectedAfterFingerprint/)
+  assert.match(undoSource, /parseGibUndoPayload\(\{/)
+  assert.match(undoSource, /undoManifestTargetsMatchOperation\(undoManifest, operationData\)/)
+  assert.match(undoSource, /snapshotEqual\(currentHead, headSnapshot\)/)
+  assert.match(undoSource, /transaction\.set\(receiptRef, receiptData\)/)
+  assert.match(undoSource, /transaction\.delete\(headRef\)/)
+  assert.match(undoSource, /getDocFromServer\(receiptRef\)/)
+
+  const transactionSource = sourceBetween(
+    'runTransaction(db, async transaction => {',
+    '}), () => {',
+    undoSource,
+  )
+  const lastRead = transactionSource.lastIndexOf('transaction.get(')
+  const firstWrite = Math.min(
+    ...['transaction.set(', 'transaction.update(', 'transaction.delete(']
+      .map(marker => transactionSource.indexOf(marker))
+      .filter(index => index >= 0),
+  )
+  assert.ok(lastRead >= 0 && lastRead < firstWrite)
+  assert.doesNotMatch(transactionSource, /\b(?:setError|setRecentApplied|toast\.|localStorage\.)/)
 })
 
 test('direct photo upload merges current server notes and advances the shared revision', () => {

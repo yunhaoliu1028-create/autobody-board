@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-19 - Codex** Added refresh-safe, operation-scoped GIB Undo with immutable manifests, exact surface heads, exactly-once receipts, and emulator-verified multi-task permissions. → [session below](#session-august-19-2026-codex--durable-gib-undo)
 - **2026-08-19 - Codex** Added revision-guarded GIB transactions, fail-closed RO/task mutation protocols, concurrency-safe task deletion, and idempotent direct-photo retries. → [session below](#session-august-19-2026-codex--gib-concurrency-and-mixed-client-safety)
 - **2026-08-19 - Codex** Added durable per-draft GIB operation ledgers, deterministic task IDs, idempotent retry verification, and owner-scoped async draft lifecycle protection. → [session below](#session-august-19-2026-codex--gib-idempotent-apply-safety)
 - **2026-08-19 - Codex** Made GIB Apply and Undo validate-first atomic Firestore batches so failures cannot leave partial RO or task changes. → [session below](#session-august-19-2026-codex--gib-atomic-apply-and-undo)
@@ -138,6 +139,41 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 19, 2026 (Codex) — Durable GIB Undo
+
+**Status:** Implemented, locally verified, and independently reviewed on the isolated Draft PR branch. Not deployed to production.
+
+Changed:
+- Raised the GIB operation/draft schemas and atomically stores three safety records with every Apply: an immutable operation root, a 600 KiB-capped typed Bytes restore manifest, and one exact owner/surface Undo head. A refresh or new tab can find the latest Undo point without scanning operation history.
+- Replaced React-only restore state with field-level RO/task inverse patches. The manifest preserves Firestore timestamps, arrays, maps, missing fields, and the complete pre-Apply change log while rejecting unknown fields, duplicate targets, prototype keys, oversized payloads, and mismatched owner/operation metadata.
+- Rebuilt Undo as an all-read-before-write Firestore transaction. It validates the immutable root/manifest/head, RO revisions, task revisions, task provenance, and post-Apply fingerprints; any later edit stops the entire Undo with zero writes.
+- Added a fixed create-only `undo_v1` receipt and removes the current surface head in the same transaction as all inverse writes. Concurrent tabs and lost acknowledgements therefore resolve to one Undo without duplicate restores.
+- Added a narrow task-delete rule for GIB Undo before the existing manager manual-delete rule. Managers can Undo bounded task batches; non-manager roles, including parts managers, can Undo RO-only updates but never receive task-delete or existing-task-restore authority. Their task-changing updates stay explicitly non-undoable instead of granting general task deletion.
+- Normalized overlapping `partsSubtasks` map/dotted updates before commit so Firestore never receives conflicting parent/child field paths.
+- Added Firebase Rules Unit Testing coverage and a demo-project Firestore Emulator suite; no test touches the production project or database.
+
+Verification:
+- `npm.cmd run test:gib-scope` — 106/106 passing.
+- `npm.cmd run test:parts-parser` — 24/24 passing.
+- Firestore Emulator — 12/12 permission/atomicity cases passing, including RO-only parts-manager Undo, manager Apply/Undo at the maximum 447 created tasks, and rejection of receipt-only, parts-manager task delete/restore, and old-head-rewind attempts.
+- Firebase CLI rules dry-run — `firestore.rules` compiled successfully.
+- `git diff --check` — passing.
+- `npm.cmd run build` — production build succeeded; only the existing large-chunk warning remains.
+- Local Vite preview — `/`, `/assets/index-B4W55vEI.js`, `/assets/index-Bkcoe6av.css`, and `/manifest.webmanifest` all returned HTTP 200.
+- Two independent final sub-agent release gates — PASS / PASS, with no remaining P0/P1 findings.
+
+Known follow-ups:
+- Durable Undo is deliberately one level per user/surface. A newer successful Apply replaces the previous head; old operations remain immutable audit/idempotency records but are not exposed as an Undo history stack.
+- The official client transaction restores every manifest item atomically. Because Firestore Rules cannot inspect or iterate the opaque Bytes manifest, protection against a deliberately modified authorized client that omits inverse writes would require moving Apply/Undo into a trusted backend; the current rules still bind receipt/head/task deletion and avoid expanding parts-manager general task permissions.
+- Existing schema-2 operations have no durable before-image and cannot be reconstructed safely. New schema-3 rules reject cached schema-2 Apply transactions atomically; installed PWAs must be closed/reopened after eventual deployment.
+- `npm audit --omit=dev` reports 16 findings in the existing Firebase/React Router dependency tree. Dependency upgrades are intentionally deferred to a separate reviewed step instead of mixing them into this Firestore workflow change.
+- The local Firestore Emulator now requires Java 21; the portable runtime used for verification is ignored tooling and is not committed.
+
+Deployment:
+- No Firebase deploy was run; the live site remained unchanged while staff were using it.
 
 ---
 

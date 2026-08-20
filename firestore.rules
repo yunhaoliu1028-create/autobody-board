@@ -54,6 +54,54 @@ service cloud.firestore {
         && getAfter(receiptPath).data.committedAt == request.time;
     }
 
+    function hasCurrentGibUndoReceipt(taskId) {
+      let ownerUid = resource.data.get('gibOperationOwnerUid', '_missing_owner_');
+      let operationId = resource.data.get('gibOperationId', '_missing_operation_');
+      let operationPath = /databases/$(database)/documents/gibOperations/$(ownerUid)/operations/$(operationId);
+      let operation = get(operationPath).data;
+      let headPath = /databases/$(database)/documents/gibUndoHeads/$(ownerUid)/surfaces/$(operation.surfaceId);
+      let receiptPath = /databases/$(database)/documents/gibOperations/$(ownerUid)/operations/$(operationId)/undoReceipts/undo_v1;
+      return ownerUid == request.auth.uid
+        && operationId is string
+        && resource.data.get('taskRevision', -1) == 0
+        && resource.data.get('status', '') == 'pending'
+        && exists(operationPath)
+        && isManager()
+        && exists(headPath)
+        && get(headPath).data.operationId == operationId
+        && get(headPath).data.manifestHash == operation.undoManifestHash
+        && !existsAfter(headPath)
+        && existsAfter(receiptPath)
+        && getAfter(receiptPath).data.kind == 'gib_undo'
+        && getAfter(receiptPath).data.ownerUid == request.auth.uid
+        && getAfter(receiptPath).data.operationId == operationId
+        && getAfter(receiptPath).data.createdTaskIds == operation.createdTaskIds
+        && taskId in getAfter(receiptPath).data.createdTaskIds
+        && getAfter(receiptPath).data.committedAt == request.time;
+    }
+
+    function canCommitGibUndoReceipt(uid, operationId) {
+      let operationPath = /databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId);
+      let operation = get(operationPath).data;
+      let headPath = /databases/$(database)/documents/gibUndoHeads/$(uid)/surfaces/$(operation.surfaceId);
+      return exists(operationPath)
+        && operation.ownerUid == uid
+        && (
+          isManager()
+          || (
+            operation.updatedTaskIds.size() == 0
+            && operation.createdTaskIds.size() == 0
+          )
+        )
+        && exists(headPath)
+        && get(headPath).data.kind == 'gib_undo_head'
+        && get(headPath).data.ownerUid == uid
+        && get(headPath).data.operationId == operationId
+        && get(headPath).data.manifestHash == operation.undoManifestHash
+        && get(headPath).data.itemCount == operation.undoItemCount
+        && !existsAfter(headPath);
+    }
+
     // ── Users collection ──────────────────────────────────────────────────────
     match /users/{uid} {
       // Anyone logged in can read user profiles (needed for name lookups)
@@ -95,7 +143,10 @@ service cloud.firestore {
          request.resource.data.diff(resource.data).affectedKeys()
            .hasOnly(['status', 'startedAt', 'completedAt', 'updatedAt', 'taskNotes', 'taskRevision']))
       );
-      allow delete: if isAuth() && isManager() && hasCurrentTaskDeleteReceipt(taskId);
+      allow delete: if isAuth() && (
+        hasCurrentGibUndoReceipt(taskId)
+        || (isManager() && hasCurrentTaskDeleteReceipt(taskId))
+      );
     }
 
     match /taskDeletionReceipts/{taskId} {
@@ -129,14 +180,18 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll([
           'kind', 'operationId', 'ownerUid', 'planFingerprint',
           'schemaVersion', 'sourceRole', 'actionCount', 'writeCount',
-          'targetRoIds', 'createdTaskIds', 'baseRoRevisions',
-          'resultRoRevisions', 'committedAt'
+          'surface', 'surfaceId', 'summary', 'targetRoIds',
+          'createdTaskIds', 'updatedTaskIds', 'baseRoRevisions',
+          'resultRoRevisions', 'undoSchemaVersion', 'undoManifestHash',
+          'undoManifestBytes', 'undoItemCount', 'committedAt'
         ])
         && request.resource.data.keys().hasOnly([
           'kind', 'operationId', 'ownerUid', 'planFingerprint',
           'schemaVersion', 'sourceRole', 'actionCount', 'writeCount',
-          'targetRoIds', 'createdTaskIds', 'baseRoRevisions',
-          'resultRoRevisions', 'committedAt'
+          'surface', 'surfaceId', 'summary', 'targetRoIds',
+          'createdTaskIds', 'updatedTaskIds', 'baseRoRevisions',
+          'resultRoRevisions', 'undoSchemaVersion', 'undoManifestHash',
+          'undoManifestBytes', 'undoItemCount', 'committedAt'
         ])
         && request.resource.data.kind == 'gib_apply'
         && request.resource.data.operationId == operationId
@@ -146,25 +201,171 @@ service cloud.firestore {
         && request.resource.data.ownerUid == uid
         && request.resource.data.planFingerprint is string
         && request.resource.data.planFingerprint.matches('^[0-9a-f]{64}$')
-        && request.resource.data.schemaVersion == 2
+        && request.resource.data.schemaVersion == 3
         && request.resource.data.sourceRole is string
         && request.resource.data.sourceRole.size() <= 64
         && request.resource.data.actionCount is int
         && request.resource.data.actionCount >= 1
         && request.resource.data.actionCount <= 449
         && request.resource.data.writeCount is int
-        && request.resource.data.writeCount >= 1
+        && request.resource.data.writeCount >= 4
         && request.resource.data.writeCount <= 450
+        && request.resource.data.surface is string
+        && request.resource.data.surface.size() >= 1
+        && request.resource.data.surface.size() <= 160
+        && request.resource.data.surfaceId is string
+        && request.resource.data.surfaceId.matches('^surface_[0-9a-f]{64}$')
+        && request.resource.data.summary is string
+        && request.resource.data.summary.size() <= 1200
         && request.resource.data.targetRoIds is list
         && request.resource.data.targetRoIds.size() <= 100
         && request.resource.data.createdTaskIds is list
-        && request.resource.data.createdTaskIds.size() <= 449
+        && request.resource.data.createdTaskIds.size() <= 447
+        && request.resource.data.updatedTaskIds is list
+        && request.resource.data.updatedTaskIds.size() <= 447
         && request.resource.data.baseRoRevisions is map
         && request.resource.data.baseRoRevisions.size() <= 100
         && request.resource.data.resultRoRevisions is map
         && request.resource.data.resultRoRevisions.size() <= 100
+        && request.resource.data.undoSchemaVersion == 1
+        && request.resource.data.undoManifestHash is string
+        && request.resource.data.undoManifestHash.matches('^[0-9a-f]{64}$')
+        && request.resource.data.undoManifestBytes is int
+        && request.resource.data.undoManifestBytes >= 1
+        && request.resource.data.undoManifestBytes <= 614400
+        && request.resource.data.undoItemCount is int
+        && request.resource.data.undoItemCount >= 1
+        && request.resource.data.undoItemCount <= 447
+        && request.resource.data.writeCount == request.resource.data.undoItemCount + 3
+        && request.resource.data.undoItemCount
+          == request.resource.data.targetRoIds.size()
+            + request.resource.data.createdTaskIds.size()
+            + request.resource.data.updatedTaskIds.size()
+        && request.resource.data.baseRoRevisions.size() == request.resource.data.targetRoIds.size()
+        && request.resource.data.resultRoRevisions.size() == request.resource.data.targetRoIds.size()
+        && existsAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)/undoData/manifest)
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)/undoData/manifest).data.ownerUid == uid
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)/undoData/manifest).data.operationId == operationId
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)/undoData/manifest).data.payloadHash == request.resource.data.undoManifestHash
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)/undoData/manifest).data.payloadBytes == request.resource.data.undoManifestBytes
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)/undoData/manifest).data.itemCount == request.resource.data.undoItemCount
+        && existsAfter(/databases/$(database)/documents/gibUndoHeads/$(uid)/surfaces/$(request.resource.data.surfaceId))
+        && getAfter(/databases/$(database)/documents/gibUndoHeads/$(uid)/surfaces/$(request.resource.data.surfaceId)).data.operationId == operationId
+        && getAfter(/databases/$(database)/documents/gibUndoHeads/$(uid)/surfaces/$(request.resource.data.surfaceId)).data.manifestHash == request.resource.data.undoManifestHash
+        && getAfter(/databases/$(database)/documents/gibUndoHeads/$(uid)/surfaces/$(request.resource.data.surfaceId)).data.itemCount == request.resource.data.undoItemCount
         && request.resource.data.committedAt == request.time;
       allow update, delete: if false;
+
+      match /undoData/{manifestId} {
+        allow get: if isAuth() && (request.auth.uid == uid || isManager());
+        allow list: if false;
+        allow create: if isAuth()
+          && request.auth.uid == uid
+          && manifestId == 'manifest'
+          && request.resource.data.keys().hasAll([
+            'kind', 'operationId', 'ownerUid', 'schemaVersion', 'payload',
+            'payloadHash', 'payloadBytes', 'itemCount', 'committedAt'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'kind', 'operationId', 'ownerUid', 'schemaVersion', 'payload',
+            'payloadHash', 'payloadBytes', 'itemCount', 'committedAt'
+          ])
+          && request.resource.data.kind == 'gib_undo_manifest'
+          && request.resource.data.operationId == operationId
+          && request.resource.data.ownerUid == uid
+          && request.resource.data.schemaVersion == 1
+          && request.resource.data.payload is bytes
+          && request.resource.data.payload.size() >= 1
+          && request.resource.data.payload.size() <= 614400
+          && request.resource.data.payloadHash is string
+          && request.resource.data.payloadHash.matches('^[0-9a-f]{64}$')
+          && request.resource.data.payloadBytes == request.resource.data.payload.size()
+          && request.resource.data.itemCount is int
+          && request.resource.data.itemCount >= 1
+          && request.resource.data.itemCount <= 447
+          && existsAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId))
+          && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)).data.undoManifestHash == request.resource.data.payloadHash
+          && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)).data.undoManifestBytes == request.resource.data.payloadBytes
+          && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)).data.undoItemCount == request.resource.data.itemCount
+          && request.resource.data.committedAt == request.time;
+        allow update, delete: if false;
+      }
+
+      match /undoReceipts/{receiptId} {
+        allow get: if isAuth() && (request.auth.uid == uid || isManager());
+        allow list: if false;
+        allow create: if isAuth()
+          && request.auth.uid == uid
+          && receiptId == 'undo_v1'
+          && request.resource.data.keys().hasAll([
+            'kind', 'operationId', 'ownerUid', 'manifestHash', 'itemCount',
+            'createdTaskIds', 'surfaceId', 'committedAt'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'kind', 'operationId', 'ownerUid', 'manifestHash', 'itemCount',
+            'createdTaskIds', 'surfaceId', 'committedAt'
+          ])
+          && request.resource.data.kind == 'gib_undo'
+          && request.resource.data.operationId == operationId
+          && request.resource.data.ownerUid == uid
+          && request.resource.data.manifestHash
+            == get(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)).data.undoManifestHash
+          && request.resource.data.itemCount
+            == get(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)).data.undoItemCount
+          && request.resource.data.createdTaskIds
+            == get(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)).data.createdTaskIds
+          && request.resource.data.surfaceId
+            == get(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(operationId)).data.surfaceId
+          && canCommitGibUndoReceipt(uid, operationId)
+          && request.resource.data.committedAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+
+    // One mutable pointer per owner/page surface. It is discovery-only; every
+    // Undo still validates the immutable operation and manifest.
+    match /gibUndoHeads/{uid}/surfaces/{surfaceId} {
+      allow get: if isAuth() && (request.auth.uid == uid || isManager());
+      allow list: if false;
+      allow create, update: if isAuth()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasAll([
+          'kind', 'ownerUid', 'surface', 'surfaceId', 'operationId',
+          'manifestHash', 'itemCount', 'committedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'kind', 'ownerUid', 'surface', 'surfaceId', 'operationId',
+          'manifestHash', 'itemCount', 'committedAt'
+        ])
+        && request.resource.data.kind == 'gib_undo_head'
+        && request.resource.data.ownerUid == uid
+        && request.resource.data.surface is string
+        && request.resource.data.surface.size() >= 1
+        && request.resource.data.surface.size() <= 160
+        && request.resource.data.surfaceId == surfaceId
+        && request.resource.data.surfaceId.matches('^surface_[0-9a-f]{64}$')
+        && request.resource.data.operationId is string
+        && request.resource.data.operationId.size() >= 30
+        && request.resource.data.operationId.size() <= 120
+        && request.resource.data.manifestHash is string
+        && request.resource.data.manifestHash.matches('^[0-9a-f]{64}$')
+        && request.resource.data.itemCount is int
+        && request.resource.data.itemCount >= 1
+        && request.resource.data.itemCount <= 447
+        && existsAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(request.resource.data.operationId))
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(request.resource.data.operationId)).data.surface == request.resource.data.surface
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(request.resource.data.operationId)).data.surfaceId == surfaceId
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(request.resource.data.operationId)).data.undoManifestHash == request.resource.data.manifestHash
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(request.resource.data.operationId)).data.undoItemCount == request.resource.data.itemCount
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(request.resource.data.operationId)).data.committedAt == request.time
+        && request.resource.data.committedAt == request.time;
+      allow delete: if isAuth()
+        && request.auth.uid == uid
+        && existsAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(resource.data.operationId)/undoReceipts/undo_v1)
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(resource.data.operationId)/undoReceipts/undo_v1).data.ownerUid == uid
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(resource.data.operationId)/undoReceipts/undo_v1).data.surfaceId == surfaceId
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(resource.data.operationId)/undoReceipts/undo_v1).data.manifestHash == resource.data.manifestHash
+        && getAfter(/databases/$(database)/documents/gibOperations/$(uid)/operations/$(resource.data.operationId)/undoReceipts/undo_v1).data.committedAt == request.time;
     }
 
     // ── Chat conversations ────────────────────────────────────────────────────

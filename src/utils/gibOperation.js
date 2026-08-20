@@ -1,4 +1,4 @@
-export const GIB_OPERATION_SCHEMA_VERSION = 2
+export const GIB_OPERATION_SCHEMA_VERSION = 3
 
 const NON_SEMANTIC_ACTION_KEYS = new Set(['confidence'])
 
@@ -80,7 +80,7 @@ export function gibOperationLimitError({ actions = [], targetRoIds = [], writeCo
     return `This update targets ${uniqueTargetCount} ROs. Split it into drafts of 100 ROs or fewer.`
   }
   if (writeCount > 450) {
-    return `This update needs ${writeCount} database writes including its safety record. Split it into smaller updates.`
+    return `This update needs ${writeCount} database writes including its safety records. Split it into smaller updates.`
   }
   return ''
 }

@@ -18,10 +18,34 @@ describe('GIB operation ledger rules contract', () => {
     assert.match(ledgerRule, /request\.resource\.data\.ownerUid == uid/)
     assert.match(ledgerRule, /planFingerprint\.matches\('\^\[0-9a-f\]\{64\}\$'\)/)
     assert.match(ledgerRule, /request\.resource\.data\.writeCount <= 450/)
-    assert.match(ledgerRule, /request\.resource\.data\.schemaVersion == 2/)
+    assert.match(ledgerRule, /request\.resource\.data\.schemaVersion == 3/)
+    assert.match(ledgerRule, /request\.resource\.data\.writeCount == request\.resource\.data\.undoItemCount \+ 3/)
+    assert.match(ledgerRule, /request\.resource\.data\.undoManifestBytes <= 614400/)
     assert.match(ledgerRule, /request\.resource\.data\.baseRoRevisions is map/)
     assert.match(ledgerRule, /request\.resource\.data\.resultRoRevisions is map/)
     assert.match(ledgerRule, /request\.resource\.data\.committedAt == request\.time/)
+  })
+
+  it('requires an atomic immutable manifest and a bounded owner-scoped head', () => {
+    assert.match(rules, /match \/undoData\/\{manifestId\}/)
+    assert.match(rules, /manifestId == 'manifest'/)
+    assert.match(rules, /request\.resource\.data\.payload is bytes/)
+    assert.match(rules, /request\.resource\.data\.payload\.size\(\) <= 614400/)
+    assert.match(rules, /match \/gibUndoHeads\/\{uid\}\/surfaces\/\{surfaceId\}/)
+    assert.match(rules, /request\.resource\.data\.surfaceId\.matches\('\^surface_\[0-9a-f\]\{64\}\$'\)/)
+    assert.match(rules, /allow list: if false/)
+  })
+
+  it('uses one immutable operation receipt for exactly-once Undo', () => {
+    assert.match(rules, /match \/undoReceipts\/\{receiptId\}/)
+    assert.match(rules, /receiptId == 'undo_v1'/)
+    assert.match(rules, /request\.resource\.data\.createdTaskIds\s+== get\(/)
+    assert.match(rules, /allow update, delete: if false/)
+    assert.match(rules, /hasCurrentGibUndoReceipt\(taskId\)/)
+    assert.match(rules, /canCommitGibUndoReceipt\(uid, operationId\)/)
+    assert.match(rules, /!existsAfter\(headPath\)/)
+    assert.match(rules, /&& isManager\(\)/)
+    assert.match(rules, /\.data\.committedAt == request\.time/)
   })
 
   it('prevents the update bypass and deletion of consumed IDs', () => {
