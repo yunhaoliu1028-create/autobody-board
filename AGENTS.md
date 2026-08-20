@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-20 - Codex** Deployed the reviewed GIB safety batch, revision-enforcing Firestore Rules, and matching CCC Extension update; live rendering and user RO Apply/Undo smoke tests passed. → [session below](#session-august-20-2026-codex--gib-safety-production-rollout)
 - **2026-08-19 - Codex** Added refresh-safe, operation-scoped GIB Undo with immutable manifests, exact surface heads, exactly-once receipts, and emulator-verified multi-task permissions. → [session below](#session-august-19-2026-codex--durable-gib-undo)
 - **2026-08-19 - Codex** Added revision-guarded GIB transactions, fail-closed RO/task mutation protocols, concurrency-safe task deletion, and idempotent direct-photo retries. → [session below](#session-august-19-2026-codex--gib-concurrency-and-mixed-client-safety)
 - **2026-08-19 - Codex** Added durable per-draft GIB operation ledgers, deterministic task IDs, idempotent retry verification, and owner-scoped async draft lifecycle protection. → [session below](#session-august-19-2026-codex--gib-idempotent-apply-safety)
@@ -139,6 +140,28 @@ PWA — employees use it as an installed app on iPhone/Android.
 - **2026-05-15 — Claude** Restructured handoff doc → `AGENTS.md` + `CLAUDE.md` pointer; added Working Rules and Change Log convention.
 - **2026-05-14/15 — Claude** Painter workflow refactor: `needsPaint` gate from CCC Paint Hrs, painter/helper "My Work" split into Active + Upcoming, removed Order parts auto-task, Detail task split into QC + delivery prep, RO assignment changes now sync pending tasks. → [session below](#session-may-1415-2026-claude-code--painter-workflow-refactor)
 - **2026-05-06/07 — Claude** Parts workflow role split (estimator orders / parts_manager tracks), AI token + role personalization fixes, new `DailyNotesLog` component with summarized past-day notes. → [session below](#session-may-67-2026-claude-code--parts-workflow--notes-overhaul)
+
+---
+
+## Session: August 20, 2026 (Codex) — GIB Safety Production Rollout
+
+**Status:** Deployed to `https://bodyshop-board.web.app` and retained after independent post-release review.
+
+Rollout:
+- Synchronized only the reviewed `chrome-extension/background.js` and `chrome-extension/popup.js` revision-protocol changes into the exact unpacked Extension directory used by the CCC Sync computer, verified both files against the release candidate, and had the owner Reload the Extension before changing production Rules.
+- After the owner confirmed Extension Reload, deployed Firestore Rules first and Firebase Hosting immediately afterward to project `bodyshop-board`. The deployment targets were Rules and Hosting; Storage Rules were not deployed.
+- Published Hosting bundle `/assets/index-B4W55vEI.js` with `/assets/index-Bkcoe6av.css`; the no-cache HTML and Service Worker now reference the new assets and not the previous bundle.
+
+Verification:
+- Final preflight remained green: GIB 106/106, parts parser 24/24, Firestore Emulator 12/12, Rules dry-run compile, production build, extension syntax, and clean isolated branch.
+- Live homepage, JavaScript, CSS, manifest, Service Worker, and registration script returned HTTP 200; a signed-in Parts Manager page rendered the Quick Update UI with no browser errors observed.
+- Independent post-release red-team gate passed with no P0/P1 rollback finding.
+- The owner performed a production smoke on RO #9728: two GIB updates applied, Parts changed to All Received, Undo completed, and Parts restored to Not Ordered without an error.
+
+Operational notes:
+- Installed employee PWAs must be fully closed and reopened after this rollout so cached pre-revision clients do not receive expected permission-denied failures.
+- The CCC Extension remains an unpacked manual deployment at manifest version `1.2.0`; future extension changes still require syncing its loaded folder and clicking Reload.
+- A live CCC Scan/Sync was not independently evidenced in this rollout record; the owner reported the post-deployment checks were all good after the RO #9728 Undo smoke.
 
 ---
 
