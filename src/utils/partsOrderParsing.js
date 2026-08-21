@@ -16,7 +16,8 @@ const NUMBER_WORDS = {
 
 const ORDER_CONTEXT_RE = /\b(?:order|ordered|ordering)\b|订|訂|下单|下單/iu
 const RESOLVED_RECEIPT_RE = /\b(?:the\s+)?(?:\d+\s+)?parts?\s+ordered\s+(?:from|via|thru|through)\b[^.;\n]*?\b(?:have|has|were|was|are)?\s*(?:all\s+)?(?:been\s+)?(?:received|recieved|rcvd|complete)\b/i
-const RESOLVED_CHINESE_RECEIPT_RE = /(?:从|跟)\s*[A-Za-z][A-Za-z0-9&+.' -]*?\s*(?:订|訂|定|下单|下單)[^。；!?！？\n]*?(?:全[^。；!?！？\n]*(?:收齐|收齊|收到)|已[^。；!?！？\n]*(?:收齐|收齊|收到))/u
+const RESOLVED_CHINESE_RECEIPT_RE = /(?:从|跟|向)\s*[A-Za-z][A-Za-z0-9&+.' -]*?\s*(?:订购|訂購|订|訂|定|下单|下單)[^。；!?！？\n]*?(?:全[^。；!?！？\n]*(?:收齐|收齊|收到)|已[^。；!?！？\n]*(?:收齐|收齊|收到))/u
+const PROSPECTIVE_CHINESE_RECEIPT_RE = /(?:预计|預計|大概|约|約|会|會)[^。；!?！？\n]{0,40}(?:收到|收齐|收齊|到齐|到齊)/u
 const VENDOR_RECEIPT_FRAGMENT_RE = /\b(?:have|has|were|was|are)?\s*(?:all\s+)?(?:been\s+)?(?:received|recieved|rcvd)\b/i
 const PARSING_METADATA_WORDS = new Set([
   'today', 'tomorrow', 'yesterday',
@@ -101,7 +102,7 @@ function cleanVendor(value = '') {
 
 function splitOrderScopes(text = '') {
   return String(text)
-    .split(/(?:\r?\n)+|[.;。；!?！？]+|,(?=\s*(?:order|ordered|ordering)\b)/i)
+    .split(/(?:\r?\n)+|[•]|[.;。；!?！？]+|,(?=\s*(?:order|ordered|ordering)\b)/i)
     .map(scope => scope.trim())
     .filter(Boolean)
 }
@@ -115,7 +116,7 @@ function nearbyEtaEvidence(scope, matchEnd, defaultYear) {
 
 function nearbyChineseOrderDateEvidence(scope, matchEnd, defaultYear) {
   const tail = scope.slice(matchEnd, matchEnd + 100)
-  const nextVendorMatch = tail.match(/(?:从|跟)\s*[A-Za-z][A-Za-z0-9&+.' -]*?\s*(?:订|訂|定|下单|下單)/u)
+  const nextVendorMatch = tail.match(/(?:从|跟|向)\s*[A-Za-z][A-Za-z0-9&+.' -]*?\s*(?:订购|訂購|订|訂|定|下单|下單)/u)
   const nextVendorBoundary = nextVendorMatch?.index ?? -1
   const hardBoundary = tail.search(/[.;。；!?！？\n]/u)
   const boundaries = [nextVendorBoundary, hardBoundary].filter(index => index >= 0)
@@ -213,7 +214,9 @@ function extractPartsOrderCandidatesInScope(
   }
 
   for (const scope of splitOrderScopes(text)) {
-    if (!ORDER_CONTEXT_RE.test(scope) || RESOLVED_RECEIPT_RE.test(scope) || RESOLVED_CHINESE_RECEIPT_RE.test(scope)) continue
+    const resolvedChineseReceipt = RESOLVED_CHINESE_RECEIPT_RE.test(scope)
+      && !PROSPECTIVE_CHINESE_RECEIPT_RE.test(scope)
+    if (!ORDER_CONTEXT_RE.test(scope) || RESOLVED_RECEIPT_RE.test(scope) || resolvedChineseReceipt) continue
 
     const roNumber = String(scopedRoNumber || candidateRoNumbersFromText(scope)[0] || defaultRoNumber)
     const scopeCommonEtaMatch = scope.match(/\ball\s+eta\b(.{0,40})/i)
@@ -264,7 +267,7 @@ function extractPartsOrderCandidatesInScope(
       push({ roNumber, vendor: match[1], ...dateFieldsForMatch(match) })
     }
 
-    const chineseVendorRe = /(?:从|跟)\s*([A-Za-z][A-Za-z0-9&+.' -]*?)\s*(?:订|訂|定|下单|下單)/gu
+    const chineseVendorRe = /(?:从|跟|向)\s*([A-Za-z][A-Za-z0-9&+.' -]*?)\s*(?:订购|訂購|订|訂|定|下单|下單)(?:了|的)?\s*(?:(\d+)\s*个?\s*(?:部件|零件|件))?/gu
     for (const match of scope.matchAll(chineseVendorRe)) {
       const nearbyEvidence = nearbyChineseOrderDateEvidence(
         scope,
@@ -277,6 +280,7 @@ function extractPartsOrderCandidatesInScope(
       push({
         roNumber,
         vendor: match[1],
+        qty: match[2],
         eta: nearbyEvidence?.normalized || scopeCommonEta,
         invalidDate,
       })

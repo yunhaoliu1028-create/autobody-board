@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-const source = await readFile(new URL('../components/AIInputBox.jsx', import.meta.url), 'utf8')
-const roBoardSource = await readFile(new URL('../pages/ROBoard.jsx', import.meta.url), 'utf8')
+const source = (await readFile(new URL('../components/AIInputBox.jsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+const roBoardSource = (await readFile(new URL('../pages/ROBoard.jsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
 
 function between(startMarker, endMarker) {
   const start = source.indexOf(startMarker)

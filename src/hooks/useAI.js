@@ -450,7 +450,7 @@ ${sourceContextBlock}
 
 FIELD NOTES:
 - "ETA" (shop's target completion date) is separate from "CCC Date-Out" (a locked CCC formula date). "Shop ETA", "repair ETA", "shop repair ETA", "repair due", and "due date" all mean update_due_date. update_due_date sets the shop ETA — it does NOT touch CCC Date-Out.
-- "Drop-Off Date" (shown as "In:" on the board) tracks when the vehicle physically arrived. It starts blank and is only set via update_dropoff_date or manual edit.
+- "Drop-Off Date" (shown as "In:" on the board) tracks the planned or actual vehicle drop-off date. Car Status separately records whether the vehicle is physically in the shop.
 
 RULES:
 - ALL output (notes, task titles, descriptions) MUST be written in English, regardless of the input language. The user may speak/type in Chinese, Spanish, or mixed — always produce English output.
@@ -461,6 +461,7 @@ RULES:
 - When a user updates a parts vendor ETA (examples: "dealer eta change to 5-14", "K&P eta 5/15", "Puente Hills Hyundai ETA changed"), emit update_parts_order with that vendor/dealer and eta. Do NOT emit update_due_date for vendor ETA changes.
 - In Parts Manager context, bare "ETA" defaults to parts/vendor ETA. Use update_due_date only when the input clearly refers to vehicle/shop/customer completion timing.
 - When input contains drop-off keywords (dropped off, drop off, 放车, 送来, 已到, 进店), ALWAYS generate BOTH update_dropoff_date AND an add_note describing the drop-off event. Never emit update_dropoff_date without a paired add_note.
+- Distinguish scheduled drop-off from physical arrival. If the date is in the future or the user says 预计/计划/会来/expected/scheduled/will drop off, use update_car_status "pending_dropoff" and write "scheduled to drop off" in the note. Use "car_in_shop" and past-tense "dropped off" only after explicit arrival confirmation.
 - Write notes in professional, concise third-person shop format (not casual)
 - Dates without year: assume current year (${today.split('-')[0]}). Format as YYYY-MM-DD.
 - Parts workflow: ESTIMATOR is responsible for ordering parts. PARTS MANAGER tracks ETA, confirms receipt, and handles return parts.
@@ -469,6 +470,7 @@ RULES:
 - Preserve explicit vendor names from the user's input. Do not invent or substitute vendor abbreviations. Example: "Parts Authority" must stay "Parts Authority"; never turn it into "PAC" unless the user actually said PAC.
 - For compact batch parts orders like "1 from Keystone, 1 from Parts Authority, 1 from Amazon all ETA 5/21, 3 labels ordered from Auto Datalabel ETA 5/22", emit one update_parts_order per vendor. Apply a shared "all ETA" to the vendor clauses immediately before it, and keep later clauses with their own ETA separate.
 - If the user says parts arrived/received, emit log_parts_received with vendor, qtyReceived, and totalQty when known. For received parts, prefer the existing vendor name already listed in that RO's partsOrders over creating a new spelling; treat labels like "(Dealer)", "OEM", or "Parts" as descriptive, not different vendors.
+- Chinese future wording such as "预计收到", "预计全部收", "会到", or "大概会到" means an ordered shipment with an ETA. Emit update_parts_order with qtyReceived 0; never emit log_parts_received until the user confirms 已收到/已收齐/received/arrived.
 - If the user says an RO needs no replacement parts / no parts are needed, do NOT create a 0-qty parts order. Emit update_parts_status with partsStatus "all_received" and a concise add_note that no replacement parts are needed.
 - Treat "received 1 from Keystone" as an incremental receipt of 1 additional usable part, not a final cumulative received count. Only treat a count as final when the user writes a fraction like "received 9/9" or says "received all".
 - For "received all parts except N from VENDOR" or multiple exceptions like "except 1 from VENDOR A and 2 from VENDOR B", interpret every other existing vendor on that RO as fully received and each exception vendor as ordered qty minus short qty. Write one concise summary note for the RO instead of separate notes per vendor.

@@ -248,3 +248,17 @@ test('duplicate-order merging keeps fields from the more complete action', () =>
   const supportedLater = { type: 'update_parts_order', vendor: 'Keystone', vendorFull: 'Keystone', qty: 1, qtyReceived: 0, eta: '2026-08-18', description: 'Parts order' }
   assert.deepEqual(mergePreferredPartsOrderActions(noisyFirst, supportedLater), supportedLater)
 })
+
+test('parses Chinese batch orders per RO and treats expected receipt as an ETA', () => {
+  const text = `RO 9735：向 Mercedes-Benz Long Beach订购了 2 个部件，预计 8 月 24 日送达
+RO 9728：Lexus Woodlandhills订购的 3 个部件已于 8 月 20 日全部收到并确认
+RO 9734：向 K&P 订购了 1 个部件，预计 8 月 25 日送达 • 向 Keyston 订购了 2 个部件，预计 8 月 24 日送达
+RO 9732：向 Lexus Woodlandhills订购了 10 个部件，预计 8 月 24 日全部收到`
+
+  assert.deepEqual(extractPartsOrderCandidates(text, { ...options, knownRoNumbers: ['9735', '9728', '9734', '9732'] }), [
+    { roNumber: '9735', vendor: 'Mercedes-Benz Long Beach', qty: 2, eta: '2026-08-24' },
+    { roNumber: '9734', vendor: 'K&P', qty: 1, eta: '2026-08-25' },
+    { roNumber: '9734', vendor: 'Keystone', qty: 2, eta: '2026-08-24' },
+    { roNumber: '9732', vendor: 'Lexus Woodlandhills', qty: 10, eta: '2026-08-24' },
+  ])
+})

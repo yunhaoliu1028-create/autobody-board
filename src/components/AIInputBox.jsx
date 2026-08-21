@@ -13,6 +13,7 @@ import { compressImageFile, compressVideoFrame } from '../utils/imageCompression
 import { playShutterSound } from '../utils/cameraFeedback'
 import { inferStructuredActionsFromText } from '../utils/aiActionInference'
 import { buildRoInputScopes, getRoScopedText } from '../utils/gibInputScope'
+import { reconcileScheduledActions } from '../utils/gibScheduleSafety'
 import { actionDateValidationError, findDateToken } from '../utils/dateParsing'
 import {
   actionTargetsRo,
@@ -2429,8 +2430,9 @@ function prepareParsedResult(parsed, sourceRole, inputText = '', knownRoNumbers 
 
 function prepareReviewedPlan(parsed, sourceRole, inputText, knownRoNumbers, ros, employees) {
   const prepared = prepareParsedResult(parsed, sourceRole, inputText, knownRoNumbers)
+  const scheduledActions = reconcileScheduledActions(prepared?.actions || [], inputText, { knownRoNumbers })
   const reviewedActions = normalizePaintWorkflowActions(
-    normalizeBodyWorkflowActions(prepared?.actions || [], inputText, ros, employees),
+    normalizeBodyWorkflowActions(scheduledActions, inputText, ros, employees),
     inputText,
     ros,
     employees,

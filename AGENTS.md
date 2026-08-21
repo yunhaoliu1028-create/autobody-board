@@ -26,6 +26,7 @@ PWA — employees use it as an installed app on iPhone/Android.
 ## Change Log
 *Newest first. One line per change. Append every session.*
 
+- **2026-08-21 - Codex** Corrected future Drop-Off status/date binding and prevented expected parts arrivals from being applied as received inventory.
 - **2026-08-20 - Codex** Deployed the reviewed GIB safety batch, revision-enforcing Firestore Rules, and matching CCC Extension update; live rendering and user RO Apply/Undo smoke tests passed. → [session below](#session-august-20-2026-codex--gib-safety-production-rollout)
 - **2026-08-19 - Codex** Added refresh-safe, operation-scoped GIB Undo with immutable manifests, exact surface heads, exactly-once receipts, and emulator-verified multi-task permissions. → [session below](#session-august-19-2026-codex--durable-gib-undo)
 - **2026-08-19 - Codex** Added revision-guarded GIB transactions, fail-closed RO/task mutation protocols, concurrency-safe task deletion, and idempotent direct-photo retries. → [session below](#session-august-19-2026-codex--gib-concurrency-and-mixed-client-safety)
