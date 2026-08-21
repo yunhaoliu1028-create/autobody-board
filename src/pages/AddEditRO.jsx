@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
-  doc, getDoc, addDoc, updateDoc, collection, serverTimestamp, onSnapshot,
+  doc, getDoc, addDoc, collection, serverTimestamp, onSnapshot, query, where, getDocs,
 } from 'firebase/firestore'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { RO_STATUSES, PARTS_STATUSES, CAR_STATUSES, EDIT_RO_ROLES } from '../constants/roles'
 
@@ -26,6 +28,7 @@ const EMPTY = {
   assignedEstimator:   '',
   assignedBodyMan:     '',
   assignedPainter:     '',
+  assignedPaintHelper: '',
   assignedPartsManager:'',
   laborAmount:         '',
   partsAmount:         '',
@@ -47,6 +50,44 @@ function Field({ label, children, required }) {
 
 const INPUT = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
 const SELECT = INPUT + ' bg-white'
+
+// When the manager swaps an assigned worker on the RO, point any pending tasks
+// for the affected phases to the new person. In-progress and completed tasks
+// are left alone — work already started shouldn't be silently reassigned.
+const PHASES_BY_FIELD = {
+  assignedBodyMan:     ['teardown', 'body', 'reassembly'],
+  assignedPainter:     ['paint'],
+  assignedPaintHelper: ['paint_prep'],
+}
+
+async function syncPendingTaskAssignees(roId, prevData, nextData) {
+  const changedPhases = new Set()
+  const newAssigneeByPhase = {}
+  for (const [field, phases] of Object.entries(PHASES_BY_FIELD)) {
+    const oldVal = prevData?.[field] || ''
+    const newVal = nextData?.[field] || ''
+    if (oldVal === newVal) continue
+    for (const p of phases) {
+      changedPhases.add(p)
+      newAssigneeByPhase[p] = newVal || null
+    }
+  }
+  if (changedPhases.size === 0) return
+
+  const snap = await getDocs(query(
+    collection(db, 'tasks'),
+    where('roId', '==', roId),
+    where('status', '==', 'pending'),
+  ))
+  for (const d of snap.docs) {
+    const phase = d.data().phase
+    if (!changedPhases.has(phase)) continue
+    await updateTaskDoc(doc(db, 'tasks', d.id), {
+      assignedTo: newAssigneeByPhase[phase],
+      updatedAt: serverTimestamp(),
+    })
+  }
+}
 
 export default function AddEditRO() {
   const { id }     = useParams()           // undefined → new
@@ -90,6 +131,21 @@ export default function AddEditRO() {
     setError('')
     if (!form.roNumber.trim()) { setError('RO Number is required.'); return }
     if (!form.customerName.trim()) { setError('Customer name is required.'); return }
+    const bodyTech = employees.find(emp => emp.uid === form.assignedBodyMan)
+    if (form.assignedBodyMan && bodyTech?.role !== 'body_man') {
+      setError('Body Tech must be assigned to an employee with the Body Technician role.')
+      return
+    }
+    const painter = employees.find(emp => emp.uid === form.assignedPainter)
+    if (form.assignedPainter && painter?.role !== 'painter') {
+      setError('Painter must be assigned to an employee with the Painter role.')
+      return
+    }
+    const paintHelper = employees.find(emp => emp.uid === form.assignedPaintHelper)
+    if (form.assignedPaintHelper && paintHelper?.role !== 'paint_helper') {
+      setError('Paint Helper must be assigned to an employee with the Paint Helper role.')
+      return
+    }
     setSaving(true)
     try {
       const payload = {
@@ -97,12 +153,15 @@ export default function AddEditRO() {
         updatedAt: serverTimestamp(),
       }
       if (isNew) {
+        payload.gibRevision = 0
         payload.createdAt = serverTimestamp()
         payload.createdBy = user.uid
         const ref = await addDoc(collection(db, 'ros'), payload)
         navigate(`/ro/${ref.id}`)
       } else {
-        await updateDoc(doc(db, 'ros', id), payload)
+        const prevSnap = await getDoc(doc(db, 'ros', id))
+        await updateRoDoc(doc(db, 'ros', id), payload)
+        await syncPendingTaskAssignees(id, prevSnap.data() || {}, payload)
         navigate(`/ro/${id}`)
       }
     } catch (err) {
@@ -308,7 +367,8 @@ export default function AddEditRO() {
             {[
               { label: 'Estimator',    field: 'assignedEstimator',    roles: ['estimator', 'shop_manager'] },
               { label: 'Body Tech',    field: 'assignedBodyMan',       roles: ['body_man'] },
-              { label: 'Painter',      field: 'assignedPainter',       roles: ['painter', 'paint_helper'] },
+              { label: 'Painter',      field: 'assignedPainter',       roles: ['painter'] },
+              { label: 'Paint Helper', field: 'assignedPaintHelper',   roles: ['paint_helper'] },
               { label: 'Parts Mgr',   field: 'assignedPartsManager',  roles: ['parts_manager'] },
             ].map(({ label, field, roles: r }) => (
               <Field key={field} label={label}>

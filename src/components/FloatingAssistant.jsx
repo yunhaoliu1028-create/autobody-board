@@ -1,11 +1,15 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
-import { collection, getDocs, doc, updateDoc, addDoc, serverTimestamp } from 'firebase/firestore'
+import { collection, getDocs, doc, serverTimestamp, arrayUnion, query, where } from 'firebase/firestore'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from './Toast'
 import { askShopAssistant, transcribeWithWhisper, loadAssistantMemory, appendAssistantMemory, deleteAssistantMemory } from '../hooks/useAI'
 import MentionTextarea, { buildMentionCandidates } from './MentionTextarea'
 import { format, differenceInCalendarDays, parseISO, isValid } from 'date-fns'
+import { getSuggestedNextStatus, getDownstreamTasks } from '../engine/taskRules'
+import { inferStructuredActionsFromText } from '../utils/aiActionInference'
 
 // ── Priority based on due date ────────────────────────────────────────────────
 function dueDateToPriority(ro) {
@@ -47,7 +51,7 @@ function findEmployeeByName(employees, rawName = '', preferredRole = null) {
   })
   if (preferredRole) {
     const roleMatch = matches.find(emp => emp.role === preferredRole)
-    if (roleMatch) return roleMatch
+    return roleMatch ?? null
   }
   return matches[0] ?? null
 }
@@ -66,6 +70,134 @@ function normalizedTaskDescription(action, isBodyTask) {
 }
 
 // ── Quick prompt chips ────────────────────────────────────────────────────────
+function numericQty(value, fallback = 0) {
+  const n = Number.parseInt(value, 10)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+function normalizeVendorName(value = '') {
+  return normalizeName(value)
+    .split(' ')
+    .filter(part => !['dealer', 'dealership', 'oem', 'parts', 'part'].includes(part))
+    .join(' ')
+    .trim()
+}
+
+function vendorNamesMatch(left = '', right = '') {
+  const a = normalizeVendorName(left)
+  const b = normalizeVendorName(right)
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a) || a.replace(/\s+/g, '') === b.replace(/\s+/g, '')))
+}
+
+function isOrderFullyReceived(order = {}) {
+  const qty = numericQty(order.qty ?? order.quantity, 0)
+  const received = numericQty(order.qtyReceived ?? order.receivedQty, 0)
+  return qty > 0 && received >= qty
+}
+
+function calculatePartsStatus(orders = [], fallback = 'not_ordered') {
+  if (!orders.length) return fallback || 'not_ordered'
+  if (orders.every(isOrderFullyReceived)) return 'all_received'
+  if (orders.some(order => numericQty(order.qtyReceived ?? order.receivedQty, 0) > 0)) return 'partially_received'
+  return 'ordered'
+}
+
+function orderStatusFromPartsStatus(partsStatus) {
+  if (partsStatus === 'all_received') return 'received'
+  if (partsStatus === 'partially_received') return 'partial'
+  if (partsStatus === 'ordered') return 'ordered'
+  return undefined
+}
+
+function orderMatchesVendor(order = {}, vendor = '', vendorFull = '') {
+  return vendorNamesMatch(order.vendor, vendor)
+    || vendorNamesMatch(order.vendorFull, vendor)
+    || vendorNamesMatch(order.vendor, vendorFull)
+    || vendorNamesMatch(order.vendorFull, vendorFull)
+}
+
+function textMeansNoReplacementParts(text = '') {
+  return /\b(no|none|not\s+needed|does\s+not\s+need|doesn't\s+need|without)\b/i.test(text)
+    && /\b(repl(?:acement)?|replace(?:ment)?|parts?|part)\b/i.test(text)
+    && !/\b(order(?:ed)?|eta|received|rcvd|got|short|except|return|wrong|exchange)\b/i.test(text)
+}
+
+function extractRoNumber(text = '', ros = []) {
+  const matches = [...String(text || '').matchAll(/(?:ro#?|#)?(\d{4,6})/gi)]
+  for (const match of matches) {
+    const roNumber = match[1]
+    if (ros.some(ro => String(ro.roNumber ?? '') === String(roNumber))) return roNumber
+  }
+  return null
+}
+
+function normalizeNoReplacementPartsActions(actions = [], inputText = '', ros = []) {
+  if (!textMeansNoReplacementParts(inputText)) return actions
+  const roNumber = extractRoNumber(inputText, ros)
+  if (!roNumber) return actions
+  const filtered = actions
+    .map(action => ({ ...action, type: action.type ?? action.action }))
+    .filter(action => {
+      if (String(action.roNumber ?? '') !== String(roNumber)) return true
+      return !['update_parts_order', 'log_parts_received', 'update_parts_status', 'add_note'].includes(action.type)
+    })
+  return [
+    ...filtered,
+    { type: 'update_parts_status', roNumber, partsStatus: 'all_received', noReplacementPartsNeeded: true, confidence: 'high' },
+    { type: 'add_note', roNumber, note: 'No replacement parts needed for this repair.', confidence: 'high' },
+  ]
+}
+
+function findEmployeeForTemplate(employees, tmpl) {
+  if (tmpl.assignedToUid) return employees.find(emp => emp.uid === tmpl.assignedToUid) ?? null
+  if (tmpl.assignedToRole) return employees.find(emp => emp.role === tmpl.assignedToRole) ?? null
+  return null
+}
+
+async function hasOpenTaskForTemplate(roId, tmpl) {
+  const snap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roId), where('phase', '==', tmpl.phase)))
+  return snap.docs.some(d => {
+    const data = d.data()
+    return data.status !== 'completed' && data.title === tmpl.title
+  })
+}
+
+async function addDownstreamTasks({ roDoc, status, employees, user, author }) {
+  const templates = getDownstreamTasks(status, roDoc)
+  await Promise.all(templates.map(async tmpl => {
+    if (await hasOpenTaskForTemplate(roDoc.id, tmpl)) return null
+    const assignee = findEmployeeForTemplate(employees, tmpl)
+    const task = {
+      roId: roDoc.id,
+      roNumber: roDoc.roNumber,
+      vehicleInfo: roDoc.vehicle,
+      assignedTo: assignee?.uid ?? '',
+      assignedBy: user?.uid ?? '',
+      assignedByName: author,
+      assignedToName: assignee?.name ?? '',
+      title: tmpl.title,
+      description: tmpl.noAssigneeNote || '',
+      phase: tmpl.phase,
+      category: tmpl.category ?? '',
+      taskKind: tmpl.taskKind ?? 'primary',
+      partsStatus: roDoc.partsStatus ?? '',
+      priority: dueDateToPriority(roDoc),
+      dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
+      status: 'pending',
+      source: 'gib',
+      autoTriggered: true,
+      createdAt: serverTimestamp(),
+    }
+    if (tmpl.setRoField && assignee?.uid) {
+      await updateRoDoc(doc(db, 'ros', roDoc.id), {
+        [tmpl.setRoField]: assignee.uid,
+        updatedAt: serverTimestamp(),
+      })
+    }
+    return createTaskDoc(collection(db, 'tasks'), task)
+  }))
+}
+
 const QUICK_PROMPTS = [
   { label: '🌅 Morning Briefing', text: 'Give me a morning briefing: which vehicles need attention today, any issues, and which are expected for delivery?' },
   { label: '🚗 Today\'s Deliveries', text: 'List vehicles expected for delivery today and tomorrow. Are there any outstanding tasks or missing parts?' },
@@ -108,6 +240,41 @@ function AssistantMark({ className = 'w-6 h-6' }) {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
+function actionPreviewText(action = {}) {
+  switch (action.type) {
+    case 'add_note':
+      return `Add note: "${action.note?.slice(0, 60)}${action.note?.length > 60 ? '...' : ''}"`
+    case 'assign_task':
+      return `Assign "${action.title}" -> ${action.assigneeName}`
+    case 'assign_body_man':
+      return `Set body tech -> ${action.assigneeName}`
+    case 'assign_painter':
+      return `Set painter -> ${action.assigneeName}`
+    case 'update_due_date':
+      return `Target date -> ${action.dueDate}`
+    case 'update_rental':
+      return `Rental -> ${action.hasRental ? 'yes' : 'no'}`
+    case 'update_status':
+      return `Status -> ${action.status}`
+    case 'update_dropoff_date':
+      return `Drop-off -> ${action.dropOffDate}`
+    case 'update_car_status':
+      return `Car status -> ${action.carStatus}`
+    case 'complete_phase':
+      return `Complete phase -> ${action.phase}`
+    case 'update_parts_status':
+      return action.noReplacementPartsNeeded ? 'No Repl Parts Needed' : `Parts status -> ${action.partsStatus}`
+    case 'update_parts_order':
+      return `Parts order -> ${action.vendor || action.vendorFull || 'vendor'}${action.eta ? ` ETA ${action.eta}` : ''}`
+    case 'log_parts_received':
+      return `Parts received -> ${action.vendor || action.vendorFull || 'vendor'} ${action.qtyReceived ?? action.receivedQty ?? ''}`.trim()
+    case 'log_parts_return':
+      return `Parts return -> ${action.vendor || action.vendorFull || 'vendor'}`
+    default:
+      return action.type ? `${action.type} -> ${JSON.stringify(action)}` : JSON.stringify(action)
+  }
+}
+
 export default function FloatingAssistant({ inline = false, onBack }) {
   const { user }  = useAuth()
   const toast     = useToast()
@@ -195,7 +362,9 @@ export default function FloatingAssistant({ inline = false, onBack }) {
       })
       const replyText = result.reply && result.reply !== '...' ? result.reply : '⚠️ No response text returned. Please try again.'
       setMessages(prev => [...prev, { role: 'assistant', content: replyText }])
-      if (result.actions?.length)     setPendingActions(result.actions)
+      if (result.actions?.length) {
+        setPendingActions(normalizeNoReplacementPartsActions(inferStructuredActionsFromText(result.actions, msg), msg, ros))
+      }
       if (result.smsText)             setSmsDraft(result.smsText)
       // Save any new memory facts the AI identified
       if (result.memoryFacts?.length) {
@@ -225,63 +394,113 @@ export default function FloatingAssistant({ inline = false, onBack }) {
     setApplying(true)
     const stamp  = format(new Date(), 'MM/dd HH:mm')
     const author = employees.find(e => e.uid === user?.uid)?.name ?? user?.email ?? 'Manager'
+    const now    = new Date().toISOString()
+    const localNotes = new Map()
+    const currentNotes = (roDoc) => localNotes.has(roDoc.id) ? localNotes.get(roDoc.id) : (roDoc.notes ?? '')
+    const prependNote = (roDoc, line) => {
+      const next = currentNotes(roDoc) ? `${line}\n${currentNotes(roDoc)}` : line
+      localNotes.set(roDoc.id, next)
+      return next
+    }
+    const logEntry = (type, value, label = undefined, source = 'gib') => ({
+      type, value, ...(label ? { label } : {}), by: author, at: now, source,
+    })
+    const updateRo = (roDoc, fields, changeLogEntry = null) => {
+      const updates = { ...fields, updatedAt: serverTimestamp() }
+      if (changeLogEntry) updates.changeLog = arrayUnion(changeLogEntry)
+      return updateRoDoc(doc(db, 'ros', roDoc.id), updates)
+    }
 
     try {
       for (const action of pendingActions) {
-        const roDoc = ros.find(r => r.roNumber === action.roNumber)
-        if (!roDoc) continue
+        const roDoc = ros.find(r => String(r.roNumber ?? '') === String(action.roNumber ?? ''))
+        if (!roDoc) {
+          if (action.type === 'assign_task') {
+            const assignee = findEmployeeByName(employees, action.assigneeName)
+            if (!assignee) throw new Error(`Could not match task assignee "${action.assigneeName}".`)
+            await createTaskDoc(collection(db, 'tasks'), {
+              assignedTo: assignee.uid,
+              assignedBy: user?.uid ?? '',
+              assignedByName: author,
+              assignedToName: assignee.name ?? '',
+              assignedAt: serverTimestamp(),
+              title: action.title || 'Task',
+              description: action.description ?? '',
+              category: 'standalone',
+              priority: action.priority || 'medium',
+              status: 'pending',
+              source: 'gib',
+              autoTriggered: false,
+              createdAt: serverTimestamp(),
+            })
+          }
+          continue
+        }
 
         if (action.type === 'add_note') {
           const line = `[${stamp} - ${author}] ${action.note}`
-          await updateDoc(doc(db, 'ros', roDoc.id), {
-            notes: `${line}\n${roDoc.notes ?? ''}`,
-            updatedAt: serverTimestamp(),
-          })
+          await updateRo(roDoc, { notes: prependNote(roDoc, line) })
+        } else if (action.type === 'update_status') {
+          await updateRo(
+            roDoc,
+            { status: action.status },
+            logEntry('update_status', action.status)
+          )
+          await addDownstreamTasks({ roDoc: { ...roDoc, status: action.status }, status: action.status, employees, user, author })
+        } else if (action.type === 'update_car_status') {
+          await updateRo(
+            roDoc,
+            { carStatus: action.carStatus },
+            logEntry('update_car_status', action.carStatus)
+          )
+        } else if (action.type === 'update_dropoff_date') {
+          const fields = { dropOffDate: action.dropOffDate }
+          if (!pendingActions.some(a => a.type === 'add_note' && String(a.roNumber ?? '') === String(action.roNumber ?? ''))) {
+            fields.notes = prependNote(roDoc, `[${stamp} - ${author}] Vehicle dropped off on ${action.dropOffDate}.`)
+          }
+          await updateRo(
+            roDoc,
+            fields,
+            logEntry('update_dropoff_date', action.dropOffDate)
+          )
         } else if (action.type === 'assign_body_man') {
           const assignee = findEmployeeByName(employees, action.assigneeName, 'body_man')
           if (assignee) {
-            await updateDoc(doc(db, 'ros', roDoc.id), {
-              assignedBodyMan: assignee.uid,
-              updatedAt: serverTimestamp(),
-            })
-            await addDoc(collection(db, 'tasks'), {
+            await updateRo(
+              roDoc,
+              { assignedBodyMan: assignee.uid },
+              logEntry('assign_body_man', assignee.uid, assignee.name)
+            )
+            await createTaskDoc(collection(db, 'tasks'), {
               roId: roDoc.id, roNumber: roDoc.roNumber,
               vehicleInfo: roDoc.vehicle,
               assignedTo: assignee.uid,
               assignedBy: user?.uid ?? '',
+              assignedByName: author,
               assignedToName: assignee.name ?? '',
               title: 'Teardown & process repair',
               description: '',
+              phase: 'teardown',
               category: 'body',
+              taskKind: 'primary',
               partsStatus: roDoc.partsStatus ?? '',
               priority: dueDateToPriority(roDoc),
               dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
               status: 'pending',
+              source: 'gib',
+              autoTriggered: true,
               createdAt: serverTimestamp(),
             })
           }
         } else if (action.type === 'assign_painter') {
           const assignee = findEmployeeByName(employees, action.assigneeName, 'painter')
           if (assignee) {
-            await updateDoc(doc(db, 'ros', roDoc.id), {
-              assignedPainter: assignee.uid,
-              updatedAt: serverTimestamp(),
-            })
-            await addDoc(collection(db, 'tasks'), {
-              roId: roDoc.id, roNumber: roDoc.roNumber,
-              vehicleInfo: roDoc.vehicle,
-              assignedTo: assignee.uid,
-              assignedBy: user?.uid ?? '',
-              assignedToName: assignee.name ?? '',
-              title: 'Paint preparation & paint job',
-              description: '',
-              category: 'paint',
-              partsStatus: roDoc.partsStatus ?? '',
-              priority: dueDateToPriority(roDoc),
-              dueDate: roDoc.eta || roDoc.cccDateOut || roDoc.promisedDate || null,
-              status: 'pending',
-              createdAt: serverTimestamp(),
-            })
+            await updateRo(
+              roDoc,
+              { assignedPainter: assignee.uid },
+              logEntry('assign_painter', assignee.uid, assignee.name)
+            )
+            await addDownstreamTasks({ roDoc: { ...roDoc, assignedPainter: assignee.uid }, status: 'paint_prep', employees, user, author })
           }
         } else if (action.type === 'assign_task') {
           const isBodyTask = isBodyTaskAction(action)
@@ -293,6 +512,7 @@ export default function FloatingAssistant({ inline = false, onBack }) {
             vehicleInfo: roDoc.vehicle,
             assignedTo: assignee.uid,
             assignedBy: user?.uid ?? '',
+            assignedByName: author,
             assignedToName: assignee.name ?? '',
             title: normalizedTaskTitle(action, isBodyTask),
             description: normalizedTaskDescription(action, isBodyTask),
@@ -301,19 +521,173 @@ export default function FloatingAssistant({ inline = false, onBack }) {
             priority: dueDateToPriority(roDoc),
             dueDate: roDueDate,
             status: 'pending',
+            source: 'gib',
+            autoTriggered: false,
             createdAt: serverTimestamp(),
           }
           if (isBodyTask) fields.assignedBodyMan = assignee.uid
-          await addDoc(collection(db, 'tasks'), fields)
+          await createTaskDoc(collection(db, 'tasks'), fields)
           // Also write assignedBodyMan to RO if it's a body task
           if (isBodyTask) {
-            await updateDoc(doc(db, 'ros', roDoc.id), {
+            await updateRoDoc(doc(db, 'ros', roDoc.id), {
               assignedBodyMan: assignee.uid,
               updatedAt: serverTimestamp(),
             })
           }
+        } else if (action.type === 'update_parts_status') {
+          const partsStatus = action.partsStatus || 'not_ordered'
+          if (action.noReplacementPartsNeeded) {
+            await updateRoDoc(doc(db, 'ros', roDoc.id), {
+              partsStatus: 'all_received',
+              partsOrders: [],
+              noReplacementPartsNeeded: true,
+              'partsSubtasks.verifiedAllReceived': true,
+              changeLog: arrayUnion(logEntry('update_parts_status', 'all_received', 'No replacement parts needed')),
+              updatedAt: serverTimestamp(),
+            })
+            continue
+          }
+          const currentOrders = Array.isArray(roDoc.partsOrders) ? roDoc.partsOrders : []
+          const nextOrders = currentOrders.map(order => {
+            const qty = numericQty(order.qty ?? order.quantity, 0)
+            if (partsStatus === 'all_received' && qty > 0) {
+              return { ...order, qtyReceived: qty, status: 'received', receivedAt: new Date().toISOString() }
+            }
+            const orderStatus = orderStatusFromPartsStatus(partsStatus)
+            return orderStatus ? { ...order, status: orderStatus } : order
+          })
+          await updateRoDoc(doc(db, 'ros', roDoc.id), {
+            partsStatus: nextOrders.length ? calculatePartsStatus(nextOrders, partsStatus) : partsStatus,
+            partsOrders: nextOrders,
+            updatedAt: serverTimestamp(),
+          })
+        } else if (action.type === 'update_parts_order') {
+          const currentOrders = Array.isArray(roDoc.partsOrders) ? roDoc.partsOrders : []
+          const vendor = (action.vendor || action.vendorFull || '').trim()
+          const qty = numericQty(action.qty ?? action.quantity, 1)
+          const nextOrder = {
+            vendor,
+            vendorFull: action.vendorFull || vendor,
+            description: action.description || 'Parts order',
+            qty,
+            qtyReceived: numericQty(action.qtyReceived ?? action.receivedQty, 0),
+            eta: action.eta || null,
+            status: action.status || 'ordered',
+            updatedAt: new Date().toISOString(),
+          }
+          let matched = false
+          const nextOrders = currentOrders.map(order => {
+            if (!orderMatchesVendor(order, action.vendor, action.vendorFull)) return order
+            matched = true
+            return { ...order, ...nextOrder, qty: nextOrder.qty || order.qty || order.quantity || 1 }
+          })
+          if (!matched) nextOrders.push(nextOrder)
+          await updateRoDoc(doc(db, 'ros', roDoc.id), {
+            partsOrders: nextOrders,
+            partsStatus: calculatePartsStatus(nextOrders, roDoc.partsStatus),
+            noReplacementPartsNeeded: false,
+            'partsSubtasks.verifiedAllReceived': false,
+            updatedAt: serverTimestamp(),
+          })
+        } else if (action.type === 'update_due_date') {
+          await updateRo(
+            roDoc,
+            { eta: action.dueDate },
+            logEntry('update_due_date', action.dueDate)
+          )
+        } else if (action.type === 'update_rental') {
+          await updateRo(
+            roDoc,
+            { hasRental: action.hasRental },
+            logEntry('update_rental', String(action.hasRental))
+          )
+        } else if (action.type === 'log_parts_received') {
+          const currentOrders = Array.isArray(roDoc.partsOrders) ? roDoc.partsOrders : []
+          const receivedVendor = (action.vendor || action.vendorFull || '').trim()
+          const receivedQty = numericQty(action.qtyReceived ?? action.receivedQty, 1)
+          let matched = false
+          const nextOrders = currentOrders.map(order => {
+            if (!orderMatchesVendor(order, action.vendor, action.vendorFull)) return order
+            matched = true
+            const total = numericQty(action.totalQty ?? order.qty ?? order.quantity, numericQty(order.qty ?? order.quantity, receivedQty))
+            const currentReceived = numericQty(order.qtyReceived ?? order.receivedQty, 0)
+            const nextReceived = action.receiveMode === 'set'
+              ? Math.min(receivedQty, total || receivedQty)
+              : Math.min(currentReceived + receivedQty, total || currentReceived + receivedQty)
+            return {
+              ...order,
+              qty: total || order.qty || order.quantity || receivedQty,
+              qtyReceived: nextReceived,
+              status: total && nextReceived >= total ? 'received' : 'partial',
+              eta: action.eta || order.eta || null,
+              receivedAt: total && nextReceived >= total ? new Date().toISOString() : order.receivedAt ?? null,
+            }
+          })
+          if (!matched) {
+            nextOrders.push({
+              vendor: receivedVendor,
+              vendorFull: action.vendorFull || receivedVendor,
+              description: action.description || 'Parts received',
+              qty: numericQty(action.totalQty, receivedQty),
+              qtyReceived: receivedQty,
+              status: 'partial',
+              eta: action.eta || null,
+              receivedAt: new Date().toISOString(),
+            })
+          }
+          await updateRoDoc(doc(db, 'ros', roDoc.id), {
+            partsOrders: nextOrders,
+            partsStatus: calculatePartsStatus(nextOrders, roDoc.partsStatus),
+            noReplacementPartsNeeded: false,
+            updatedAt: serverTimestamp(),
+          })
+        } else if (action.type === 'log_parts_return') {
+          const currentReturns = Array.isArray(roDoc.partsReturns) ? roDoc.partsReturns : []
+          const ret = {
+            vendor: action.vendor || action.vendorFull || '',
+            vendorFull: action.vendorFull || action.vendor || '',
+            qty: numericQty(action.qty ?? action.quantity, 1),
+            reason: action.reason || 'return',
+            needsReplacement: Boolean(action.needsReplacement),
+            status: action.status || 'pending',
+            notes: action.notes || action.note || '',
+            createdAt: new Date().toISOString(),
+          }
+          const updates = {
+            partsReturns: [...currentReturns, ret],
+            updatedAt: serverTimestamp(),
+          }
+          if (ret.needsReplacement) {
+            updates.noReplacementPartsNeeded = false
+            updates['partsSubtasks.verifiedAllReceived'] = false
+          }
+          await updateRoDoc(doc(db, 'ros', roDoc.id), updates)
+        } else if (action.type === 'complete_phase') {
+          const suggestion = getSuggestedNextStatus(action.phase, roDoc)
+          const fields = {}
+          if (suggestion) {
+            fields.status = suggestion.nextStatus
+            fields.notes = prependNote(roDoc, `[${stamp} - ${author}] ${suggestion.noteText}`)
+          }
+          await updateRo(
+            roDoc,
+            fields,
+            logEntry('complete_phase', action.phase, `${action.phase} phase complete`)
+          )
+          if (suggestion) {
+            await addDownstreamTasks({ roDoc: { ...roDoc, status: suggestion.nextStatus }, status: suggestion.nextStatus, employees, user, author })
+          }
+          const phaseSnap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', roDoc.id), where('phase', '==', action.phase)))
+          await Promise.all(phaseSnap.docs
+            .filter(d => d.data().status !== 'completed')
+            .map(d => updateTaskDoc(doc(db, 'tasks', d.id), {
+              status: 'completed',
+              completedAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            })))
         }
       }
+      await loadData()
       toast.success(`Applied ${pendingActions.length} action${pendingActions.length > 1 ? 's' : ''}`)
       setPendingActions([])
       setMessages(prev => [...prev, { role: 'assistant', content: '✅ Actions applied!' }])
@@ -651,10 +1025,8 @@ export default function FloatingAssistant({ inline = false, onBack }) {
                 {pendingActions.map((a, i) => (
                   <div key={i} className="text-xs text-green-800 dark:text-green-300 bg-white/60 dark:bg-green-900/30 rounded-lg px-2.5 py-1.5">
                     <span className="font-mono font-semibold">RO#{a.roNumber}</span>
-                    {' · '}
-                    {a.type === 'add_note'       && `Add note: "${a.note?.slice(0, 60)}${a.note?.length > 60 ? '…' : ''}"`}
-                    {a.type === 'assign_task'    && `Assign "${a.title}" → ${a.assigneeName}`}
-                    {a.type === 'assign_body_man' && `Set body tech → ${a.assigneeName}`}
+                    {' - '}
+                    {actionPreviewText(a)}
                   </div>
                 ))}
                 <div className="flex gap-2 pt-1">

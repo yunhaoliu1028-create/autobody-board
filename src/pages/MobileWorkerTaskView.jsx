@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  addDoc,
   arrayUnion,
   collection,
   doc,
+  getDoc,
   onSnapshot,
   serverTimestamp,
-  updateDoc,
 } from 'firebase/firestore'
 import { getDownloadURL, ref as storageRef, uploadBytesResumable } from 'firebase/storage'
 import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
@@ -15,6 +14,12 @@ import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../components/Toast'
 import { MANAGER_ROLES, PARTS_STATUSES, ROLES, STATUS_MAP } from '../constants/roles'
 import { transcribeWithWhisper } from '../hooks/useAI'
+import MobileROSheet from '../components/MobileROSheet'
+import { partsLabel, statusLabel, t } from '../utils/mobileI18n'
+import { compressImageFile, compressVideoFrame } from '../utils/imageCompression'
+import { playShutterSound } from '../utils/cameraFeedback'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, setNewTaskDoc, updateTaskDoc } from '../utils/taskMutations'
 
 function IconMic() {
   return (
@@ -99,7 +104,16 @@ function CameraModal({ onDone, onClose }) {
   }, [])
 
   useEffect(() => {
-    navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+    const constraints = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 2560 },
+        height: { ideal: 1440 },
+      },
+      audio: false,
+    }
+    navigator.mediaDevices?.getUserMedia(constraints)
+      .catch(() => navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' }, audio: false }))
       .then(stream => {
         streamRef.current = stream
         if (videoRef.current) videoRef.current.srcObject = stream
@@ -111,29 +125,13 @@ function CameraModal({ onDone, onClose }) {
 
   const stopCamera = () => streamRef.current?.getTracks().forEach(track => track.stop())
 
-  const snap = () => {
+  const snap = async () => {
     const video = videoRef.current
     if (!video || !ready) return
-    const max = 1280
-    let width = video.videoWidth
-    let heightPx = video.videoHeight
-    if (width > max || heightPx > max) {
-      if (width > heightPx) {
-        heightPx = Math.round(heightPx * max / width)
-        width = max
-      } else {
-        width = Math.round(width * max / heightPx)
-        heightPx = max
-      }
-    }
-    const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = heightPx
-    canvas.getContext('2d').drawImage(video, 0, 0, width, heightPx)
-    canvas.toBlob(blob => {
-      if (!blob) return
-      setShots(prev => [...prev, { blob, preview: URL.createObjectURL(blob), name: `camera_${Date.now()}.jpg` }])
-    }, 'image/jpeg', 0.68)
+    const blob = await compressVideoFrame(video)
+    if (!blob) return
+    playShutterSound()
+    setShots(prev => [...prev, { blob, preview: URL.createObjectURL(blob), name: `camera_${Date.now()}.jpg` }])
   }
 
   const removeShot = (index) => setShots(prev => {
@@ -267,6 +265,41 @@ function assignedToWorker(ro, uid, role) {
   return ro.assignedBodyMan === uid || ro.assignedPainter === uid
 }
 
+const BODY_MAIN_PHASES = ['teardown', 'body', 'reassembly']
+const BODY_TASK_BY_STATUS = {
+  teardown:   { title: 'Teardown',   phase: 'teardown' },
+  body_work:  { title: 'Repair',     phase: 'body' },
+  reassembly: { title: 'Reassembly', phase: 'reassembly' },
+}
+
+function bodyMainTasksComplete(tasks) {
+  const completed = new Set()
+  for (const task of tasks) {
+    if (task.status !== 'completed') continue
+    const phase = inferredTaskPhase(task)
+    if (BODY_MAIN_PHASES.includes(phase)) completed.add(phase)
+  }
+  return BODY_MAIN_PHASES.every(phase => completed.has(phase))
+}
+
+function isBodyWorkerRo(ro, uid, role) {
+  return role === ROLES.BODY_MAN && ro?.assignedBodyMan === uid
+}
+
+function bodyTaskForStatus(status) {
+  return BODY_TASK_BY_STATUS[status] || null
+}
+
+function hasBodyMainTaskForStatus(ro, tasks) {
+  const tmpl = bodyTaskForStatus(ro?.status)
+  if (!ro || !tmpl) return true
+  return tasks.some(task => {
+    const sameRo = task.roId === ro.id || String(task.roNumber || '') === String(ro.roNumber || '')
+    if (!sameRo || task.assignedTo !== ro.assignedBodyMan || task.taskKind === 'secondary') return false
+    return inferredTaskPhase(task) === tmpl.phase
+  })
+}
+
 function vehicleLine(ro) {
   return ro.vehicle || ro.vehicleInfo || 'Vehicle missing'
 }
@@ -283,7 +316,7 @@ function vehicleMetaLine(ro) {
   return [ro.vehicleColor, shortInsurance(ro.insuranceCompany)].filter(Boolean).join(' · ') || ro.customerName || ''
 }
 
-function partsProgress(ro) {
+function partsProgress(ro, language) {
   const orders = Array.isArray(ro.partsOrders) ? ro.partsOrders : []
   let total = 0
   let received = 0
@@ -294,8 +327,8 @@ function partsProgress(ro) {
     if (Number.isFinite(rcvd)) received += rcvd
   }
   if (total > 0) return `${received}/${total} received`
-  if (ro.partsStatus) return PARTS_LABEL[ro.partsStatus] ?? ro.partsStatus
-  return 'not ordered'
+  if (ro.partsStatus) return partsLabel(language, ro.partsStatus, PARTS_LABEL[ro.partsStatus] ?? ro.partsStatus)
+  return t(language, 'partsNotOrdered', 'not ordered')
 }
 
 function taskText(task) {
@@ -371,9 +404,11 @@ function compactTaskHint(task) {
   if (isPrimaryBodyTask(task)) return ''
   const coreTitle = compactTaskTitle(task)
   const subTasks = Array.isArray(task.subTasks) ? task.subTasks : []
+  const taskNotes = Array.isArray(task.taskNotes) ? task.taskNotes : []
+  const latestNote = taskNotes[taskNotes.length - 1]?.text || ''
   const subTitle = subTasks.find(sub => sub?.status !== 'completed')?.title || subTasks[0]?.title || ''
   const originalTitle = task.title && task.title !== coreTitle ? task.title : ''
-  const parts = [subTitle, originalTitle, task.description]
+  const parts = [latestNote, subTitle, originalTitle, task.description]
     .filter(Boolean)
     .filter((value, index, arr) => arr.findIndex(v => v.toLowerCase() === value.toLowerCase()) === index)
   const text = parts.join(' - ')
@@ -387,10 +422,10 @@ function nextTaskStatus(status) {
   return 'completed'
 }
 
-function taskButtonLabel(status) {
-  if (status === 'in_progress') return 'Working'
-  if (status === 'completed') return 'Complete'
-  return 'Start'
+function taskButtonLabel(status, language) {
+  if (status === 'in_progress') return t(language, 'working', 'Working')
+  if (status === 'completed') return t(language, 'completeState', 'Complete')
+  return t(language, 'start', 'Start')
 }
 
 function taskGlyph(status) {
@@ -499,7 +534,7 @@ function StatCard({ number, label }) {
   )
 }
 
-function TaskRow({ task, onCycle }) {
+function TaskRow({ task, onCycle, language }) {
   const hint = compactTaskHint(task)
   const completed = task.status === 'completed'
   return (
@@ -525,7 +560,7 @@ function TaskRow({ task, onCycle }) {
           completed ? 'dark:bg-transparent' : ''
         }`}
       >
-        {taskButtonLabel(task.status)}
+        {taskButtonLabel(task.status, language)}
       </button>
     </div>
   )
@@ -540,19 +575,21 @@ function ExceptionChip({ active, children }) {
   )
 }
 
-function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, showCompleted = false }) {
+function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, showCompleted = false, language = 'english' }) {
+  const [showDoneTasks, setShowDoneTasks] = useState(false)
   const eta = etaOf(ro)
   const status = STATUS_MAP[ro.status]
   const sortedTasks = dedupeTasks(tasks)
-  const visibleTasks = showCompleted ? sortedTasks.filter(t => t.status === 'completed') : sortedTasks.filter(t => t.status !== 'completed')
+  const activeTasks = sortedTasks.filter(t => t.status !== 'completed')
+  const completedTasks = sortedTasks.filter(t => t.status === 'completed')
+  const visibleTasks = showCompleted ? [] : activeTasks
   const doneCount = sortedTasks.filter(t => t.status === 'completed').length
   const flags = ro.workerFlags || {}
   const meta = vehicleMetaLine(ro)
 
   return (
     <article
-      onClick={() => onSelect(ro.id)}
-      className={`rounded-[1.35rem] border bg-white/82 p-3.5 shadow-lg shadow-zinc-200/70 backdrop-blur-xl transition active:scale-[0.995] dark:bg-zinc-950/80 dark:shadow-black/20 ${
+      className={`rounded-[1.35rem] border bg-white/82 p-3.5 shadow-lg shadow-zinc-200/70 backdrop-blur-xl transition dark:bg-zinc-950/80 dark:shadow-black/20 ${
         selected
           ? 'border-blue-500/80 ring-1 ring-blue-400/25 dark:border-blue-400/55 dark:ring-blue-400/10'
           : flags.needsParts || flags.suppDamage
@@ -562,14 +599,21 @@ function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, show
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="font-mono text-[16px] font-semibold tracking-tight text-blue-300">#{ro.roNumber}</p>
+          <button
+            type="button"
+            onClick={() => onSelect(ro.id)}
+            className="font-mono text-[16px] font-semibold tracking-tight text-blue-300 transition hover:text-blue-200 active:scale-[0.98]"
+            aria-label={`Open RO ${ro.roNumber} summary`}
+          >
+            #{ro.roNumber}
+          </button>
           <h3 className="mt-1 max-w-[16rem] text-[16px] font-semibold leading-[1.08] tracking-tight text-zinc-950 dark:text-zinc-50">
             {vehicleLine(ro)}
           </h3>
           {meta && <p className="mt-1 truncate text-[12px] text-zinc-500 dark:text-zinc-500">{meta}</p>}
           {ro.vin && <p className="mt-0.5 truncate font-mono text-[12px] tracking-[0.02em] text-zinc-500 dark:text-zinc-400">{ro.vin}</p>}
           <p className="mt-2 inline-flex rounded-full bg-zinc-100 px-2.5 py-1 text-[12px] font-medium text-zinc-800 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-200 dark:ring-zinc-800">
-            <span className="mr-1 text-zinc-500">Parts</span>{partsProgress(ro)}
+            <span className="mr-1 text-zinc-500">{t(language, 'parts', 'Parts')}</span>{partsProgress(ro, language)}
           </p>
           {recentUpdate && (
             <p className="mt-2 line-clamp-2 rounded-2xl bg-blue-50 px-2.5 py-2 text-[12px] leading-snug text-blue-900 ring-1 ring-blue-100 dark:bg-blue-500/10 dark:text-blue-100 dark:ring-blue-400/20">
@@ -580,12 +624,12 @@ function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, show
         <div className="flex shrink-0 flex-col items-end gap-1.5">
           {status && (
             <span className={`rounded-lg px-2 py-1 text-[11px] font-semibold ${phaseTone(ro.status)}`}>
-              {status.label}
+              {statusLabel(language, ro.status, status.label)}
             </span>
           )}
           {eta && (
             <span className={`rounded-lg px-2 py-1 text-[11px] font-semibold ${dueTone(eta)}`}>
-              Due {fmtDate(eta)}
+              {t(language, 'due', 'Due')} {fmtDate(eta)}
             </span>
           )}
         </div>
@@ -595,20 +639,36 @@ function ROCard({ ro, tasks, selected, onSelect, onCycleTask, recentUpdate, show
       <div className="mt-4 rounded-2xl bg-zinc-50/90 p-2 ring-1 ring-zinc-200 dark:bg-zinc-950/45 dark:ring-white/10">
         <div className="mb-2 flex items-center justify-between px-1">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-            {showCompleted ? 'Completed' : sortedTasks.length > 1 ? `${sortedTasks.length} tasks` : 'Task'}
+            {showCompleted ? t(language, 'completed', 'Completed') : sortedTasks.length > 1 ? `${sortedTasks.length} ${t(language, 'tasks', 'tasks')}` : t(language, 'task', 'Task')}
           </p>
           {sortedTasks.length > 0 && (
-            <p className="text-[11px] font-medium text-zinc-500">{doneCount}/{sortedTasks.length} done</p>
+            <p className="text-[11px] font-medium text-zinc-500">{doneCount}/{sortedTasks.length} {t(language, 'done', 'done')}</p>
           )}
         </div>
         <div className="space-y-1.5">
-          {visibleTasks.length > 0 ? (
+          {visibleTasks.length > 0 && (
             visibleTasks.map(task => (
-              <TaskRow key={task.id} task={task} onCycle={onCycleTask} />
+              <TaskRow key={task.id} task={task} onCycle={onCycleTask} language={language} />
             ))
-          ) : (
+          )}
+          {completedTasks.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowDoneTasks(prev => !prev)}
+              className="flex w-full items-center justify-between rounded-xl bg-emerald-50/45 px-2.5 py-2 text-left text-[12px] font-semibold text-emerald-700 ring-1 ring-emerald-200/60 transition active:scale-[0.99] dark:bg-white/[0.025] dark:text-emerald-200 dark:ring-white/10"
+            >
+              <span>{t(language, 'completed', 'Completed')} {doneCount}/{sortedTasks.length}</span>
+              <span className="text-[11px] text-emerald-500 dark:text-emerald-300">{showDoneTasks ? 'Hide' : 'Show'}</span>
+            </button>
+          )}
+          {completedTasks.length > 0 && showDoneTasks && (
+            completedTasks.map(task => (
+              <TaskRow key={task.id} task={task} onCycle={onCycleTask} language={language} />
+            ))
+          )}
+          {activeTasks.length === 0 && completedTasks.length === 0 && (
             <div className="rounded-xl px-2.5 py-3 text-[12px] text-zinc-500">
-              {showCompleted ? 'No completed task yet' : 'No active task assigned'}
+              {showCompleted ? t(language, 'noCompletedTask', 'No completed task yet') : t(language, 'noActiveTask', 'No active task assigned')}
             </div>
           )}
         </div>
@@ -728,6 +788,7 @@ function MiniGib({ text, selectedRo, onExpand, onPhoto, photos, transcribing, up
 
 function WorkerGibComposer({ open, text, setText, onSubmit, onClose, onListen, onPhoto, onClearPhoto, onCancelPending, pending, photos, listening, transcribing, uploading, busy }) {
   const inputRef = useRef(null)
+  const [previewPhoto, setPreviewPhoto] = useState(null)
   const canSubmit = Boolean(text.trim() || photos.length)
   useEffect(() => {
     if (!open) return undefined
@@ -735,6 +796,7 @@ function WorkerGibComposer({ open, text, setText, onSubmit, onClose, onListen, o
     return () => clearTimeout(timer)
   }, [open])
   if (!open) return null
+  const closePreview = () => setPreviewPhoto(null)
   return (
     <div className="fixed inset-0 z-[75] flex items-end justify-center bg-zinc-950/20 px-3 pb-3 backdrop-blur-sm dark:bg-black/45">
       <form
@@ -789,7 +851,14 @@ function WorkerGibComposer({ open, text, setText, onSubmit, onClose, onListen, o
         <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {photos.map((photo, index) => (
             <div key={`${photo.name}-${index}`} className="relative h-14 w-14 shrink-0 overflow-hidden rounded-2xl ring-1 ring-white/15">
-              <img src={photo.preview} alt={photo.name} className="h-full w-full object-cover" />
+              <button
+                type="button"
+                onClick={() => setPreviewPhoto(photo)}
+                className="block h-full w-full"
+                aria-label={`Preview ${photo.name || 'photo'}`}
+              >
+                <img src={photo.preview} alt={photo.name} className="h-full w-full object-cover" />
+              </button>
               <button
                 type="button"
                 onClick={() => onClearPhoto(index)}
@@ -809,6 +878,28 @@ function WorkerGibComposer({ open, text, setText, onSubmit, onClose, onListen, o
           >
             +
           </button>
+        </div>
+      )}
+      {previewPhoto && (
+        <div
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/85 p-3"
+          onClick={closePreview}
+        >
+          <div className="relative max-h-full max-w-full" onClick={event => event.stopPropagation()}>
+            <img
+              src={previewPhoto.preview}
+              alt={previewPhoto.name || 'Selected photo'}
+              className="max-h-[86vh] max-w-full rounded-2xl object-contain shadow-2xl"
+            />
+            <button
+              type="button"
+              onClick={closePreview}
+              className="absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full bg-black/70 text-lg font-semibold text-white ring-1 ring-white/20"
+              aria-label="Close photo preview"
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
       <div className="flex items-end gap-2">
@@ -867,18 +958,21 @@ function WorkerGibComposer({ open, text, setText, onSubmit, onClose, onListen, o
 }
 
 export default function MobileWorkerTaskView() {
-  const { user, role, displayName } = useAuth()
+  const { user, role, displayName, userProfile } = useAuth()
+  const language = userProfile?.language || 'english'
   const toast = useToast()
   const fileInputRef = useRef(null)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const photosRef = useRef([])
+  const autoCreatedBodyTaskKeysRef = useRef(new Set())
 
   const [ros, setRos] = useState([])
   const [tasks, setTasks] = useState([])
   const [employees, setEmployees] = useState([])
   const [selectedRoId, setSelectedRoId] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [sheetRoId, setSheetRoId] = useState(null)
   const [filter, setFilter] = useState('today')
   const [quickText, setQuickText] = useState('')
   const [photos, setPhotos] = useState([])
@@ -939,6 +1033,49 @@ export default function MobileWorkerTaskView() {
     return found?.name || displayName || user.email || 'Worker'
   }, [displayName, employees, user.email, user.uid])
 
+  useEffect(() => {
+    if (loading || role !== ROLES.BODY_MAN || !user.uid) return
+
+    const createMissingBodyTasks = async () => {
+      for (const ro of ros) {
+        const tmpl = bodyTaskForStatus(ro.status)
+        if (!tmpl || ro.status === 'delivered' || ro.assignedBodyMan !== user.uid) continue
+        if (hasBodyMainTaskForStatus(ro, tasks)) continue
+
+        const taskId = `auto_body_${ro.id}_${tmpl.phase}`
+        if (autoCreatedBodyTaskKeysRef.current.has(taskId)) continue
+        autoCreatedBodyTaskKeysRef.current.add(taskId)
+        const taskRef = doc(db, 'tasks', taskId)
+        const existing = await getDoc(taskRef)
+        if (existing.exists()) continue
+
+        await setNewTaskDoc(taskRef, {
+          roId:          ro.id,
+          roNumber:      ro.roNumber,
+          vehicleInfo:   vehicleLine(ro),
+          assignedTo:    user.uid,
+          assignedToName: authorName,
+          assignedBy:    user.uid,
+          assignedByName: authorName,
+          assignedAt:    serverTimestamp(),
+          title:         tmpl.title,
+          phase:         tmpl.phase,
+          category:      'body',
+          taskKind:      'primary',
+          autoTriggered: true,
+          source:        'status_backfill',
+          status:        'pending',
+          createdAt:     serverTimestamp(),
+          updatedAt:     serverTimestamp(),
+        }, { merge: true })
+      }
+    }
+
+    createMissingBodyTasks().catch(err => {
+      toast.warn('Could not sync body tasks: ' + err.message)
+    })
+  }, [authorName, loading, role, ros, tasks, toast, user.uid])
+
   const assignedTasks = useMemo(() => {
     return tasks.filter(task => task.assignedTo === user.uid)
   }, [tasks, user.uid])
@@ -983,6 +1120,7 @@ export default function MobileWorkerTaskView() {
     if (filter === 'done') {
       return workerRos.filter(ro => {
         const roTasks = visibleTasksByRo.get(ro.id) || []
+        if (isBodyWorkerRo(ro, user.uid, role)) return bodyMainTasksComplete(roTasks)
         return roTasks.length > 0 && roTasks.every(task => task.status === 'completed')
       })
     }
@@ -1002,11 +1140,14 @@ export default function MobileWorkerTaskView() {
     }
     return workerRos.filter(ro => {
       const roTasks = visibleTasksByRo.get(ro.id) || []
-      return roTasks.length === 0 || roTasks.some(task => task.status !== 'completed')
+      if (isBodyWorkerRo(ro, user.uid, role)) return !bodyMainTasksComplete(roTasks)
+      return roTasks.length === 0
+        || roTasks.some(task => task.status !== 'completed')
     })
-  }, [filter, visibleTasksByRo, workerRos])
+  }, [filter, role, user.uid, visibleTasksByRo, workerRos])
 
   const selectedRo = useMemo(() => workerRos.find(ro => ro.id === selectedRoId) || workerRos[0] || null, [selectedRoId, workerRos])
+  const sheetRo = useMemo(() => workerRos.find(ro => ro.id === sheetRoId) || null, [sheetRoId, workerRos])
 
   useEffect(() => {
     if (!selectedRoId && workerRos[0]?.id) setSelectedRoId(workerRos[0].id)
@@ -1032,7 +1173,7 @@ export default function MobileWorkerTaskView() {
 
   const updateRoNote = async (ro, line) => {
     const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       notes: prevNotes ? `${line}\n${prevNotes}` : line,
       updatedAt: serverTimestamp(),
     })
@@ -1042,7 +1183,7 @@ export default function MobileWorkerTaskView() {
     if (task.status === 'completed') return
     const next = nextTaskStatus(task.status)
     try {
-      await updateDoc(doc(db, 'tasks', task.id), {
+      await updateTaskDoc(doc(db, 'tasks', task.id), {
         status: next,
         startedAt: next === 'in_progress' ? serverTimestamp() : task.startedAt || null,
         completedAt: next === 'completed' ? serverTimestamp() : null,
@@ -1066,7 +1207,7 @@ export default function MobileWorkerTaskView() {
   const handleSelectRo = (roId) => {
     setSelectedRoId(roId)
     setPendingCommand(null)
-    setDrawerOpen(true)
+    setSheetRoId(roId)
   }
 
   const createFlagTask = async (ro, flag) => {
@@ -1075,7 +1216,7 @@ export default function MobileWorkerTaskView() {
       ? (ro.assignedPartsManager || roleFallbackAssignee(employees, [ROLES.PARTS_MANAGER, ...MANAGER_ROLES]))
       : (ro.assignedEstimator || roleFallbackAssignee(employees, [ROLES.ESTIMATOR, ...MANAGER_ROLES]))
 
-    await addDoc(collection(db, 'tasks'), {
+    await createTaskDoc(collection(db, 'tasks'), {
       roId: ro.id,
       roNumber: ro.roNumber,
       vehicleInfo: vehicleLine(ro),
@@ -1103,7 +1244,7 @@ export default function MobileWorkerTaskView() {
       : makeNote(authorName, needsParts ? 'Needs parts flag cleared.' : 'Supplement damage flag cleared.')
 
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         [`workerFlags.${flag}`]: next,
         [`workerFlags.${flag}By`]: next ? user.uid : null,
         [`workerFlags.${flag}ByName`]: next ? authorName : null,
@@ -1129,7 +1270,7 @@ export default function MobileWorkerTaskView() {
 
   const updateTaskStatusFromWorker = async (task, next, ro, commandText, options = {}) => {
     if (!task || task.status === next) return ''
-    await updateDoc(doc(db, 'tasks', task.id), {
+    await updateTaskDoc(doc(db, 'tasks', task.id), {
       status: next,
       startedAt: next === 'in_progress' ? serverTimestamp() : task.startedAt || null,
       completedAt: next === 'completed' ? serverTimestamp() : null,
@@ -1143,40 +1284,23 @@ export default function MobileWorkerTaskView() {
     return label
   }
 
-  const compressPhoto = (file) => new Promise(resolve => {
-    if (!file?.type?.startsWith('image/')) return resolve(null)
-    const img = new Image()
-    const objUrl = URL.createObjectURL(file)
-    img.onload = () => {
-      URL.revokeObjectURL(objUrl)
-      const max = 1280
-      let { width, height } = img
-      if (width > max || height > max) {
-        if (width > height) {
-          height = Math.round(height * max / width)
-          width = max
-        } else {
-          width = Math.round(width * max / height)
-          height = max
-        }
-      }
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      canvas.getContext('2d').drawImage(img, 0, 0, width, height)
-      canvas.toBlob(blob => resolve(blob ? { blob, name: file.name, preview: URL.createObjectURL(blob) } : null), 'image/jpeg', 0.68)
-    }
-    img.onerror = () => {
-      URL.revokeObjectURL(objUrl)
-      resolve({ blob: file, name: file.name, preview: URL.createObjectURL(file) })
-    }
-    img.src = objUrl
-  })
+  const compressPhoto = async (file) => {
+    const blob = await compressImageFile(file)
+    return blob ? { blob, name: file.name, preview: URL.createObjectURL(blob) } : null
+  }
 
   const uploadOnePhoto = (sRef, blob) => new Promise((resolve, reject) => {
     const task = uploadBytesResumable(sRef, blob, { contentType: 'image/jpeg' })
     task.on('state_changed', null, reject, () => resolve(task.snapshot))
   })
+
+  const resolvePhotoLabel = (text, idx) => {
+    const padded = String(idx + 1).padStart(2, '0')
+    const isDefault = !text.trim() || /\b(ip|in\s*progress)\b/i.test(text.trim())
+    if (isDefault) return `Rpr photo_${padded}`
+    const clean = text.trim().slice(0, 30).replace(/[^\w\s-]/g, '').trim()
+    return photos.length > 1 ? `${clean}_${padded}` : clean
+  }
 
   const uploadQueuedPhotos = async (ro, noteText, options = {}) => {
     if (!photos.length) return { count: 0, note: '' }
@@ -1186,26 +1310,27 @@ export default function MobileWorkerTaskView() {
     const attachments = []
     for (let idx = 0; idx < photos.length; idx += 1) {
       const photo = photos[idx]
-      const padded = String(idx + 1).padStart(2, '0')
-      const path = `ros/${ro.id}/attachments/${ts}_worker_progress_${padded}.jpg`
+      const label = resolvePhotoLabel(noteText, idx)
+      const slug = label.replace(/\s+/g, '_').toLowerCase()
+      const path = `ros/${ro.id}/attachments/${ts}_${slug}.jpg`
       const ref = storageRef(storage, path)
       await uploadOnePhoto(ref, photo.blob)
       const url = await getDownloadURL(ref)
       attachments.push({
         url,
-        name: `worker_progress_${padded}.jpg`,
-        label: 'Worker progress',
+        name: `${slug}.jpg`,
+        label,
         type: 'image',
         uploadedAt: now,
         uploadedBy: user.uid,
         uploadedByName: authorName,
       })
     }
-    await updateDoc(doc(db, 'ros', ro.id), {
+    await updateRoDoc(doc(db, 'ros', ro.id), {
       attachments: arrayUnion(...attachments),
       updatedAt: serverTimestamp(),
     })
-    const note = `uploaded ${photos.length} worker progress photo${photos.length === 1 ? '' : 's'}${noteText ? `: ${noteText}` : ''}.`
+    const note = `uploaded ${photos.length} photo${photos.length === 1 ? '' : 's'}: ${attachments.map(a => a.label).join(', ')}.`
     if (!options.skipNote) await updateRoNote(ro, makeNote(authorName, note))
     photos.forEach(photo => URL.revokeObjectURL(photo.preview))
     setPhotos([])
@@ -1265,7 +1390,7 @@ export default function MobileWorkerTaskView() {
       }
 
       if (command.wantsNeedsParts && !ro.workerFlags?.needsParts) {
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           'workerFlags.needsParts': true,
           'workerFlags.needsPartsAt': new Date().toISOString(),
           'workerFlags.needsPartsBy': user.uid,
@@ -1277,7 +1402,7 @@ export default function MobileWorkerTaskView() {
         actions.push('needs parts')
       }
       if (command.wantsSuppDamage && !ro.workerFlags?.suppDamage) {
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           'workerFlags.suppDamage': true,
           'workerFlags.suppDamageAt': new Date().toISOString(),
           'workerFlags.suppDamageBy': user.uid,
@@ -1302,7 +1427,7 @@ export default function MobileWorkerTaskView() {
       if (noteLines.length) {
         const prevNotes = typeof ro.notes === 'string' ? ro.notes : ''
         const newNotes = noteLines.map(line => makeNote(authorName, line)).join('\n')
-        await updateDoc(doc(db, 'ros', ro.id), {
+        await updateRoDoc(doc(db, 'ros', ro.id), {
           notes: prevNotes ? `${newNotes}\n${prevNotes}` : newNotes,
           updatedAt: serverTimestamp(),
         })
@@ -1386,7 +1511,7 @@ export default function MobileWorkerTaskView() {
   })
 
   if (loading) {
-    return <div className="flex min-h-[60vh] items-center justify-center text-zinc-500">Loading...</div>
+    return <div className="flex min-h-[60vh] items-center justify-center text-zinc-500">{t(language, 'loading', 'Loading...')}</div>
   }
 
   return (
@@ -1417,7 +1542,7 @@ export default function MobileWorkerTaskView() {
       <div className="mx-auto max-w-md md:max-w-2xl">
         <header className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-[24px] font-semibold tracking-[-0.01em] text-zinc-950 dark:text-white">My Work</h1>
+            <h1 className="text-[24px] font-semibold tracking-[-0.01em] text-zinc-950 dark:text-white">{t(language, 'myWork', 'My Work')}</h1>
             <p className="mt-1 text-[13px] text-zinc-500">
               {displayName || 'Worker'} · {format(new Date(), 'EEEE, MMM d')}
             </p>
@@ -1428,17 +1553,17 @@ export default function MobileWorkerTaskView() {
         </header>
 
         <section className="mt-5 grid grid-cols-3 gap-2">
-          <StatCard number={stats.cars} label="cars" />
-          <StatCard number={stats.tasks} label="tasks" />
-          <StatCard number={stats.blocked} label="needs manager" />
+          <StatCard number={stats.cars} label={t(language, 'cars', 'cars')} />
+          <StatCard number={stats.tasks} label={t(language, 'tasks', 'tasks')} />
+          <StatCard number={stats.blocked} label={t(language, 'needsManager', 'needs manager')} />
         </section>
 
         <section className="mt-4 flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {[
-            ['today', 'Active'],
-            ['soon', `Due soon ${stats.dueSoon}`],
-            ['waiting', 'Waiting on me'],
-            ['done', 'Done'],
+            ['today', t(language, 'active', 'Active')],
+            ['soon', `${t(language, 'dueSoon', 'Due soon')} ${stats.dueSoon}`],
+            ['waiting', t(language, 'waitingOnMe', 'Waiting on me')],
+            ['done', t(language, 'done', 'Done')],
           ].map(([key, label]) => (
             <button
               key={key}
@@ -1457,12 +1582,12 @@ export default function MobileWorkerTaskView() {
 
         <section className="mt-5">
           <div className="mb-3 flex items-baseline gap-2">
-            <h2 className="text-[17px] font-semibold tracking-tight text-zinc-950 dark:text-white">My ROs</h2>
-            <p className="text-[12px] text-zinc-500">assigned work only</p>
+            <h2 className="text-[17px] font-semibold tracking-tight text-zinc-950 dark:text-white">{t(language, 'myRos', 'My ROs')}</h2>
+            <p className="text-[12px] text-zinc-500">{t(language, 'assignedWorkOnly', 'assigned work only')}</p>
           </div>
           {filteredRos.length === 0 ? (
             <div className="rounded-3xl border border-zinc-200 bg-white/70 px-4 py-8 text-center text-sm text-zinc-500 shadow-sm shadow-zinc-200/60 dark:border-zinc-800 dark:bg-zinc-950/70 dark:shadow-black/20">
-              No ROs in this view.
+              {t(language, 'noRos', 'No ROs in this view.')}
             </div>
           ) : (
             <div className="space-y-3">
@@ -1476,6 +1601,7 @@ export default function MobileWorkerTaskView() {
                   onCycleTask={handleCycleTask}
                   recentUpdate={recentUpdates[ro.id]}
                   showCompleted={filter === 'done'}
+                  language={language}
                 />
               ))}
             </div>
@@ -1488,6 +1614,7 @@ export default function MobileWorkerTaskView() {
         onClose={() => setDrawerOpen(false)}
         onToggleFlag={handleToggleFlag}
       />
+      <MobileROSheet ro={sheetRo} language={language} onClose={() => setSheetRoId(null)} />
 
       <MiniGib
         text={quickText}

@@ -264,8 +264,8 @@ export async function askShopAssistant({ messages, ros, employees, callerName = 
   const maxTokens = 8192  // API max — at Opus pricing ~$0.61/call max, well under $1.50 budget
 
   // ── Strategy 3: Compress RO context ──────────────────────────────────────
-  // Only include active (non-delivered) ROs; truncate notes to 70 chars
-  const activeRos = ros.filter(r => r.status !== 'delivered')
+  // Only include active production ROs; truncate notes to 70 chars
+  const activeRos = ros.filter(r => !['delivered', 'total_loss'].includes(r.status))
   const roContext  = activeRos.map(r => {
     const lines = [
       `RO${r.roNumber}|${r.vehicle||'?'}|${r.customerName||''}|ins:${r.insurance||'?'}`,
@@ -318,7 +318,7 @@ Be concise. Lead with the most critical finding. Rules:
 {"type":"add_note","roNumber":"9448","note":"English text","confidence":"high"}
 {"type":"assign_task","roNumber":"9448","assigneeName":"David","title":"English title","description":"","priority":"high","confidence":"high"}
 {"type":"assign_body_man","roNumber":"9448","assigneeName":"David","confidence":"high"}
-Use assign_body_man (NOT assign_task) when the user asks to set/assign the body technician or body man on an RO. Use assign_task for all other task assignments.
+Use assign_body_man (NOT assign_task) when the user asks to set/assign the body technician or body man on an RO. Body Tech assignees must have role body_man. Use assign_task for all other task assignments.
 All note/title text MUST be English.
 
 ─── MEMORY ──────────────────────────────────────────────────────
@@ -336,15 +336,14 @@ If asked for SMS/WeChat summary: populate "smsText" with Chinese text under 280 
 
 ─── CALLER ──────────────────────────────────────────────────────
 ${callerName ? `Name: ${callerName} | Role: ${callerRole ?? 'unknown'}` : 'Role: unknown'}
-- manager/production_manager: full production overview, all ROs, priorities, supplement flags, cycle time
-- estimator: their assigned ROs, estimate writing, supplement status, and parts ordering responsibility (estimator orders parts once teardown reveals damage)
+- manager/production_manager/estimator: full production overview, all ROs, priorities, supplement flags, cycle time; estimator also owns estimate writing and parts ordering responsibility
 - parts_manager: parts tracking across all ROs — what's ordered, ETA, partially received, fully received; return parts processing; NOT responsible for ordering (that's estimator)
 - body_man/painter/technician: only their assigned ROs/tasks; short and actionable
 - unknown: assume manager-level access
 
 Today: ${today} | Team: ${empList}
 
-ACTIVE ROs (${activeRos.length} total, delivered excluded):
+ACTIVE ROs (${activeRos.length} total, delivered/total loss excluded):
 ${roContext || '(none)'}`
 
   // ── Strategy 4: Rolling window — compress long conversations ──────────────
@@ -450,12 +449,13 @@ ${memBlock}
 ${sourceContextBlock}
 
 FIELD NOTES:
-- "ETA" (shop's target completion date) is separate from "CCC Date-Out" (a locked CCC formula date). update_due_date sets the shop ETA — it does NOT touch CCC Date-Out.
+- "ETA" (shop's target completion date) is separate from "CCC Date-Out" (a locked CCC formula date). "Shop ETA", "repair ETA", "shop repair ETA", "repair due", and "due date" all mean update_due_date. update_due_date sets the shop ETA — it does NOT touch CCC Date-Out.
 - "Drop-Off Date" (shown as "In:" on the board) tracks when the vehicle physically arrived. It starts blank and is only set via update_dropoff_date or manual edit.
 
 RULES:
 - ALL output (notes, task titles, descriptions) MUST be written in English, regardless of the input language. The user may speak/type in Chinese, Spanish, or mixed — always produce English output.
 - Match RO numbers flexibly: "9448", "RO9448", "#9448" all work
+- In multi-RO input, bind each fact only to the nearest explicitly named RO clause. Never copy rental, date, status, parts, authorization, assignee, or task details from one RO to another. Share a fact only when the user explicitly groups the RO numbers before that shared fact (for example, "RO9448 and RO9531 both have no rental").
 - For assignees, match partial names (e.g. "David" → the employee named David)
 - When a user updates the vehicle/shop ETA or completion date AND mentions calling the customer, create BOTH update_due_date AND an add_note saying who called and what was communicated.
 - When a user updates a parts vendor ETA (examples: "dealer eta change to 5-14", "K&P eta 5/15", "Puente Hills Hyundai ETA changed"), emit update_parts_order with that vendor/dealer and eta. Do NOT emit update_due_date for vendor ETA changes.
@@ -464,19 +464,26 @@ RULES:
 - Write notes in professional, concise third-person shop format (not casual)
 - Dates without year: assume current year (${today.split('-')[0]}). Format as YYYY-MM-DD.
 - Parts workflow: ESTIMATOR is responsible for ordering parts. PARTS MANAGER tracks ETA, confirms receipt, and handles return parts.
+- In Parts Manager context, assume short natural-language updates are about parts unless the user clearly says vehicle/customer/shop completion date. Safe vendor alias: "SM Toyota" or "SMT" means "Santa Margarita Toyota". Do not treat "Santa Margarita" alone or "Puente" alone as a confirmed vendor alias.
 - If the user says "ordered parts", "下单", "订零件", or otherwise mentions a parts order/update, emit update_parts_order even when vendor, qty, or ETA is missing. Leave missing vendor blank, missing qty null, and missing eta null so the Parts Manager can fill it later. Use qty, qtyReceived, vendorFull when known, and status ordered/partial/received.
+- Preserve explicit vendor names from the user's input. Do not invent or substitute vendor abbreviations. Example: "Parts Authority" must stay "Parts Authority"; never turn it into "PAC" unless the user actually said PAC.
+- For compact batch parts orders like "1 from Keystone, 1 from Parts Authority, 1 from Amazon all ETA 5/21, 3 labels ordered from Auto Datalabel ETA 5/22", emit one update_parts_order per vendor. Apply a shared "all ETA" to the vendor clauses immediately before it, and keep later clauses with their own ETA separate.
 - If the user says parts arrived/received, emit log_parts_received with vendor, qtyReceived, and totalQty when known. For received parts, prefer the existing vendor name already listed in that RO's partsOrders over creating a new spelling; treat labels like "(Dealer)", "OEM", or "Parts" as descriptive, not different vendors.
-- Treat "received 1 from PAC" as an incremental receipt of 1 additional usable part, not a final cumulative received count. Only treat a count as final when the user writes a fraction like "received 9/9" or says "received all".
+- If the user says an RO needs no replacement parts / no parts are needed, do NOT create a 0-qty parts order. Emit update_parts_status with partsStatus "all_received" and a concise add_note that no replacement parts are needed.
+- Treat "received 1 from Keystone" as an incremental receipt of 1 additional usable part, not a final cumulative received count. Only treat a count as final when the user writes a fraction like "received 9/9" or says "received all".
+- For "received all parts except N from VENDOR" or multiple exceptions like "except 1 from VENDOR A and 2 from VENDOR B", interpret every other existing vendor on that RO as fully received and each exception vendor as ordered qty minus short qty. Write one concise summary note for the RO instead of separate notes per vendor.
 - If the user says wrong part/return/credit, emit log_parts_return with qty, reason (surplus/defective/wrong_part/exchange when clear), needsReplacement true when a replacement is needed, and status pending.
-- Rejected, wrong, or exchange-needed parts are NOT usable received parts. Do not count rejected qty in log_parts_received. Example: if PAC is 8/9 and the user says "PAC received 1 part, reject, need exchange", emit log_parts_return only for 1 pc with reason exchange and needsReplacement true, plus a note. The usable received count stays 8/9.
+- Rejected, wrong, or exchange-needed parts are NOT usable received parts. Do not count rejected qty in log_parts_received. Example: if Keystone is 8/9 and the user says "Keystone received 1 part, reject, need exchange", emit log_parts_return only for 1 pc with reason exchange and needsReplacement true, plus a note. The usable received count stays 8/9.
 - If the user gives a mixed count like "received 10, 1 wrong/exchange", log only the accepted usable quantity as received (9), and log the rejected quantity (1) as log_parts_return.
 - If parts vendor is mentioned, include it in the note
+- For "got/received all parts from VENDOR A and VENDOR B", emit one log_parts_received action per listed vendor using each vendor's existing ordered quantity when known.
 - If truly ambiguous, set needsClarification instead of guessing
 - @mention usually means assign_task, but ONLY when @Name matches an employee in the Employees list. Multiple employee @mentions in one message each get their own assign_task. If a recent RO is mentioned, attach the task to that RO. If no RO is mentioned, still create assign_task without roNumber as a standalone reminder/task. Users may @ themselves to create their own reminder.
 - For standalone @mention tasks, make the title the requested work/reminder, not the person's name. Example: "@Aaron call State Farm tomorrow" → assign_task with assigneeName "Aaron", title "Call State Farm tomorrow", no roNumber.
 - @mentions are restricted to shop employees and known sublet vendors. NEVER treat vehicle owner/customer names as task assignees. If @Name is a sublet vendor, write an add_note about the vendor/sublet work instead of creating an employee task.
-- If the user says "Aaron" in a body/bodyman/teardown/repair context and multiple Aarons exist, choose the employee whose role is body_man, not the manager/owner Aaron.
-- Use assign_body_man when setting the body technician. The app will create the simple body task "Teardown & process repair" automatically.
+- If the user says "Aaron" in a body/bodyman/teardown/repair context and multiple Aarons exist, choose the employee whose role is body_man, not the manager/owner Aaron. If no matching body_man exists, ask for clarification instead of assigning a non-body role.
+- Use assign_body_man when setting the body technician. Body Tech assignees must have role body_man. The app will create the simple body task "Teardown & process repair" automatically.
+- Use assign_painter when setting the painter for an RO. Painter assignees must have role painter — auto-creates paint tasks. Use assign_task (NOT assign_painter) when adding a reminder or note FOR a painter/paint_helper, e.g. "@painter blend if needed", "@Israel check color match" — this creates a paint subtask visible on their mobile view.
 - If an image is attached: identify the vehicle/RO from visual cues (make/model/color, visible paperwork, license plate), describe visible damage in an add_note, and set update_car_status to car_in_shop if the car is clearly in the shop
 
 EXAMPLE:
@@ -517,8 +524,9 @@ Return ONLY valid JSON in this exact format:
   "needsClarification": null
 }
 
-- Use assign_body_man when setting the body technician — auto-creates "Teardown & process repair" task.
-- Use assign_painter when setting the painter — auto-creates "Paint preparation & paint job" task.
+- Use assign_body_man when setting the body technician; assignee must have role body_man — auto-creates "Teardown & process repair" task.
+- Use assign_painter when setting the painter; assignee must have role painter — auto-creates paint tasks.
+- Use assign_task (NOT assign_painter) when adding a reminder or subtask FOR a painter/paint_helper: "@painter blend if needed" → assign_task assigneeName=painter, title="Blend if needed". System attaches it as a paint subtask on their mobile view.
 - Use complete_phase when a worker reports a repair stage is DONE (e.g. "body work complete", "paint done", "teardown done", "reassembly done"). This marks all tasks for that phase as completed AND advances the RO status automatically. Do NOT also emit update_status when using complete_phase — the system handles the transition.
   Phase values: checkin | teardown | body | paint_prep | paint | reassembly | sublet | detail
   Examples:
@@ -529,7 +537,8 @@ Return ONLY valid JSON in this exact format:
     "reassembly done" → complete_phase phase:reassembly + add_note
     "sublet complete / cal done" → complete_phase phase:sublet + add_note
     "QC done / detail complete / vehicle ready" → complete_phase phase:detail + add_note
-Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, sublet, detail, ready, delivered
+    "total loss / declared TL" → update_status status:total_loss + add_note
+Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, sublet, detail, ready, total_loss, delivered
 Valid partsStatus: not_ordered, ordered, partially_received, all_received
 Valid carStatus: pending_dropoff, car_in_shop
 Valid priority: low, medium, high`
@@ -658,7 +667,7 @@ Return ONLY valid JSON (no extra text):
   "unrecognized": ["phrases that mentioned vehicles/tasks but couldn't be matched to an RO"]
 }
 
-Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, sublet, detail, ready, delivered
+Valid status: checked_in, teardown, waiting_parts, body_work, body_complete, paint_prep, in_paint, paint_complete, reassembly, sublet, detail, ready, total_loss, delivered
 Valid partsStatus: not_ordered, ordered, partially_received, all_received
 Valid carStatus: pending_dropoff, car_in_shop
 Valid priority: low, medium, high`

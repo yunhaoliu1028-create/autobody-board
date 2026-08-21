@@ -2,7 +2,24 @@ import { useState, useMemo } from 'react'
 import { format } from 'date-fns'
 import HighlightedNote from './HighlightedNote'
 
-// ── Parse raw notes string → array of note blocks ──────────────────────────
+const SUMMARY_CATEGORIES = [
+  { label: 'Parts', pattern: /\b(parts?|eta|vendor|ordered|received|pending|keystone|toyota|pac|lkq|dealer|supplement)\b/i },
+  { label: 'Customer', pattern: /\b(customer|called|notified|authorized|rental|pickup|phone|owner|concern)\b/i },
+  { label: 'Repair', pattern: /\b(repair|teardown|body|paint|reassembly|detail|qc|calibration|sublet|bumper|shield|install)\b/i },
+  { label: 'Status', pattern: /\b(status|moved|complete|completed|ready|delivered|checked|drop|tow|in shop)\b/i },
+]
+
+function cleanSummaryText(text = '') {
+  return String(text)
+    .replace(/^\s*[-•]\s*/, '')
+    .replace(/^\s*(parts?|customer|repair|status|general)\s*(?:[-–—:]\s*)/i, '')
+    .trim()
+}
+
+function summaryCategory(text = '') {
+  return SUMMARY_CATEGORIES.find(item => item.pattern.test(String(text)))?.label || 'General'
+}
+
 export function parseNoteLines(raw) {
   if (!raw) return []
   const lines = []
@@ -20,9 +37,8 @@ export function parseNoteLines(raw) {
   return lines
 }
 
-// ── Single day card ─────────────────────────────────────────────────────────
-function DayGroup({ mmdd, isToday, lines, summary, isSummarizing }) {
-  const [open,    setOpen]    = useState(true)   // all days open by default
+function DayGroup({ mmdd, isToday, lines, summary, isSummarizing, canUndo = false, onUndoLine }) {
+  const [open, setOpen] = useState(true)
   const [rawOpen, setRawOpen] = useState(false)
 
   const header = (
@@ -35,7 +51,7 @@ function DayGroup({ mmdd, isToday, lines, summary, isSummarizing }) {
       <span className="flex-1 text-xs text-gray-400 dark:text-zinc-500">
         {lines.length} note{lines.length !== 1 ? 's' : ''}
       </span>
-      {isSummarizing && <span className="text-xs text-blue-400 animate-pulse shrink-0">✨</span>}
+      {isSummarizing && <span className="text-xs text-blue-400 animate-pulse shrink-0">*</span>}
       <span className="text-[10px] text-gray-300 dark:text-zinc-600 shrink-0">{open ? '▲' : '▼'}</span>
     </button>
   )
@@ -46,15 +62,14 @@ function DayGroup({ mmdd, isToday, lines, summary, isSummarizing }) {
     <div className="rounded-xl border border-gray-100 dark:border-zinc-800 overflow-hidden">
       {header}
       <div className="px-3 pb-3 space-y-1.5">
-
-        {/* ── Past day: show AI summary bullets ── */}
         {!isToday && summary && (
-          <div className="mb-1.5 space-y-1">
+          <div className="mb-1.5 space-y-1.5">
             {summary.bullets.map((b, i) => (
-              <p key={i} className="text-xs text-gray-600 dark:text-zinc-300 flex gap-2 leading-relaxed">
-                <span className="text-gray-300 dark:text-zinc-600 shrink-0 mt-0.5">•</span>
-                <span><HighlightedNote text={b} /></span>
-              </p>
+              <div key={i} className="flex items-start gap-2 text-xs leading-relaxed">
+                <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-gray-300 dark:bg-zinc-600" />
+                <span className="w-16 shrink-0 font-semibold text-gray-500 dark:text-zinc-400">{summaryCategory(b)}</span>
+                <span className="min-w-0 flex-1 text-gray-600 dark:text-zinc-300">{cleanSummaryText(b)}</span>
+              </div>
             ))}
             <button
               onClick={() => setRawOpen(v => !v)}
@@ -67,16 +82,25 @@ function DayGroup({ mmdd, isToday, lines, summary, isSummarizing }) {
           </div>
         )}
 
-        {/* ── Raw notes: always for today, toggle for summarized past days ── */}
         {(isToday || !summary || rawOpen) && lines.map((line, i) => (
           <div key={i} className="px-3 py-2 bg-gray-50 dark:bg-zinc-800/50 rounded-lg border border-gray-100 dark:border-zinc-700/40">
-            <p className="text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
-              <HighlightedNote text={line} />
-            </p>
+            <div className="flex items-start gap-2">
+              <p className="min-w-0 flex-1 text-xs text-gray-700 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                <HighlightedNote text={line} />
+              </p>
+              {canUndo && (
+                <button
+                  type="button"
+                  onClick={() => onUndoLine?.(line)}
+                  className="shrink-0 rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] font-semibold text-gray-500 hover:border-red-300 hover:text-red-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-red-800 dark:hover:text-red-300"
+                >
+                  Undo
+                </button>
+              )}
+            </div>
           </div>
         ))}
 
-        {/* ── Past day without summary yet: raw notes shown directly ── */}
         {!isToday && !summary && isSummarizing === false && lines.length === 0 && (
           <p className="text-xs text-gray-400 dark:text-zinc-600 italic px-1">No notes.</p>
         )}
@@ -85,8 +109,17 @@ function DayGroup({ mmdd, isToday, lines, summary, isSummarizing }) {
   )
 }
 
-// ── Full notes log grouped by calendar day ──────────────────────────────────
-export default function DailyNotesLog({ noteString, noteSummaries, summarizingDates }) {
+export default function DailyNotesLog({
+  noteString,
+  noteSummaries,
+  summarizingDates,
+  canUndo = false,
+  onUndoLine,
+  canRefresh = false,
+  onRefresh,
+  refreshBusy = false,
+}) {
+  const [undoMode, setUndoMode] = useState(false)
   const todayMmdd = format(new Date(), 'MM/dd')
   const todayYear = new Date().getFullYear()
 
@@ -106,7 +139,8 @@ export default function DailyNotesLog({ noteString, noteSummaries, summarizingDa
       const year = monthNum > new Date().getMonth() + 1 ? todayYear - 1 : todayYear
       const isoDate = `${year}-${month}-${day}`
       return {
-        mmdd, isoDate,
+        mmdd,
+        isoDate,
         isToday: mmdd === todayMmdd,
         lines: ls,
         summary: noteSummaries?.find(s => s.date === isoDate) ?? null,
@@ -120,6 +154,40 @@ export default function DailyNotesLog({ noteString, noteSummaries, summarizingDa
 
   return (
     <div className="space-y-2">
+      {(canRefresh || canUndo) && (
+        <div className="flex justify-end gap-1.5">
+          {canRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={refreshBusy}
+              title={refreshBusy ? 'Refreshing notes...' : 'Refresh note summaries'}
+              aria-label={refreshBusy ? 'Refreshing notes' : 'Refresh note summaries'}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-200 bg-white text-gray-400 transition-colors hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500 dark:hover:border-blue-800 dark:hover:text-blue-300"
+            >
+              <svg className={`h-3.5 w-3.5 ${refreshBusy ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h5M20 20v-5h-5" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7 9a7 7 0 0111.2-2.8M17 15a7 7 0 01-11.2 2.8" />
+              </svg>
+            </button>
+          )}
+          {canUndo && (
+            <button
+              type="button"
+              onClick={() => setUndoMode(v => !v)}
+              title={undoMode ? 'Hide undo controls' : 'Show undo controls'}
+              aria-label={undoMode ? 'Hide undo controls' : 'Show undo controls'}
+              className={`inline-flex h-7 w-7 items-center justify-center rounded-md border text-sm font-bold transition-colors ${
+                undoMode
+                  ? 'border-red-200 bg-red-50 text-red-600 hover:border-red-300 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300'
+                  : 'border-gray-200 bg-white text-gray-400 hover:border-blue-300 hover:text-blue-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500 dark:hover:border-blue-800 dark:hover:text-blue-300'
+              }`}
+            >
+              ↶
+            </button>
+          )}
+        </div>
+      )}
       {dateGroups.map(g => (
         <DayGroup
           key={g.mmdd}
@@ -128,6 +196,8 @@ export default function DailyNotesLog({ noteString, noteSummaries, summarizingDa
           lines={g.lines}
           summary={g.summary}
           isSummarizing={summarizingDates?.has(g.isoDate) ?? false}
+          canUndo={canUndo && undoMode}
+          onUndoLine={onUndoLine}
         />
       ))}
     </div>

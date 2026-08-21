@@ -1,16 +1,20 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
-  doc, onSnapshot, collection, addDoc, updateDoc, deleteDoc, getDocs, deleteField, serverTimestamp,
+  doc, onSnapshot, collection, getDocs, deleteField, serverTimestamp,
   query, where, orderBy, arrayUnion,
 } from 'firebase/firestore'
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
 import { db, storage } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
+import { createTaskDoc, deleteTaskDoc, normalizeTaskRevision, updateTaskDoc } from '../utils/taskMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { summarizeDayNotes, getApiKey } from '../hooks/useAI'
 import { StatusBadge, PartsStatusBadge, CCCFieldLabel } from '../components/StatusBadge'
 import HighlightedNote from '../components/HighlightedNote'
 import DailyNotesLog, { parseNoteLines } from '../components/DailyNotesLog'
+import { buildUndoNoteUpdate } from '../utils/noteUndo'
+import { compressImageFile } from '../utils/imageCompression'
 import {
   RO_STATUSES, PARTS_STATUSES, MANAGER_ROLES, EDIT_RO_ROLES,
 } from '../constants/roles'
@@ -111,7 +115,7 @@ function TaskList({ roId, employees }) {
     e.preventDefault()
     setSaving(true)
     try {
-      await addDoc(collection(db, 'tasks'), {
+      await createTaskDoc(collection(db, 'tasks'), {
         roId,
         assignedTo:  assignTo,
         assignedToName: employees[assignTo] ?? '',
@@ -130,7 +134,7 @@ function TaskList({ roId, employees }) {
   }
 
   const updateTaskStatus = async (taskId, newStatus) => {
-    await updateDoc(doc(db, 'tasks', taskId), {
+    await updateTaskDoc(doc(db, 'tasks', taskId), {
       status:      newStatus,
       completedAt: newStatus === 'completed' ? serverTimestamp() : null,
       updatedAt:   serverTimestamp(),
@@ -141,7 +145,7 @@ function TaskList({ roId, employees }) {
     if (!isShopManager) return
     const ok = window.confirm(`Delete task "${task.title || 'Untitled task'}"? This cannot be undone.`)
     if (!ok) return
-    await deleteDoc(doc(db, 'tasks', task.id))
+    await deleteTaskDoc(doc(db, 'tasks', task.id), user.uid, normalizeTaskRevision(task.taskRevision))
   }
 
   const priorityDot = { low: 'bg-gray-400', medium: 'bg-amber-400', high: 'bg-red-500' }
@@ -295,7 +299,7 @@ function ManagerMaintenance({ ro }) {
     if (!ok) return
     setBusy('notes')
     try {
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         notes: '',
         noteSummaries: [],
         updatedAt: serverTimestamp(),
@@ -313,8 +317,12 @@ function ManagerMaintenance({ ro }) {
     setBusy('reset')
     try {
       const taskSnap = await getDocs(query(collection(db, 'tasks'), where('roId', '==', ro.id)))
-      await Promise.all(taskSnap.docs.map(taskDoc => deleteDoc(doc(db, 'tasks', taskDoc.id))))
-      await updateDoc(doc(db, 'ros', ro.id), {
+      await Promise.all(taskSnap.docs.map(taskDoc => deleteTaskDoc(
+        doc(db, 'tasks', taskDoc.id),
+        user.uid,
+        normalizeTaskRevision(taskDoc.data().taskRevision),
+      )))
+      await updateRoDoc(doc(db, 'ros', ro.id), {
         status: deleteField(),
         carStatus: deleteField(),
         partsStatus: deleteField(),
@@ -374,9 +382,13 @@ function ManagerMaintenance({ ro }) {
   )
 }
 
-function AttachmentsSection({ roId, attachments = [] }) {
+function AttachmentsSection({ roId, roNumber, attachments = [] }) {
   const [uploading, setUploading] = useState(false)
-  const [error,     setError]     = useState('')
+  const [error, setError] = useState('')
+  const [selected, setSelected] = useState(new Set())
+  const [downloading, setDownloading] = useState(false)
+  const [downloadProgress, setDownloadProgress] = useState('')
+  const [previewIndex, setPreviewIndex] = useState(null)
   const fileInputRef = useRef(null)
 
   const handleFiles = async (e) => {
@@ -386,13 +398,14 @@ function AttachmentsSection({ roId, attachments = [] }) {
     try {
       for (const file of files) {
         if (!file.type.startsWith('image/')) continue
-        const filename = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-        const sRef     = storageRef(storage, `ros/${roId}/attachments/${filename}`)
-        await uploadBytes(sRef, file, { contentType: file.type })
+        const blob = await compressImageFile(file)
+        const filename = `${Date.now()}_${file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9._-]/g, '_')}.jpg`
+        const sRef = storageRef(storage, `ros/${roId}/attachments/${filename}`)
+        await uploadBytes(sRef, blob || file, { contentType: 'image/jpeg' })
         const url = await getDownloadURL(sRef)
-        await updateDoc(doc(db, 'ros', roId), {
-          attachments: arrayUnion({ url, name: file.name, uploadedAt: new Date().toISOString() }),
-          updatedAt:   serverTimestamp(),
+        await updateRoDoc(doc(db, 'ros', roId), {
+          attachments: arrayUnion({ url, name: filename, label: file.name.replace(/\.[^.]+$/, ''), uploadedAt: new Date().toISOString() }),
+          updatedAt: serverTimestamp(),
         })
       }
     } catch (err) {
@@ -404,10 +417,57 @@ function AttachmentsSection({ roId, attachments = [] }) {
     }
   }
 
+  const allSelected = attachments.length > 0 && selected.size === attachments.length
+  const toggleSelectAll = () => {
+    if (allSelected) setSelected(new Set())
+    else setSelected(new Set(attachments.map((_, i) => i)))
+  }
+  const toggleOne = (i) => setSelected(prev => {
+    const next = new Set(prev)
+    next.has(i) ? next.delete(i) : next.add(i)
+    return next
+  })
+
+  const handleDownload = async () => {
+    const targets = attachments.filter((_, i) => selected.has(i))
+    if (!targets.length) return
+    setDownloading(true)
+    for (let i = 0; i < targets.length; i++) {
+      const att = targets[i]
+      setDownloadProgress(`Downloading ${i + 1}/${targets.length}…`)
+      try {
+        const resp = await fetch(att.url)
+        const blob = await resp.blob()
+        const label = att.label || att.name || `photo_${i + 1}`
+        const slug = label.replace(/[^\w\s-]/g, '').replace(/\s+/g, '_')
+        const filename = `RO${roNumber}_${slug}.jpg`
+        const objUrl = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = objUrl
+        a.download = filename
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        setTimeout(() => URL.revokeObjectURL(objUrl), 1000)
+        if (i < targets.length - 1) await new Promise(r => setTimeout(r, 400))
+      } catch {
+        const a = document.createElement('a')
+        a.href = att.url
+        a.target = '_blank'
+        a.rel = 'noopener noreferrer'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+      }
+    }
+    setDownloading(false)
+    setDownloadProgress('')
+  }
+
   return (
     <div>
-      {/* Upload button */}
-      <div className="flex items-center gap-3 mb-3">
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-3 mb-3">
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={uploading}
@@ -418,16 +478,29 @@ function AttachmentsSection({ roId, attachments = [] }) {
           </svg>
           {uploading ? 'Uploading…' : 'Upload Photo'}
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={handleFiles}
-        />
+        <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFiles} />
         {attachments.length > 0 && (
-          <span className="text-xs text-gray-400 dark:text-zinc-600">{attachments.length} photo{attachments.length !== 1 ? 's' : ''}</span>
+          <>
+            <span className="text-xs text-gray-400 dark:text-zinc-600">{attachments.length} photo{attachments.length !== 1 ? 's' : ''}</span>
+            <button
+              onClick={toggleSelectAll}
+              className="text-xs font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors"
+            >
+              {allSelected ? 'Deselect All' : 'Select All'}
+            </button>
+            {selected.size > 0 && (
+              <button
+                onClick={handleDownload}
+                disabled={downloading}
+                className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-300 disabled:opacity-50 transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12M8 12l4 4 4-4"/>
+                </svg>
+                {downloading ? downloadProgress : `Download ${selected.size} selected`}
+              </button>
+            )}
+          </>
         )}
       </div>
 
@@ -437,20 +510,60 @@ function AttachmentsSection({ roId, attachments = [] }) {
       {attachments.length > 0 ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
           {attachments.map((att, i) => (
-            <a
+            <div
               key={i}
-              href={att.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={att.name}
-              className="block aspect-square rounded-xl overflow-hidden border border-gray-200 dark:border-zinc-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors group"
+              className={`relative aspect-square rounded-xl overflow-hidden border transition-colors group cursor-pointer ${
+                selected.has(i)
+                  ? 'border-blue-500 ring-2 ring-blue-400/40'
+                  : 'border-gray-200 dark:border-zinc-700 hover:border-blue-400 dark:hover:border-blue-500'
+              }`}
+              onClick={() => setPreviewIndex(i)}
             >
               <img
                 src={att.url}
-                alt={att.name}
+                alt={att.label || att.name}
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
               />
-            </a>
+              {/* Checkbox overlay */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  toggleOne(i)
+                }}
+                className={`absolute top-1.5 left-1.5 h-5 w-5 rounded-full border-2 flex items-center justify-center transition-all ${
+                selected.has(i)
+                  ? 'bg-blue-500 border-blue-500'
+                  : 'bg-black/30 border-white/70 opacity-0 group-hover:opacity-100'
+              }`}
+                aria-label={selected.has(i) ? 'Deselect photo' : 'Select photo'}
+              >
+                {selected.has(i) && (
+                  <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/>
+                  </svg>
+                )}
+              </button>
+              {/* Label tooltip */}
+              {att.label && (
+                <div className="absolute bottom-0 inset-x-0 bg-black/50 px-1.5 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <p className="text-[10px] text-white truncate">{att.label}</p>
+                </div>
+              )}
+              {/* Open in new tab */}
+              <a
+                href={att.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={e => e.stopPropagation()}
+                className="absolute top-1.5 right-1.5 h-5 w-5 flex items-center justify-center rounded-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity"
+                title="Open full size"
+              >
+                <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                </svg>
+              </a>
+            </div>
           ))}
         </div>
       ) : (
@@ -560,7 +673,7 @@ export default function RODetail() {
           const entry = { date: isoDate, bullets: result.bullets, generatedAt: new Date().toISOString() }
           accumulated.push(entry)
           setNoteSummaries([...accumulated])
-          await updateDoc(doc(db, 'ros', id), { noteSummaries: accumulated })
+          await updateRoDoc(doc(db, 'ros', id), { noteSummaries: accumulated })
         } catch { /* silent — raw notes still shown */ } finally {
           setSummarizingDates(prev => { const s = new Set(prev); s.delete(isoDate); return s })
         }
@@ -572,12 +685,12 @@ export default function RODetail() {
 
   const handleStatusChange = async (newStatus) => {
     setUpdatingStatus(true)
-    await updateDoc(doc(db, 'ros', id), { status: newStatus, updatedAt: serverTimestamp() })
+    await updateRoDoc(doc(db, 'ros', id), { status: newStatus, updatedAt: serverTimestamp() })
     setUpdatingStatus(false)
   }
 
   const handlePartsChange = async (v) => {
-    await updateDoc(doc(db, 'ros', id), { partsStatus: v, updatedAt: serverTimestamp() })
+    await updateRoDoc(doc(db, 'ros', id), { partsStatus: v, updatedAt: serverTimestamp() })
   }
 
   const addNote = async (e) => {
@@ -587,12 +700,20 @@ export default function RODetail() {
     const prev   = ro.notes ?? ''
     const stamp  = format(new Date(), 'MM/dd HH:mm')
     const author = employees[user.uid] ?? user.email
-    await updateDoc(doc(db, 'ros', id), {
+    await updateRoDoc(doc(db, 'ros', id), {
       notes:     `[${stamp} - ${author}] ${note.trim()}\n${prev}`,
       updatedAt: serverTimestamp(),
     })
     setNote('')
     setSavingNote(false)
+  }
+
+  const undoNoteLine = async (line) => {
+    if (!canEdit && role !== 'parts_manager') return
+    const ok = window.confirm(`Undo this RO note?\n\nThe note will be removed. If a matching status change can be safely identified, it will be rolled back too.`)
+    if (!ok) return
+    const { updates } = buildUndoNoteUpdate(ro, line)
+    await updateRoDoc(doc(db, 'ros', id), updates)
   }
 
   if (loading) return (
@@ -761,6 +882,7 @@ export default function RODetail() {
           {ro.laborHrs    && <Field label="Labor Hrs"  value={ro.laborHrs} />}
           {ro.paintHrs    && <Field label="Paint Hrs"  value={ro.paintHrs} />}
           {ro.paintCode   && <Field label="Paint Code" value={ro.paintCode} mono />}
+          <Field label="Needs Paint" value={ro.needsPaint === false ? 'No' : 'Yes'} />
 
           <div className="col-span-full border-t border-gray-100 dark:border-zinc-800 my-1" />
 
@@ -804,7 +926,7 @@ export default function RODetail() {
 
       {/* ── Attachments ───────────────────────────────────────────────────── */}
       <Section title="Photos & Attachments">
-        <AttachmentsSection roId={id} attachments={ro.attachments ?? []} />
+        <AttachmentsSection roId={id} roNumber={ro.roNumber} attachments={ro.attachments ?? []} />
       </Section>
 
       {/* ── Change Log ────────────────────────────────────────────────────── */}
@@ -860,6 +982,8 @@ export default function RODetail() {
           noteString={ro.notes ?? ''}
           noteSummaries={noteSummaries}
           summarizingDates={summarizingDates}
+          canUndo={canEdit || role === 'parts_manager'}
+          onUndoLine={undoNoteLine}
         />
       </Section>
 

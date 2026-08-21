@@ -266,6 +266,42 @@
       font-weight: 600;
     }
     .app-url-row button:hover { background: #cbd5e1; }
+
+    /* ── Auto-sync status ── */
+    .auto-sync-box {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      font-size: 11px;
+    }
+    .auto-sync-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .auto-sync-label {
+      font-weight: 700;
+      color: #334155;
+      font-size: 12px;
+    }
+    .btn-auto-sync {
+      padding: 4px 10px;
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      color: #334155;
+    }
+    .btn-auto-sync:hover:not(:disabled) { background: #e2e8f0; }
+    .btn-auto-sync:disabled { opacity: 0.5; cursor: not-allowed; }
+    .auto-sync-meta { color: #94a3b8; margin-bottom: 4px; }
+    .auto-sync-steps { color: #475569; }
+    .auto-sync-error { color: #dc2626; }
   </style>
 </head>
 <body>
@@ -321,6 +357,18 @@
 
     <!-- Sync results -->
     <div id="sync-results" style="display:none; margin-top:12px;"></div>
+
+    <hr class="section-divider"/>
+
+    <!-- Auto-sync status -->
+    <div class="auto-sync-box" id="auto-sync-box">
+      <div class="auto-sync-header">
+        <span class="auto-sync-label">⏰ 每日自动同步 (8:00 AM)</span>
+        <button class="btn-auto-sync" id="manual-sync-btn">▶ 立即运行</button>
+      </div>
+      <div class="auto-sync-meta" id="auto-sync-next">计算下次运行时间…</div>
+      <div id="auto-sync-last"></div>
+    </div>
 
     <hr class="section-divider"/>
 

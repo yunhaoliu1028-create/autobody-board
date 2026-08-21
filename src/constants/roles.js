@@ -18,7 +18,8 @@ export const ROLE_LABELS = {
   parts_manager:      'Parts Manager',
 }
 
-export const MANAGER_ROLES = [ROLES.SHOP_MANAGER, ROLES.PRODUCTION_MANAGER]
+export const MANAGER_ROLES = [ROLES.SHOP_MANAGER, ROLES.PRODUCTION_MANAGER, ROLES.ESTIMATOR]
+export const PARTS_PAGE_ROLES = [...MANAGER_ROLES, ROLES.PARTS_MANAGER]
 export const EDIT_RO_ROLES = [ROLES.SHOP_MANAGER, ROLES.PRODUCTION_MANAGER, ROLES.ESTIMATOR]
 export const WORKER_ROLES = [ROLES.BODY_MAN, ROLES.PAINTER, ROLES.PAINT_HELPER]
 
@@ -96,6 +97,12 @@ export const RO_STATUSES = [
     dot:   'bg-green-500 dark:bg-green-400',
   },
   {
+    key: 'total_loss',
+    label: 'Total Loss',
+    color: 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-200',
+    dot:   'bg-red-500 dark:bg-red-400',
+  },
+  {
     key: 'delivered',
     label: 'Delivered',
     color: 'bg-gray-100 text-gray-500 dark:bg-zinc-800 dark:text-zinc-500',
@@ -167,5 +174,13 @@ export const STATUS_GROUPS = [
     color:    'bg-green-50 dark:bg-green-900/30',
     header:   'text-green-700 dark:text-green-300',
     accent:   'border-green-300 dark:border-green-700',
+  },
+  {
+    key:      'TOTAL_LOSS',
+    label:    'Total Loss',
+    statuses: ['total_loss'],
+    color:    'bg-red-50 dark:bg-red-950/30',
+    header:   'text-red-700 dark:text-red-300',
+    accent:   'border-red-300 dark:border-red-800',
   },
 ]

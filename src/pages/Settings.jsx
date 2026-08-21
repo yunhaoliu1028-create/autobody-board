@@ -2,10 +2,12 @@ import { useState, useEffect, useRef } from 'react'
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp, getDocs, collection } from 'firebase/firestore'
 import { format } from 'date-fns'
 import { db } from '../firebase/config'
+import { updateRoDoc } from '../utils/roMutations'
 import { useAuth } from '../contexts/AuthContext'
 import { saveApiKey, getApiKey, clearKeyCache, saveOpenAIKey, getOpenAIKey, clearOpenAIKeyCache, summarizeDayNotes } from '../hooks/useAI'
 import { parseNoteLines } from '../components/DailyNotesLog'
 import { MANAGER_ROLES } from '../constants/roles'
+import { t } from '../utils/mobileI18n'
 
 // ── Preset glossary ───────────────────────────────────────────────────────────
 // Chinese parts (中文零件)
@@ -106,6 +108,7 @@ const LABEL = 'block text-xs font-medium text-gray-500 dark:text-zinc-400 mb-1'
 const SECONDARY_BUTTON = 'px-4 py-2 border border-gray-300 dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800 text-gray-700 dark:text-zinc-200 text-sm rounded-lg transition-colors'
 const SAVED_BANNER = 'flex items-center gap-2 mb-2 px-3 py-2 bg-green-50 dark:bg-emerald-950/25 border border-green-200 dark:border-emerald-900/60 rounded-lg'
 const CODE = 'bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-zinc-200 px-1 rounded'
+const DEFAULT_MONTHLY_REPAIR_GOAL = 26000
 
 export default function Settings() {
   const { user, userProfile, role, refreshProfile } = useAuth()
@@ -129,6 +132,8 @@ export default function Settings() {
   const [nameMap,        setNameMap]        = useState('')
   const [vendorMap,      setVendorMap]      = useState('')
   const [mapSaved,       setMapSaved]       = useState(false)
+  const [monthlyRepairGoal, setMonthlyRepairGoal] = useState(String(DEFAULT_MONTHLY_REPAIR_GOAL))
+  const [revenueSaved,   setRevenueSaved]   = useState(false)
   // Glossary / AI Memory (all users)
   const [memory,         setMemory]         = useState([])
   const [memLoading,     setMemLoading]     = useState(true)
@@ -205,6 +210,11 @@ export default function Settings() {
       if (d.openaiKey)    { setOpenaiKey(''); setOpenaiMasked(true) }
       if (d.nameMap)      setNameMap(d.nameMap)
       if (d.vendorMap)    setVendorMap(d.vendorMap)
+    }
+    const revenueSnap = await getDoc(doc(db, 'settings', 'revenue'))
+    if (revenueSnap.exists()) {
+      const goal = Number(revenueSnap.data()?.monthlyRepairGoal)
+      if (Number.isFinite(goal) && goal > 0) setMonthlyRepairGoal(String(goal))
     }
   }
 
@@ -285,6 +295,18 @@ export default function Settings() {
     setTimeout(() => setMapSaved(false), 3000)
   }
 
+  const handleSaveRevenueGoal = async () => {
+    const goal = Number(String(monthlyRepairGoal).replace(/[$,\s]/g, ''))
+    if (!Number.isFinite(goal) || goal <= 0) return
+    await setDoc(doc(db, 'settings', 'revenue'), {
+      monthlyRepairGoal: goal,
+      updatedAt: serverTimestamp(),
+    }, { merge: true })
+    setMonthlyRepairGoal(String(goal))
+    setRevenueSaved(true)
+    setTimeout(() => setRevenueSaved(false), 2500)
+  }
+
   const handleSaveProfile = async () => {
     if (!user?.uid || !displayName.trim()) return
     setProfileSaving(true)
@@ -340,7 +362,7 @@ export default function Settings() {
         }
 
         if (summaries.length > 0) {
-          await updateDoc(doc(db, 'ros', ro.id), { noteSummaries: summaries })
+          await updateRoDoc(doc(db, 'ros', ro.id), { noteSummaries: summaries })
         }
         setRegenState(s => ({ ...s, done: s.done + 1 }))
       }
@@ -353,15 +375,15 @@ export default function Settings() {
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-gray-900 dark:text-zinc-100">Settings</h1>
+        <h1 className="text-xl font-bold text-gray-900 dark:text-zinc-100">{t(language, 'settings', 'Settings')}</h1>
         <p className="text-sm text-gray-500 dark:text-zinc-400 mt-0.5">Profile preferences</p>
       </div>
 
       <div className={CARD}>
-        <h3 className={`${TITLE} mb-4`}>My Profile</h3>
+        <h3 className={`${TITLE} mb-4`}>{language === 'spanish' ? 'Mi perfil' : 'My Profile'}</h3>
         <div className="space-y-4">
           <div>
-            <label className={LABEL}>Display name</label>
+            <label className={LABEL}>{language === 'spanish' ? 'Nombre visible' : 'Display name'}</label>
             <input
               value={displayName}
               onChange={e => setDisplayName(e.target.value)}
@@ -370,7 +392,7 @@ export default function Settings() {
             />
           </div>
           <div>
-            <label className={LABEL}>Phone</label>
+            <label className={LABEL}>{language === 'spanish' ? 'Telefono' : 'Phone'}</label>
             <input
               value={phone}
               onChange={e => setPhone(e.target.value)}
@@ -379,7 +401,7 @@ export default function Settings() {
             />
           </div>
           <div>
-            <label className={LABEL}>Language</label>
+            <label className={LABEL}>{language === 'spanish' ? 'Idioma' : 'Language'}</label>
             <select
               value={language}
               onChange={e => setLanguage(e.target.value)}
@@ -395,9 +417,15 @@ export default function Settings() {
               disabled={profileSaving || !displayName.trim()}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors"
             >
-              {profileSaving ? 'Saving…' : 'Save Profile'}
+              {profileSaving
+                ? (language === 'spanish' ? 'Guardando...' : 'Saving...')
+                : (language === 'spanish' ? 'Guardar perfil' : 'Save Profile')}
             </button>
-            {profileSaved && <span className="text-xs text-green-600 dark:text-emerald-400">✓ Saved</span>}
+            {profileSaved && (
+              <span className="text-xs text-green-600 dark:text-emerald-400">
+                {language === 'spanish' ? 'Guardado' : 'Saved'}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -500,6 +528,33 @@ export default function Settings() {
 
       {isManager && (
         <>
+      <div className={CARD}>
+        <h3 className={`${TITLE} mb-1`}>Monthly Repair Revenue Goal</h3>
+        <p className={`${MUTED} mb-4`}>
+          Used by the Production Board monthly revenue progress bar. Delivered ROs are counted by delivered date; total loss is excluded.
+        </p>
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <span className="absolute left-3 top-2 text-sm font-semibold text-gray-400 dark:text-zinc-500">$</span>
+            <input
+              type="number"
+              min="1"
+              value={monthlyRepairGoal}
+              onChange={e => setMonthlyRepairGoal(e.target.value)}
+              className={`${PLAIN_INPUT} pl-7`}
+              placeholder="26000"
+            />
+          </div>
+          <button
+            onClick={handleSaveRevenueGoal}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg whitespace-nowrap"
+          >
+            Save Goal
+          </button>
+        </div>
+        {revenueSaved && <p className="text-xs text-green-600 dark:text-emerald-400 mt-1">Saved</p>}
+      </div>
+
       {/* API Key */}
       <div className={CARD}>
         <h3 className={`${TITLE} mb-1`}>Anthropic API Key</h3>
